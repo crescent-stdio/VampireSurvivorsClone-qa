@@ -37,12 +37,12 @@ namespace Vampire
                 cumulative += drop.dropChance;
                 if (rand < cumulative)
                 {
-                    QaRandomDecisionRecorder.Record("loot", index.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    QaRandomDecisionRecorder.Record<T>("loot", index);
                     loot = drop;
                     return true;
                 }
             }
-            QaRandomDecisionRecorder.Record("loot", "-1");
+            QaRandomDecisionRecorder.Record<T>("loot", -1);
             loot = null;
             return false;
         }
@@ -68,18 +68,18 @@ namespace Vampire
                 cumulative += drop.dropChance;
                 if (rand < cumulative)
                 {
-                    QaRandomDecisionRecorder.Record("loot", index.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    QaRandomDecisionRecorder.Record<T>("loot", index);
                     return drop;
                 }
             }
             // Failsafe in case of floating point precision errors or user error setting up the loot table
             if (lootTable.Length > 0)
             {
-                QaRandomDecisionRecorder.Record("loot", (lootTable.Length - 1).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                QaRandomDecisionRecorder.Record<T>("loot", lootTable.Length - 1);
                 Debug.LogError("Failed to drop loot, ensure drop chances add up to 100%.");
                 return lootTable[lootTable.Length-1];
             }
-            QaRandomDecisionRecorder.Record("loot", "-1");
+            QaRandomDecisionRecorder.Record<T>("loot", -1);
             Debug.LogError("Failed to drop loot, loot table is empty.");
             return null;
         }

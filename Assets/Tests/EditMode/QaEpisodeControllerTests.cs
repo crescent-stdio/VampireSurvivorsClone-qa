@@ -100,6 +100,13 @@ namespace Vampire.Tests.EditMode
             Assert.That(new QaEpisodeOracles().Evaluate(new QaObservation(), 1f, invalidValue, false, false), Is.EqualTo(QaOracleFailure.NonFiniteValue));
         }
 
+        [TestCase(float.NaN)]
+        [TestCase(float.PositiveInfinity)]
+        public void Oracles_reject_non_finite_unscaled_delta_time(float invalidValue)
+        {
+            Assert.That(new QaEpisodeOracles().Evaluate(new QaObservation(), 1f, 1f, false, false, invalidValue), Is.EqualTo(QaOracleFailure.NonFiniteValue));
+        }
+
         [TestCase("player-position")]
         [TestCase("player-health")]
         [TestCase("player-max-health")]

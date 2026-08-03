@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Linq;
 using NUnit.Framework;
 using UnityEngine;
 
@@ -28,7 +29,41 @@ namespace Vampire.Tests.EditMode
             Assert.That(lootTable.DropLoot(), Is.EqualTo("coin"));
 
             Assert.That(controller.RecordedEpisode.DiscreteEvents, Does.Contain("random:monster-spawn:0"));
-            Assert.That(controller.RecordedEpisode.DiscreteEvents, Does.Contain("random:loot:0"));
+            Assert.That(controller.RecordedEpisode.DiscreteEvents, Does.Contain("random:loot:System.String:0"));
+            Object.DestroyImmediate(controller.gameObject);
+        }
+
+        [Test]
+        public void Recorder_exposes_lazy_integer_and_generic_integer_apis()
+        {
+            var methods = typeof(QaRandomDecisionRecorder).GetMethods(BindingFlags.Public | BindingFlags.Static);
+
+            Assert.That(methods.Any(method =>
+                method.Name == "Record" && !method.IsGenericMethod &&
+                method.GetParameters().Select(parameter => parameter.ParameterType).SequenceEqual(new[] { typeof(string), typeof(int) })), Is.True);
+            Assert.That(methods.Any(method =>
+                method.Name == "Record" && method.IsGenericMethodDefinition &&
+                method.GetParameters().Select(parameter => parameter.ParameterType).SequenceEqual(new[] { typeof(string), typeof(int) })), Is.True);
+        }
+
+        [Test]
+        public void Real_loot_seams_include_stable_table_type_identity_for_the_same_index()
+        {
+            var controller = CreateController();
+            var stringLoot = new LootTable<string>
+            {
+                lootTable = new[] { new Loot<string> { item = "coin", dropChance = 1f } }
+            };
+            var integerLoot = new LootTable<int>
+            {
+                lootTable = new[] { new Loot<int> { item = 7, dropChance = 1f } }
+            };
+
+            Assert.That(stringLoot.DropLoot(), Is.EqualTo("coin"));
+            Assert.That(integerLoot.DropLoot(), Is.EqualTo(7));
+
+            Assert.That(controller.RecordedEpisode.DiscreteEvents, Does.Contain("random:loot:System.String:0"));
+            Assert.That(controller.RecordedEpisode.DiscreteEvents, Does.Contain("random:loot:System.Int32:0"));
             Object.DestroyImmediate(controller.gameObject);
         }
 

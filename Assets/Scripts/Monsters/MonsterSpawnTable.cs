@@ -71,11 +71,11 @@ namespace Vampire
                 cumulative += Mathf.Lerp(spawnChanceKeyframes[i-1].spawnChances[j], spawnChanceKeyframes[i].spawnChances[j], tLerp);
                 if (rand < cumulative)
                 {
-                    QaRandomDecisionRecorder.Record("monster-spawn", j.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    QaRandomDecisionRecorder.Record("monster-spawn", j);
                     return j;
                 }
             }
-            QaRandomDecisionRecorder.Record("monster-spawn", "-1");
+            QaRandomDecisionRecorder.Record("monster-spawn", -1);
             return -1;
         }
 

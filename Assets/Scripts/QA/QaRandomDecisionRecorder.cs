@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 
 namespace Vampire
 {
@@ -11,7 +12,30 @@ namespace Vampire
 
         public static void Record(string category, string stableId)
         {
-            DecisionRecorded?.Invoke("random:" + category + ":" + stableId);
+            var recorder = DecisionRecorded;
+            if (recorder == null)
+                return;
+
+            recorder("random:" + category + ":" + stableId);
+        }
+
+        public static void Record(string category, int stableId)
+        {
+            var recorder = DecisionRecorded;
+            if (recorder == null)
+                return;
+
+            recorder("random:" + category + ":" + stableId.ToString(CultureInfo.InvariantCulture));
+        }
+
+        public static void Record<T>(string category, int stableId)
+        {
+            var recorder = DecisionRecorded;
+            if (recorder == null)
+                return;
+
+            var tableType = typeof(T).FullName ?? typeof(T).Name;
+            recorder("random:" + category + ":" + tableType + ":" + stableId.ToString(CultureInfo.InvariantCulture));
         }
     }
 }
