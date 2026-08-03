@@ -76,3 +76,6 @@ crashlytics-build.properties
 
 # OSX
 .DS_Store
+
+# Local Git worktrees
+.worktrees/
