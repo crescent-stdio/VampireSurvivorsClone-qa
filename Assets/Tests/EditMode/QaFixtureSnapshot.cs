@@ -17,7 +17,8 @@ namespace Vampire.Tests.EditMode
         {
             "Assets/Blueprints/QA/QA Level 1.asset",
             "Assets/Blueprints/QA/QA Default Chest.asset",
-            "Assets/Scenes/QA/QA Gameplay.unity"
+            "Assets/Scenes/QA/QA Gameplay.unity",
+            "Assets/Blueprints/QA/QA Main Character.asset"
         };
 
         private readonly string projectRoot;

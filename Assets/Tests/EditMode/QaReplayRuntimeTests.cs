@@ -12,6 +12,7 @@ namespace Vampire.Tests.EditMode
         {
             var trace = new QaReplayTrace
             {
+                Seed = 8401,
                 Outcome = QaEpisodeOutcome.Passed,
                 DiscreteEvents = new[] { "action-ack:1:1", "phase:0", "modal:0", "terminal:Passed" },
                 Positions = new[] { Vector2.zero },
@@ -30,6 +31,7 @@ namespace Vampire.Tests.EditMode
             Assert.That(controller.ActionTrace, Has.Count.EqualTo(1));
             Assert.That(controller.ActionTrace[0].MovementX, Is.EqualTo(1f));
             Assert.That(controller.CompleteForTesting(QaEpisodeOutcome.Passed, "passed"), Is.True);
+            Assert.That(controller.TerminalResult.Seed, Is.EqualTo(8401));
             Assert.That(controller.LastReplayComparison.IsMatch, Is.True);
             Assert.That(exit.ExitCodes, Is.EqualTo(new[] { 0 }));
             Assert.That(reloader.SceneNames, Is.Empty);
@@ -54,6 +56,7 @@ namespace Vampire.Tests.EditMode
             File.WriteAllText(summaryPath, JsonUtility.ToJson(new QaEpisodeSummary
             {
                 Schema = QaArtifactWriter.SchemaVersion,
+                Seed = 8675,
                 Outcome = QaEpisodeOutcome.Passed,
                 ReplayActions = new[] { new QaActionTraceEntry(1, 1, 0.1f, new QaAction(Vector2.left)) },
                 ReplayDiscreteEvents = new[] { "terminal:Passed" },
@@ -65,10 +68,32 @@ namespace Vampire.Tests.EditMode
                 Assert.That(QaReplayTrace.TryLoad(summaryPath, out var trace, out var error), Is.True, error);
                 Assert.That(new QaReplayPolicy(trace.Actions).Decide(new QaObservation()).Movement, Is.EqualTo(Vector2.left));
                 Assert.That(trace.ToRecordedEpisode().Outcome, Is.EqualTo(QaEpisodeOutcome.Passed));
+                Assert.That(trace.Seed, Is.EqualTo(8675));
             }
             finally
             {
                 File.Delete(summaryPath);
+                Directory.Delete(artifactDirectory);
+            }
+        }
+
+        [Test]
+        public void Replay_trace_without_a_seed_is_rejected_with_an_actionable_compatibility_error()
+        {
+            var projectRoot = Directory.GetParent(Application.dataPath).FullName;
+            var artifactDirectory = Path.Combine(projectRoot, "QAArtifacts", "task7-seedless-replay-test");
+            var tracePath = Path.Combine(artifactDirectory, "trace.json");
+            Directory.CreateDirectory(artifactDirectory);
+            File.WriteAllText(tracePath, "{\"Schema\":\"qa-replay/v1\",\"Outcome\":1,\"Actions\":[]}");
+
+            try
+            {
+                Assert.That(QaReplayTrace.TryLoad(tracePath, out _, out var error), Is.False);
+                StringAssert.Contains("Seed", error);
+            }
+            finally
+            {
+                File.Delete(tracePath);
                 Directory.Delete(artifactDirectory);
             }
         }

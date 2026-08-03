@@ -19,6 +19,7 @@ namespace Vampire
         private readonly QaRewardTracker rewardTracker = new QaRewardTracker();
         private readonly ScriptedQaPolicy heuristicPolicy = new ScriptedQaPolicy();
         private bool terminalHandled;
+        private IQaGameplayController subscribedController;
 
         public override void Initialize()
         {
@@ -26,8 +27,16 @@ namespace Vampire
             if (gameplayController == null)
                 throw new System.InvalidOperationException("QaGameplayAgent requires a QaEpisodeController.");
 
+            UnsubscribeTerminal();
+            subscribedController = gameplayController;
+            subscribedController.TerminalReached += HandleTerminalReached;
             if (!(controller != null && controller.IsSmokeMode))
                 gameplayController.EnableExternalAgentControl();
+        }
+
+        private void OnDestroy()
+        {
+            UnsubscribeTerminal();
         }
 
         public void ConfigureControllerForTesting(IQaGameplayController testController)
@@ -106,6 +115,21 @@ namespace Vampire
             terminalHandled = true;
             ApplyQaReward(QaRewardTracker.TerminalReward(outcome));
             EndQaEpisode();
+        }
+
+        private void HandleTerminalReached(QaEpisodeOutcome outcome)
+        {
+            CompleteIfTerminal(outcome);
+            subscribedController.AcknowledgeTerminal();
+        }
+
+        private void UnsubscribeTerminal()
+        {
+            if (subscribedController == null)
+                return;
+
+            subscribedController.TerminalReached -= HandleTerminalReached;
+            subscribedController = null;
         }
 
         private static int CreateStateBucket(QaObservation observation)

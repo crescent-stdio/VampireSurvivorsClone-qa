@@ -23,7 +23,7 @@ namespace Vampire
 
         public QaOracleFailure Evaluate(QaObservation observation, float gameTime, float timeScale, bool knownModal, bool knownTerminal, float unscaledDeltaSeconds = 1f)
         {
-            if (!IsFinite(observation))
+            if (!IsFinite(observation) || !IsFinite(gameTime) || !IsFinite(timeScale))
                 return QaOracleFailure.NonFiniteValue;
 
             if (Mathf.Approximately(timeScale, 0f) && !knownModal && !knownTerminal)
@@ -69,6 +69,7 @@ namespace Vampire
         {
             if (observation == null || !IsFinite(observation.PlayerPosition) || !IsFinite(observation.PlayerHealth) ||
                 !IsFinite(observation.PlayerMaxHealth) || !IsFinite(observation.PlayerExperience) ||
+                !IsFinite(observation.PlayerNextExperience) ||
                 !IsFinite(observation.CollectiblePosition) || !IsFinite(observation.ChestPosition) ||
                 !IsFinite(observation.ElapsedSeconds) || !IsFinite(observation.DamageTaken))
                 return false;

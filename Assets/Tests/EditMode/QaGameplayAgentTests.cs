@@ -243,6 +243,35 @@ namespace Vampire.Tests.EditMode
             DestroyAgent(agent);
         }
 
+        [TestCase(QaEpisodeOutcome.Passed, 10f)]
+        [TestCase(QaEpisodeOutcome.PlayerDied, -2f)]
+        public void External_terminal_notifies_the_agent_once_before_the_controller_reloads(QaEpisodeOutcome outcome, float expectedReward)
+        {
+            var controllerObject = new GameObject("Integrated Terminal Controller");
+            var reloader = new OrderedReloader();
+            var controller = controllerObject.AddComponent<QaEpisodeController>();
+            controller.ConfigureForTesting(8123, null, "QA Level", "QAArtifacts", new FixedPolicy(new QaAction(Vector2.zero)), reloader);
+
+            var agentObject = new GameObject("Integrated Terminal Agent");
+            agentObject.SetActive(false);
+            var agent = agentObject.AddComponent<RecordingAgent>();
+            agent.ConfigureControllerForTesting(controller);
+            reloader.Agent = agent;
+            agent.Initialize();
+            agent.OnEpisodeBegin();
+
+            Assert.That(controller.CompleteForTesting(outcome, outcome.ToString()), Is.True);
+            Assert.That(controller.CompleteForTesting(QaEpisodeOutcome.Error, "duplicate"), Is.False);
+
+            Assert.That(agent.Rewards, Is.EqualTo(new[] { expectedReward }));
+            Assert.That(agent.EndEpisodeCalls, Is.EqualTo(1));
+            Assert.That(reloader.RewardCountAtReload, Is.EqualTo(1));
+            Assert.That(reloader.EndEpisodeCallsAtReload, Is.EqualTo(1));
+            Assert.That(reloader.ReloadCalls, Is.EqualTo(1));
+            DestroyAgent(agent);
+            UnityEngine.Object.DestroyImmediate(controllerObject);
+        }
+
         [Test]
         public void GameplayAgent_heuristic_writes_deterministic_actions_with_the_discrete_branch_offset()
         {
@@ -339,6 +368,7 @@ namespace Vampire.Tests.EditMode
 
         private sealed class RecordingController : IQaGameplayController
         {
+            public event Action<QaEpisodeOutcome> TerminalReached { add { } remove { } }
             public readonly System.Collections.Generic.List<QaAction> SubmittedActions = new System.Collections.Generic.List<QaAction>();
             public QaObservation Observation { get; set; }
             public QaEpisodeOutcome Outcome { get; set; }
@@ -347,6 +377,7 @@ namespace Vampire.Tests.EditMode
             public QaObservation CaptureAgentObservation() => Observation;
             public void EnableExternalAgentControl() { EnableExternalCalls++; }
             public bool SubmitExternalAction(QaAction action) { SubmittedActions.Add(action); return true; }
+            public bool AcknowledgeTerminal() { return true; }
         }
 
         private sealed class FixedPolicy : IQaPolicy
@@ -359,6 +390,21 @@ namespace Vampire.Tests.EditMode
         private sealed class NoOpReloader : IQaSceneReloader
         {
             public void Reload(string sceneName) { }
+        }
+
+        private sealed class OrderedReloader : IQaSceneReloader
+        {
+            public RecordingAgent Agent { get; set; }
+            public int RewardCountAtReload { get; private set; }
+            public int EndEpisodeCallsAtReload { get; private set; }
+            public int ReloadCalls { get; private set; }
+
+            public void Reload(string sceneName)
+            {
+                RewardCountAtReload = Agent.Rewards.Count;
+                EndEpisodeCallsAtReload = Agent.EndEpisodeCalls;
+                ReloadCalls++;
+            }
         }
     }
 }

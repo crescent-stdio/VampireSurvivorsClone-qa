@@ -189,6 +189,7 @@ namespace Vampire
                 cumulative += ability.DropWeight;
                 if (rand < cumulative)
                 {
+                    QaRandomDecisionRecorder.Record("ability", ability.GetType().FullName);
                     abilities.Remove(ability);
                     return ability;
                 }

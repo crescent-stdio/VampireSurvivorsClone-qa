@@ -30,6 +30,9 @@ grep -F "Python 3.8.13 is required" "$QA_TEST_ROOT/wrong-python.out" >/dev/null 
 grep -F -- "--burst-disable-compilation" "$QA_PROJECT_ROOT/scripts/qa/build-player.sh" >/dev/null || qa_fail "player build must use the Burst 1.6.6 macOS compatibility option"
 grep -F "project_mgd_vampire" "$QA_PROJECT_ROOT/scripts/qa/common.sh" >/dev/null || qa_fail "default player executable must match the built macOS product"
 grep -F 'FailureReason' "$QA_PROJECT_ROOT/scripts/qa/smoke.sh" >/dev/null || qa_fail "smoke failures must require a classification"
+if grep -F -- '-qaSeed=1234' "$QA_PROJECT_ROOT/scripts/qa/replay.sh" >/dev/null; then
+  qa_fail "replay must bootstrap from the trace seed instead of a hardcoded seed"
+fi
 
 QA_SMOKE_CONTRACT_ROOT="$QA_PROJECT_ROOT/QAArtifacts/task-7-smoke-contract"
 QA_SMOKE_CONTRACT_BIN="$QA_SMOKE_CONTRACT_ROOT/bin"
@@ -67,6 +70,14 @@ if QA_SMOKE_RUNTIME_ROOT="$QA_STUB_RUNTIME_ROOT" \
   qa_fail "a player crash without a unique summary must fail the smoke run"
 fi
 grep -F "seed 9101 produced no unique summary" "$QA_SMOKE_CONTRACT_ROOT/crash.out" >/dev/null || qa_fail "crash output must identify the seed and missing summary"
+
+if QA_SMOKE_RUNTIME_ROOT="$QA_STUB_RUNTIME_ROOT/unsupported-scale" \
+  QA_SMOKE_SEEDS="9301" \
+  QA_SMOKE_TIME_SCALE=20 \
+  "$QA_PROJECT_ROOT/scripts/qa/smoke.sh" "$QA_SMOKE_CONTRACT_BIN/crash-player" >"$QA_SMOKE_CONTRACT_ROOT/unsupported-scale.out" 2>&1; then
+  qa_fail "unsupported smoke acceleration must fail before player launch"
+fi
+grep -F "QA_SMOKE_TIME_SCALE must be between 1 and 4" "$QA_SMOKE_CONTRACT_ROOT/unsupported-scale.out" >/dev/null || qa_fail "unsupported smoke acceleration must be actionable"
 
 if [ "${QA_TEST_SKIP_WATCHDOG:-0}" != 1 ]; then
   printf '%s\n' \

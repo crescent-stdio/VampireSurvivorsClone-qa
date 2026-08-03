@@ -10,13 +10,17 @@ namespace Vampire.Tests.EditMode
         [Test]
         public void Smoke_options_require_explicit_mode_and_accept_a_bounded_time_scale()
         {
-            var options = QaSmokeOptions.Parse(new[] { "player", "-qaMode=smoke", "-qaTimeScale=10" });
+            var options = QaSmokeOptions.Parse(new[] { "player", "-qaMode=smoke", "-qaTimeScale=4" });
 
             Assert.That(options.IsRequested, Is.True);
-            Assert.That(options.TimeScale, Is.EqualTo(10f));
+            Assert.That(options.TimeScale, Is.EqualTo(4f));
             Assert.That(QaSmokeOptions.Parse(new[] { "player" }).IsRequested, Is.False);
             Assert.That(QaSmokeOptions.Parse(new[] { "player", "-qaMode=smoke", "-qaTimeScale=0" }).TimeScale, Is.EqualTo(1f));
             Assert.That(QaSmokeOptions.Parse(new[] { "player", "-qaMode=smoke", "-qaTimeScale=101" }).TimeScale, Is.EqualTo(1f));
+            Assert.That(QaSmokeOptions.Parse(new[] { "player", "-qaMode=smoke", "-qaTimeScale=4" }).IsValid, Is.True);
+            var unsupported = QaSmokeOptions.Parse(new[] { "player", "-qaMode=smoke", "-qaTimeScale=20" });
+            Assert.That(unsupported.IsValid, Is.False);
+            Assert.That(unsupported.FailureReason, Is.EqualTo("UnsupportedSmokeTimeScale"));
         }
 
         [Test]

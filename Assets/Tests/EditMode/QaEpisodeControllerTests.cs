@@ -92,6 +92,50 @@ namespace Vampire.Tests.EditMode
             Assert.That(oracles.Evaluate(observation, 1f, 1f, false, false), Is.EqualTo(QaOracleFailure.NonFiniteValue));
         }
 
+        [TestCase(float.NaN)]
+        [TestCase(float.PositiveInfinity)]
+        public void Oracles_reject_non_finite_game_time_and_time_scale(float invalidValue)
+        {
+            Assert.That(new QaEpisodeOracles().Evaluate(new QaObservation(), invalidValue, 1f, false, false), Is.EqualTo(QaOracleFailure.NonFiniteValue));
+            Assert.That(new QaEpisodeOracles().Evaluate(new QaObservation(), 1f, invalidValue, false, false), Is.EqualTo(QaOracleFailure.NonFiniteValue));
+        }
+
+        [TestCase("player-position")]
+        [TestCase("player-health")]
+        [TestCase("player-max-health")]
+        [TestCase("player-experience")]
+        [TestCase("player-next-experience")]
+        [TestCase("nearest-enemy")]
+        [TestCase("collectible-position")]
+        [TestCase("chest-position")]
+        [TestCase("elapsed-seconds")]
+        [TestCase("damage-taken")]
+        public void Oracles_reject_nan_and_infinity_for_every_float_observation_field(string field)
+        {
+            foreach (var invalidValue in new[] { float.NaN, float.PositiveInfinity })
+            {
+                var observation = ObservationWithInvalidField(field, invalidValue);
+                Assert.That(new QaEpisodeOracles().Evaluate(observation, 1f, 1f, false, false), Is.EqualTo(QaOracleFailure.NonFiniteValue), field);
+            }
+        }
+
+        [Test]
+        public void Controller_classifies_a_bounded_catch_up_overflow_instead_of_silently_drifting()
+        {
+            var controller = CreateController(new QaAction(Vector2.zero));
+
+            controller.AdvanceForTesting(1f, 0f, 1f);
+            Assert.That(controller.TerminalResult, Is.Null, "A single loading spike must be recoverable.");
+            for (var frame = 1; frame < QaEpisodeController.MaximumConsecutiveBacklogFrames; frame++)
+                controller.AdvanceForTesting(1f, frame, 1f);
+
+            Assert.That(controller.ActionTrace, Has.Count.EqualTo(QaEpisodeController.MaxCatchUpSteps * QaEpisodeController.MaximumConsecutiveBacklogFrames));
+            Assert.That(controller.TerminalResult, Is.Not.Null);
+            Assert.That(controller.TerminalResult.Outcome, Is.EqualTo(QaEpisodeOutcome.Error));
+            Assert.That(controller.TerminalResult.FailureReason, Is.EqualTo("ControlBacklogExceeded"));
+            Object.DestroyImmediate(controller.gameObject);
+        }
+
         [Test]
         public void Oracles_reject_unknown_pauses_but_allow_known_modal_and_terminal_pauses()
         {
@@ -415,6 +459,26 @@ namespace Vampire.Tests.EditMode
         private static QaRecordedEpisode RecordedEpisode(QaEpisodeOutcome outcome, string discreteEvent, Vector2 position)
         {
             return new QaRecordedEpisode(outcome, new[] { discreteEvent }, new[] { position });
+        }
+
+        private static QaObservation ObservationWithInvalidField(string field, float value)
+        {
+            var observation = new QaObservation();
+            switch (field)
+            {
+                case "player-position": observation.PlayerPosition = new Vector2(value, 0f); break;
+                case "player-health": observation.PlayerHealth = value; break;
+                case "player-max-health": observation.PlayerMaxHealth = value; break;
+                case "player-experience": observation.PlayerExperience = value; break;
+                case "player-next-experience": observation.PlayerNextExperience = value; break;
+                case "nearest-enemy": observation.NearestEnemyPositions[0] = new Vector2(value, 0f); break;
+                case "collectible-position": observation.CollectiblePosition = new Vector2(value, 0f); break;
+                case "chest-position": observation.ChestPosition = new Vector2(value, 0f); break;
+                case "elapsed-seconds": observation.ElapsedSeconds = value; break;
+                case "damage-taken": observation.DamageTaken = value; break;
+                default: throw new ArgumentOutOfRangeException(nameof(field), field, null);
+            }
+            return observation;
         }
 
         private static QaEpisodeController CreateController(QaAction action, IQaSceneReloader reloader = null, string outputDirectory = ArtifactDirectory)

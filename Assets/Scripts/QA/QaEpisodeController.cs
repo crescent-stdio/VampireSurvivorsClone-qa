@@ -13,6 +13,7 @@ namespace Vampire
     {
         public const float ControlIntervalSeconds = 0.1f;
         public const int MaxCatchUpSteps = 4;
+        public const int MaximumConsecutiveBacklogFrames = 8;
 
         [SerializeField] private int episodeSeed = 1;
         [SerializeField] private CharacterBlueprint qaCharacter;
@@ -47,10 +48,16 @@ namespace Vampire
         private int actionSequence;
         private int controlTick;
         private float pendingControlSeconds;
+        private int consecutiveBacklogFrames;
         private float elapsedUnscaledSeconds;
         private bool smokeRequested;
         private float originalTimeScale = 1f;
+        private bool terminalNotificationInProgress;
+        private bool terminalAcknowledged;
+        private bool randomDecisionSubscribed;
         private static bool invalidSeedWarningLogged;
+
+        public event Action<QaEpisodeOutcome> TerminalReached;
 
         public IReadOnlyList<QaActionTraceEntry> ActionTrace => actionTrace;
         public IReadOnlyList<QaTelemetryEntry> Telemetry => telemetry;
@@ -85,6 +92,7 @@ namespace Vampire
         private void OnDestroy()
         {
             UnsubscribeLogs();
+            UnsubscribeRandomDecisions();
             RestoreCoins();
             RestoreTimeScale();
         }
@@ -98,6 +106,7 @@ namespace Vampire
             IQaSceneReloader testSceneReloader)
         {
             RestoreCoins();
+            UnsubscribeRandomDecisions();
             episodeSeed = seed;
             qaCharacter = character;
             qaSceneName = sceneName;
@@ -116,10 +125,13 @@ namespace Vampire
             processExit = null;
             failureScreenshotCapture = null;
             smokeRequested = false;
+            terminalNotificationInProgress = false;
+            terminalAcknowledged = false;
             DuplicateTerminalCount = 0;
             actionSequence = 0;
             controlTick = 0;
             pendingControlSeconds = 0f;
+            consecutiveBacklogFrames = 0;
             elapsedUnscaledSeconds = 0f;
             actionTrace.Clear();
             telemetry.Clear();
@@ -139,6 +151,8 @@ namespace Vampire
                 throw new ArgumentNullException(nameof(trace));
 
             replayRequested = true;
+            episodeSeed = trace.Seed;
+            QaEpisodeBootstrap.Prepare(episodeSeed, qaCharacter);
             expectedReplay = trace.ToRecordedEpisode();
             policy = new QaReplayPolicy(trace.Actions);
             processExit = testProcessExit;
@@ -192,14 +206,21 @@ namespace Vampire
             return true;
         }
 
+        public bool AcknowledgeTerminal()
+        {
+            if (!terminalNotificationInProgress || terminalAcknowledged || TerminalResult == null)
+                return false;
+
+            terminalAcknowledged = true;
+            return true;
+        }
+
         private void BeginEpisode()
         {
             if (episodeStarted)
                 return;
 
-            episodeSeed = ResolveEpisodeSeed(episodeSeed);
-            QaEpisodeBootstrap.Prepare(episodeSeed, qaCharacter);
-            SnapshotCoins();
+            var arguments = Environment.GetCommandLineArgs();
             var smokeOptions = QaSmokeOptions.Parse(Environment.GetCommandLineArgs());
             smokeRequested = smokeRequested || smokeOptions.IsRequested;
             if (smokeOptions.IsRequested)
@@ -207,11 +228,12 @@ namespace Vampire
                 originalTimeScale = Time.timeScale;
                 Time.timeScale = smokeOptions.TimeScale;
             }
-            replayRequested = QaReplayTrace.IsReplayRequested(Environment.GetCommandLineArgs());
+            replayRequested = QaReplayTrace.IsReplayRequested(arguments);
             if (replayRequested && expectedReplay == null)
             {
-                if (QaReplayTrace.TryLoadFromCommandLine(Environment.GetCommandLineArgs(), out var trace, out var error))
+                if (QaReplayTrace.TryLoadFromCommandLine(arguments, out var trace, out var error))
                 {
+                    episodeSeed = trace.Seed;
                     expectedReplay = trace.ToRecordedEpisode();
                     policy = new QaReplayPolicy(trace.Actions);
                 }
@@ -220,14 +242,24 @@ namespace Vampire
                     replayLoadFailure = error;
                 }
             }
+            else
+            {
+                episodeSeed = ResolveEpisodeSeed(episodeSeed);
+            }
+            QaEpisodeBootstrap.Prepare(episodeSeed, qaCharacter);
+            SnapshotCoins();
             policy = policy ?? new ScriptedQaPolicy();
             sceneReloader = sceneReloader ?? new UnityQaSceneReloader();
             processExit = processExit ?? new UnityQaProcessExit();
             failureScreenshotCapture = failureScreenshotCapture ?? new UnityQaFailureScreenshotCapture();
             Application.logMessageReceived += HandleLogMessage;
             logSubscribed = true;
+            QaRandomDecisionRecorder.DecisionRecorded += RecordDiscreteEvent;
+            randomDecisionSubscribed = true;
             episodeStarted = true;
-            if (!string.IsNullOrEmpty(replayLoadFailure))
+            if (smokeRequested && !smokeOptions.IsValid)
+                Complete(QaEpisodeOutcome.Error, smokeOptions.FailureReason);
+            else if (!string.IsNullOrEmpty(replayLoadFailure))
                 Complete(QaEpisodeOutcome.Error, replayLoadFailure);
         }
 
@@ -269,6 +301,17 @@ namespace Vampire
                 if (ControlMode == QaControlMode.Scripted)
                     RunControlStep();
                 steps++;
+            }
+
+            if (pendingControlSeconds + 0.000001f >= ControlIntervalSeconds)
+            {
+                consecutiveBacklogFrames++;
+                if (consecutiveBacklogFrames >= MaximumConsecutiveBacklogFrames)
+                    Complete(QaEpisodeOutcome.Error, "ControlBacklogExceeded");
+            }
+            else
+            {
+                consecutiveBacklogFrames = 0;
             }
         }
 
@@ -384,9 +427,17 @@ namespace Vampire
                 FinalLevel = playerCharacter == null ? 0 : playerCharacter.CurrentLevel,
                 FailureReason = reason
             };
+            var requiresExternalAcknowledgement = ControlMode == QaControlMode.ExternalAgent && TerminalReached != null;
+            if (requiresExternalAcknowledgement)
+            {
+                terminalNotificationInProgress = true;
+                TerminalReached.Invoke(outcome);
+                terminalNotificationInProgress = false;
+            }
             telemetry.Add(new QaTelemetryEntry(controlTick, elapsedUnscaledSeconds, "terminal"));
             recorder.RecordDiscreteEvent("terminal:" + outcome);
             UnsubscribeLogs();
+            UnsubscribeRandomDecisions();
             RestoreCoins();
             WriteArtifacts();
 
@@ -407,6 +458,9 @@ namespace Vampire
                 processExit.Exit(LastReplayComparison.IsMatch ? 0 : 1);
                 return true;
             }
+
+            if (requiresExternalAcknowledgement && !terminalAcknowledged)
+                return true;
 
             if (!reloadRequested)
             {
@@ -443,6 +497,15 @@ namespace Vampire
 
             Application.logMessageReceived -= HandleLogMessage;
             logSubscribed = false;
+        }
+
+        private void UnsubscribeRandomDecisions()
+        {
+            if (!randomDecisionSubscribed)
+                return;
+
+            QaRandomDecisionRecorder.DecisionRecorded -= RecordDiscreteEvent;
+            randomDecisionSubscribed = false;
         }
 
         private void SnapshotCoins()

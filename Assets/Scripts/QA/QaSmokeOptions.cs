@@ -6,24 +6,28 @@ namespace Vampire
     public readonly struct QaSmokeOptions
     {
         public const float MaximumGameTimeSeconds = 150f;
+        public const float MaximumSupportedTimeScale = 4f;
         private const float DefaultTimeScale = 1f;
-        private const float MaximumTimeScale = 100f;
 
-        private QaSmokeOptions(bool isRequested, float timeScale)
+        private QaSmokeOptions(bool isRequested, float timeScale, string failureReason)
         {
             IsRequested = isRequested;
             TimeScale = timeScale;
+            FailureReason = failureReason;
         }
 
         public bool IsRequested { get; }
         public float TimeScale { get; }
+        public string FailureReason { get; }
+        public bool IsValid => string.IsNullOrEmpty(FailureReason);
 
         public static QaSmokeOptions Parse(string[] arguments)
         {
             var requested = false;
             var timeScale = DefaultTimeScale;
+            var failureReason = string.Empty;
             if (arguments == null)
-                return new QaSmokeOptions(false, timeScale);
+                return new QaSmokeOptions(false, timeScale, failureReason);
 
             foreach (var argument in arguments)
             {
@@ -39,11 +43,13 @@ namespace Vampire
 
                 var value = argument.Substring(prefix.Length);
                 if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) &&
-                    parsed >= DefaultTimeScale && parsed <= MaximumTimeScale)
+                    parsed >= DefaultTimeScale && parsed <= MaximumSupportedTimeScale)
                     timeScale = parsed;
+                else
+                    failureReason = "UnsupportedSmokeTimeScale";
             }
 
-            return new QaSmokeOptions(requested, timeScale);
+            return new QaSmokeOptions(requested, timeScale, failureReason);
         }
     }
 
