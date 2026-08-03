@@ -1,14 +1,13 @@
 {
-  "name": "Vampire.Runtime",
+  "name": "Vampire.CharacterSetGenerator.Editor",
   "rootNamespace": "Vampire",
   "references": [
-    "Unity.InputSystem",
     "Unity.Localization",
-    "Unity.ResourceManager",
-    "Unity.TextMeshPro",
-    "Unity.ML-Agents"
+    "Unity.Localization.Editor"
   ],
-  "includePlatforms": [],
+  "includePlatforms": [
+    "Editor"
+  ],
   "excludePlatforms": [],
   "allowUnsafeCode": false,
   "overrideReferences": false,

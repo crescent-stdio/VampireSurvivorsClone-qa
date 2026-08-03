@@ -7,7 +7,6 @@ using UnityEditor.Localization;
 using UnityEngine;
 using UnityEngine.Localization.Settings;
 using UnityEngine.Localization.Tables;
-using UnityEngine.ResourceManagement.AsyncOperations;
 
 namespace Vampire
 {
