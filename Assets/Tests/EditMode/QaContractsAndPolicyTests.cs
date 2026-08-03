@@ -7,13 +7,21 @@ namespace Vampire.Tests.EditMode
     public class QaContractsAndPolicyTests
     {
         [Test]
-        public void QaAction_normalizes_movement_to_unit_magnitude()
+        public void QaAction_clamps_movement_to_unit_circle()
         {
             var action = new QaAction(new Vector2(3f, 4f));
 
             Assert.That(action.Movement.x, Is.EqualTo(0.6f).Within(0.0001f));
             Assert.That(action.Movement.y, Is.EqualTo(0.8f).Within(0.0001f));
             Assert.That(action.AbilityChoice, Is.EqualTo(-1));
+        }
+
+        [Test]
+        public void QaAction_preserves_analog_movement_within_unit_circle()
+        {
+            var action = new QaAction(new Vector2(0.3f, 0.4f));
+
+            Assert.That(action.Movement, Is.EqualTo(new Vector2(0.3f, 0.4f)));
         }
 
         [TestCase(-2)]

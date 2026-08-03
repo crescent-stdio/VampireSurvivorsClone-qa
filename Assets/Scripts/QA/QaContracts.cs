@@ -4,6 +4,9 @@ using UnityEngine;
 [Serializable]
 public sealed class QaAction
 {
+    /// <summary>
+    /// Constrains movement to magnitude at most one while preserving analog magnitude inside the unit circle.
+    /// </summary>
     public Vector2 Movement { get; }
     public int AbilityChoice { get; }
 
