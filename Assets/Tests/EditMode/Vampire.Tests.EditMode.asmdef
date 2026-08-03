@@ -2,7 +2,8 @@
   "name": "Vampire.Tests.EditMode",
   "rootNamespace": "Vampire.Tests.EditMode",
   "references": [
-    "Vampire.Runtime"
+    "Vampire.Runtime",
+    "Unity.ML-Agents"
   ],
   "includePlatforms": [
     "Editor"

@@ -4,6 +4,7 @@ namespace Vampire
     {
         QaEpisodeOutcome CurrentOutcome { get; }
         QaObservation CaptureAgentObservation();
-        void ApplyAgentAction(QaAction action);
+        void EnableExternalAgentControl();
+        bool SubmitExternalAction(QaAction action);
     }
 }

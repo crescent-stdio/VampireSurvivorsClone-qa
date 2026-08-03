@@ -41,6 +41,7 @@ namespace Vampire
         private int controlTick;
         private float pendingControlSeconds;
         private float elapsedUnscaledSeconds;
+        private static bool invalidSeedWarningLogged;
 
         public IReadOnlyList<QaActionTraceEntry> ActionTrace => actionTrace;
         public IReadOnlyList<QaTelemetryEntry> Telemetry => telemetry;
@@ -52,6 +53,7 @@ namespace Vampire
         public int DuplicateTerminalCount { get; private set; }
         public float PendingControlSeconds => pendingControlSeconds;
         public bool IsLogSubscribed => logSubscribed;
+        public QaControlMode ControlMode { get; private set; } = QaControlMode.Scripted;
         public QaEpisodeOutcome CurrentOutcome => TerminalResult == null
             ? (levelManager == null ? QaEpisodeOutcome.InProgress : levelManager.Outcome)
             : TerminalResult.Outcome;
@@ -135,10 +137,18 @@ namespace Vampire
             return CaptureObservation();
         }
 
-        public void ApplyAgentAction(QaAction action)
+        public void EnableExternalAgentControl()
         {
-            if (action != null)
-                Apply(action);
+            ControlMode = QaControlMode.ExternalAgent;
+        }
+
+        public bool SubmitExternalAction(QaAction action)
+        {
+            if (ControlMode != QaControlMode.ExternalAgent || TerminalResult != null || action == null)
+                return false;
+
+            RecordAppliedAction(action);
+            return true;
         }
 
         private void BeginEpisode()
@@ -146,6 +156,7 @@ namespace Vampire
             if (episodeStarted)
                 return;
 
+            episodeSeed = ResolveEpisodeSeed(episodeSeed);
             QaEpisodeBootstrap.Prepare(episodeSeed, qaCharacter);
             SnapshotCoins();
             policy = policy ?? new ScriptedQaPolicy();
@@ -182,17 +193,24 @@ namespace Vampire
             while (pendingControlSeconds + 0.000001f >= ControlIntervalSeconds && steps < MaxCatchUpSteps)
             {
                 pendingControlSeconds -= ControlIntervalSeconds;
-                RunControlStep();
+                if (ControlMode == QaControlMode.Scripted)
+                    RunControlStep();
                 steps++;
             }
         }
 
         private void RunControlStep()
         {
+            var observation = CaptureObservation();
+            var action = policy.Decide(observation);
+            RecordAppliedAction(action);
+        }
+
+        private void RecordAppliedAction(QaAction action)
+        {
             controlTick++;
             LastObservation = CaptureObservation();
             recorder.RecordObservation(LastObservation);
-            var action = policy.Decide(LastObservation);
             Apply(action);
             actionSequence++;
             LastActionAcknowledgement = new QaActionAcknowledgement(actionSequence, controlTick);
@@ -201,6 +219,24 @@ namespace Vampire
             recorder.RecordDiscreteEvent("action-ack:" + actionSequence + ":" + controlTick);
             recorder.RecordDiscreteEvent("phase:" + (int)LastObservation.LevelPhase);
             recorder.RecordDiscreteEvent("modal:" + (LastObservation.IsAbilitySelectionOpen ? "1" : "0"));
+        }
+
+        private static int ResolveEpisodeSeed(int serializedSeed)
+        {
+            var arguments = Environment.GetCommandLineArgs();
+            if (QaEpisodeSeedParser.TryParseQaSeed(arguments, out var commandLineSeed))
+                return commandLineSeed;
+
+            for (var index = 0; index < arguments.Length; index++)
+            {
+                if (arguments[index] != null && arguments[index].StartsWith("-qaSeed=", StringComparison.Ordinal) && !invalidSeedWarningLogged)
+                {
+                    invalidSeedWarningLogged = true;
+                    Debug.LogWarning("Ignoring invalid -qaSeed argument and using the serialized episode seed.");
+                }
+            }
+
+            return serializedSeed;
         }
 
         private QaObservation CaptureObservation()

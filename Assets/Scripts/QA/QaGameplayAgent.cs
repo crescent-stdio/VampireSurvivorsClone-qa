@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace Vampire
 {
-    public sealed class QaGameplayAgent : Agent
+    public class QaGameplayAgent : Agent
     {
         public const string BehaviorName = "QaGameplay";
         public const int ContinuousActionCount = 2;
@@ -14,10 +14,25 @@ namespace Vampire
         public static ActionSpec ExpectedActionSpec => new ActionSpec(ContinuousActionCount, new[] { AbilityBranchSize });
 
         [SerializeField] private QaEpisodeController controller;
+        private IQaGameplayController controllerOverride;
 
         private readonly QaRewardTracker rewardTracker = new QaRewardTracker();
         private readonly ScriptedQaPolicy heuristicPolicy = new ScriptedQaPolicy();
         private bool terminalHandled;
+
+        public override void Initialize()
+        {
+            var gameplayController = GetController();
+            if (gameplayController == null)
+                throw new System.InvalidOperationException("QaGameplayAgent requires a QaEpisodeController.");
+
+            gameplayController.EnableExternalAgentControl();
+        }
+
+        public void ConfigureControllerForTesting(IQaGameplayController testController)
+        {
+            controllerOverride = testController;
+        }
 
         public override void OnEpisodeBegin()
         {
@@ -38,12 +53,12 @@ namespace Vampire
                 return;
 
             var action = QaAgentActionMapper.Map(ToArray(actions.ContinuousActions), ToArray(actions.DiscreteActions));
-            if (controller != null)
-                controller.ApplyAgentAction(action);
+            var gameplayController = RequireController();
+            gameplayController.SubmitExternalAction(action);
 
             var observation = CaptureObservation();
             AddProgressReward(observation);
-            CompleteIfTerminal(controller == null ? QaEpisodeOutcome.InProgress : controller.CurrentOutcome);
+            CompleteIfTerminal(gameplayController.CurrentOutcome);
         }
 
         public override void Heuristic(in ActionBuffers actionsOut)
@@ -61,7 +76,7 @@ namespace Vampire
 
         private QaObservation CaptureObservation()
         {
-            return controller == null ? new QaObservation() : controller.CaptureAgentObservation();
+            return RequireController().CaptureAgentObservation();
         }
 
         private void AddProgressReward(QaObservation observation)
@@ -73,7 +88,7 @@ namespace Vampire
                 observation.DamageTaken,
                 observation.ElapsedSeconds));
             if (reward != 0f)
-                AddReward(reward);
+                ApplyQaReward(reward);
         }
 
         private void CompleteIfTerminal(QaEpisodeOutcome outcome)
@@ -82,13 +97,36 @@ namespace Vampire
                 return;
 
             terminalHandled = true;
-            AddReward(QaRewardTracker.TerminalReward(outcome));
-            EndEpisode();
+            ApplyQaReward(QaRewardTracker.TerminalReward(outcome));
+            EndQaEpisode();
         }
 
         private static int CreateStateBucket(QaObservation observation)
         {
             return (int)observation.LevelPhase;
+        }
+
+        protected virtual void ApplyQaReward(float reward)
+        {
+            AddReward(reward);
+        }
+
+        protected virtual void EndQaEpisode()
+        {
+            EndEpisode();
+        }
+
+        private IQaGameplayController RequireController()
+        {
+            var gameplayController = GetController();
+            if (gameplayController == null)
+                throw new System.InvalidOperationException("QaGameplayAgent requires a QaEpisodeController.");
+            return gameplayController;
+        }
+
+        private IQaGameplayController GetController()
+        {
+            return controllerOverride ?? (IQaGameplayController)controller;
         }
 
         private static float[] ToArray(ActionSegment<float> actions)
