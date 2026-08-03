@@ -6,12 +6,24 @@ set -eu
 QA_PLAYER=${1:-$QA_DEFAULT_PLAYER}
 QA_SMOKE_SEEDS=${QA_SMOKE_SEEDS:-"8201 8202 8203 8204 8205 8206 8207 8208 8209 8210"}
 QA_SMOKE_TIME_SCALE=${QA_SMOKE_TIME_SCALE:-10}
-QA_SMOKE_RUNTIME_ROOT="$QA_PROJECT_ROOT/QAArtifacts/player/QAArtifacts"
+QA_SMOKE_WALL_TIMEOUT_SECONDS=${QA_SMOKE_WALL_TIMEOUT_SECONDS:-60}
+QA_SMOKE_TERMINATION_GRACE_SECONDS=${QA_SMOKE_TERMINATION_GRACE_SECONDS:-5}
+QA_SMOKE_RUNTIME_ROOT=${QA_SMOKE_RUNTIME_ROOT:-"$QA_PROJECT_ROOT/QAArtifacts/player/QAArtifacts"}
 qa_require_executable "$QA_PLAYER"
 mkdir -p "$QA_PROJECT_ROOT/QAArtifacts/logs" "$QA_PROJECT_ROOT/QAArtifacts/screenshots"
 
+case "$QA_SMOKE_WALL_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) qa_fail "QA_SMOKE_WALL_TIMEOUT_SECONDS must be a positive integer." ;;
+esac
+case "$QA_SMOKE_TERMINATION_GRACE_SECONDS" in
+  ''|*[!0-9]*) qa_fail "QA_SMOKE_TERMINATION_GRACE_SECONDS must be a positive integer." ;;
+esac
+[ "$QA_SMOKE_WALL_TIMEOUT_SECONDS" -gt 0 ] || qa_fail "QA_SMOKE_WALL_TIMEOUT_SECONDS must be a positive integer."
+[ "$QA_SMOKE_TERMINATION_GRACE_SECONDS" -gt 0 ] || qa_fail "QA_SMOKE_TERMINATION_GRACE_SECONDS must be a positive integer."
+
 QA_SMOKE_TOTAL=0
 QA_SMOKE_FAILURES=0
+QA_SMOKE_INFRA_FAILURES=0
 QA_SMOKE_FINAL_BOSS_REACHES=0
 
 for QA_SMOKE_SEED in $QA_SMOKE_SEEDS; do
@@ -22,16 +34,58 @@ for QA_SMOKE_SEED in $QA_SMOKE_SEEDS; do
   fi
 
   QA_SMOKE_LOG="$QA_PROJECT_ROOT/QAArtifacts/logs/smoke-seed-$QA_SMOKE_PADDED_SEED.log"
+  QA_SMOKE_WATCHDOG_MARKER="$QA_PROJECT_ROOT/QAArtifacts/logs/smoke-seed-$QA_SMOKE_PADDED_SEED.watchdog"
+  rm -f "$QA_SMOKE_WATCHDOG_MARKER"
+  "$QA_PLAYER" -batchmode -qaMode=smoke -qaSeed="$QA_SMOKE_SEED" -qaTimeScale="$QA_SMOKE_TIME_SCALE" -logFile "$QA_SMOKE_LOG" &
+  QA_SMOKE_PLAYER_PID=$!
+  (
+    QA_WATCHDOG_ELAPSED=0
+    while kill -0 "$QA_SMOKE_PLAYER_PID" 2>/dev/null; do
+      if [ "$QA_WATCHDOG_ELAPSED" -ge "$QA_SMOKE_WALL_TIMEOUT_SECONDS" ]; then
+        printf '%s\n' "WallClockTimeout" >"$QA_SMOKE_WATCHDOG_MARKER"
+        kill -TERM "$QA_SMOKE_PLAYER_PID" 2>/dev/null || true
+        QA_WATCHDOG_GRACE_ELAPSED=0
+        while kill -0 "$QA_SMOKE_PLAYER_PID" 2>/dev/null &&
+          [ "$QA_WATCHDOG_GRACE_ELAPSED" -lt "$QA_SMOKE_TERMINATION_GRACE_SECONDS" ]; do
+          sleep 1
+          QA_WATCHDOG_GRACE_ELAPSED=$((QA_WATCHDOG_GRACE_ELAPSED + 1))
+        done
+        if kill -0 "$QA_SMOKE_PLAYER_PID" 2>/dev/null; then
+          kill -KILL "$QA_SMOKE_PLAYER_PID" 2>/dev/null || true
+        fi
+        exit 0
+      fi
+      sleep 1
+      QA_WATCHDOG_ELAPSED=$((QA_WATCHDOG_ELAPSED + 1))
+    done
+  ) &
+  QA_SMOKE_WATCHDOG_PID=$!
+
   set +e
-  "$QA_PLAYER" -batchmode -qaMode=smoke -qaSeed="$QA_SMOKE_SEED" -qaTimeScale="$QA_SMOKE_TIME_SCALE" -logFile "$QA_SMOKE_LOG"
+  wait "$QA_SMOKE_PLAYER_PID"
   QA_SMOKE_EXIT=$?
   set -e
+  kill "$QA_SMOKE_WATCHDOG_PID" 2>/dev/null || true
+  wait "$QA_SMOKE_WATCHDOG_PID" 2>/dev/null || true
   QA_SMOKE_TOTAL=$((QA_SMOKE_TOTAL + 1))
+  QA_SMOKE_WATCHDOG_TRIGGERED=0
+
+  if [ -f "$QA_SMOKE_WATCHDOG_MARKER" ]; then
+    QA_SMOKE_WATCHDOG_TRIGGERED=1
+    QA_SMOKE_INFRA_FAILURES=$((QA_SMOKE_INFRA_FAILURES + 1))
+    QA_SMOKE_FAILURES=$((QA_SMOKE_FAILURES + 1))
+    QA_SMOKE_WATCHDOG_MESSAGE="qa: seed $QA_SMOKE_SEED classified as WallClockTimeout; see $QA_SMOKE_LOG"
+    printf '%s\n' "$QA_SMOKE_WATCHDOG_MESSAGE" >>"$QA_SMOKE_LOG"
+    printf '%s\n' "$QA_SMOKE_WATCHDOG_MESSAGE" >&2
+  fi
 
   set -- "$QA_SMOKE_RUNTIME_ROOT"/episode-"$QA_SMOKE_PADDED_SEED"-*/summary.json
   if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-    printf '%s\n' "qa: seed $QA_SMOKE_SEED produced no unique summary; see $QA_SMOKE_LOG" >&2
-    QA_SMOKE_FAILURES=$((QA_SMOKE_FAILURES + 1))
+    printf '%s\n' "qa: seed $QA_SMOKE_SEED produced no unique summary or complete failure artifacts; see $QA_SMOKE_LOG" >&2
+    if [ "$QA_SMOKE_WATCHDOG_TRIGGERED" -eq 0 ]; then
+      QA_SMOKE_INFRA_FAILURES=$((QA_SMOKE_INFRA_FAILURES + 1))
+      QA_SMOKE_FAILURES=$((QA_SMOKE_FAILURES + 1))
+    fi
     continue
   fi
 
@@ -54,6 +108,7 @@ for QA_SMOKE_SEED in $QA_SMOKE_SEEDS; do
   fi
 done
 
-printf '%s\n' "Smoke episodes: $QA_SMOKE_TOTAL; failures: $QA_SMOKE_FAILURES; final-boss reaches: $QA_SMOKE_FINAL_BOSS_REACHES"
+printf '%s\n' "Smoke episodes: $QA_SMOKE_TOTAL; failures: $QA_SMOKE_FAILURES; infrastructure failures: $QA_SMOKE_INFRA_FAILURES; final-boss reaches: $QA_SMOKE_FINAL_BOSS_REACHES"
 [ "$QA_SMOKE_TOTAL" -eq 10 ] || qa_fail "Exactly ten smoke seeds are required."
+[ "$QA_SMOKE_INFRA_FAILURES" -eq 0 ] || qa_fail "$QA_SMOKE_INFRA_FAILURES smoke infrastructure failure(s) violated the artifact contract."
 [ "$QA_SMOKE_FINAL_BOSS_REACHES" -ge 1 ] || qa_fail "No smoke episode reached the final-boss phase."
