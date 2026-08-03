@@ -153,7 +153,7 @@ namespace Vampire.Tests.EditMode
         [Test]
         public void Artifact_writer_emits_valid_json_lines_and_a_summary()
         {
-            var writer = new QaArtifactWriter(ArtifactDirectory + "/round2-success-" + Guid.NewGuid().ToString("N"), 7);
+            var writer = new QaArtifactWriter(ArtifactDirectory + "/round2-success-" + Guid.NewGuid().ToString("N"), 7, null, "schema");
             var result = new QaEpisodeResult { Seed = 7, Outcome = QaEpisodeOutcome.Passed, ElapsedSeconds = 1.2f };
             var trace = new List<QaActionTraceEntry>
             {
@@ -171,7 +171,7 @@ namespace Vampire.Tests.EditMode
             Assert.That(JsonUtility.FromJson<QaArtifactLine>(File.ReadAllLines(paths.ActionTracePath)[0]).Schema, Is.EqualTo(QaArtifactWriter.SchemaVersion));
             Assert.That(JsonUtility.FromJson<QaArtifactLine>(File.ReadAllLines(paths.TelemetryPath)[0]).Tick, Is.EqualTo(1));
             Assert.That(JsonUtility.FromJson<QaEpisodeSummary>(File.ReadAllText(paths.SummaryPath)).Outcome, Is.EqualTo(QaEpisodeOutcome.Passed));
-            Assert.That(Path.GetFileName(Path.GetDirectoryName(paths.ActionTracePath)), Is.EqualTo("episode-00000007"));
+            Assert.That(Path.GetFileName(Path.GetDirectoryName(paths.ActionTracePath)), Is.EqualTo("episode-00000007-schema"));
             Assert.That(Directory.GetFiles(Path.GetDirectoryName(paths.ActionTracePath)), Has.Length.EqualTo(3));
         }
 
@@ -332,7 +332,7 @@ namespace Vampire.Tests.EditMode
         public void Artifact_writer_rejects_an_existing_episode_directory_before_writing_or_overwriting()
         {
             var fileSystem = new StagingArtifactFileSystem { FinalDirectoryAlreadyExists = true };
-            var writer = new QaArtifactWriter("tests/round2-collision", 23, fileSystem);
+            var writer = new QaArtifactWriter("tests/round2-collision", 23, fileSystem, "existing-run");
 
             var write = writer.Write(
                 new QaEpisodeResult { Seed = 23, Outcome = QaEpisodeOutcome.Error },
@@ -346,16 +346,82 @@ namespace Vampire.Tests.EditMode
             Assert.That(fileSystem.PublishedFileCount, Is.Zero);
         }
 
+        [Test]
+        public void Artifact_writer_publishes_five_same_seed_runs_to_distinct_default_episode_directories()
+        {
+            var fileSystem = new StagingArtifactFileSystem();
+            var finalDirectories = new List<string>();
+            for (var run = 0; run < 5; run++)
+            {
+                var write = new QaArtifactWriter("tests/round3-default-runs", 31, fileSystem).Write(
+                    new QaEpisodeResult { Seed = 31, Outcome = QaEpisodeOutcome.Passed },
+                    new List<QaActionTraceEntry>(),
+                    new List<QaTelemetryEntry>(),
+                    new QaRecordedEpisode(QaEpisodeOutcome.Passed, new string[0], new Vector2[0]));
+
+                Assert.That(write.Success, Is.True, write.FailureReason);
+                Assert.That(fileSystem.PublishedFileCount, Is.EqualTo(3));
+                finalDirectories.Add(write.Paths.EpisodeDirectory);
+            }
+
+            Assert.That(new HashSet<string>(finalDirectories), Has.Count.EqualTo(5));
+        }
+
+        [Test]
+        public void Artifact_writer_rejects_a_reused_explicit_episode_id_without_overwriting()
+        {
+            var fileSystem = new StagingArtifactFileSystem();
+            var first = new QaArtifactWriter("tests/round3-explicit", 32, fileSystem, "run-a");
+            var second = new QaArtifactWriter("tests/round3-explicit", 32, fileSystem, "run-a");
+            var result = new QaEpisodeResult { Seed = 32, Outcome = QaEpisodeOutcome.Passed };
+            var recorded = new QaRecordedEpisode(QaEpisodeOutcome.Passed, new string[0], new Vector2[0]);
+
+            Assert.That(first.Write(result, new List<QaActionTraceEntry>(), new List<QaTelemetryEntry>(), recorded).Success, Is.True);
+            var duplicate = second.Write(result, new List<QaActionTraceEntry>(), new List<QaTelemetryEntry>(), recorded);
+
+            Assert.That(duplicate.Success, Is.False);
+            Assert.That(fileSystem.MoveDirectoryCalls, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void Artifact_writer_rejects_unsafe_explicit_episode_ids()
+        {
+            var write = new QaArtifactWriter("tests/round3-id-validation", 33, new StagingArtifactFileSystem(), "bad/../run").Write(
+                new QaEpisodeResult { Seed = 33, Outcome = QaEpisodeOutcome.Error },
+                new List<QaActionTraceEntry>(),
+                new List<QaTelemetryEntry>(),
+                new QaRecordedEpisode(QaEpisodeOutcome.Error, new string[0], new Vector2[0]));
+
+            Assert.That(write.Success, Is.False);
+        }
+
+        [Test]
+        public void Controller_records_five_same_seed_episodes_without_artifact_collisions()
+        {
+            var outputDirectory = ArtifactDirectory + "/round3-controller-" + Guid.NewGuid().ToString("N");
+            var episodeDirectories = new List<string>();
+            for (var run = 0; run < 5; run++)
+            {
+                var controller = CreateController(new QaAction(Vector2.zero), null, outputDirectory);
+                Assert.That(controller.CompleteForTesting(QaEpisodeOutcome.Passed, "passed"), Is.True);
+                Assert.That(controller.LastArtifactWrite.Success, Is.True, controller.LastArtifactWrite.FailureReason);
+                episodeDirectories.Add(controller.LastArtifactWrite.Paths.EpisodeDirectory);
+                Object.DestroyImmediate(controller.gameObject);
+            }
+
+            Assert.That(new HashSet<string>(episodeDirectories), Has.Count.EqualTo(5));
+        }
+
         private static QaRecordedEpisode RecordedEpisode(QaEpisodeOutcome outcome, string discreteEvent, Vector2 position)
         {
             return new QaRecordedEpisode(outcome, new[] { discreteEvent }, new[] { position });
         }
 
-        private static QaEpisodeController CreateController(QaAction action, IQaSceneReloader reloader = null)
+        private static QaEpisodeController CreateController(QaAction action, IQaSceneReloader reloader = null, string outputDirectory = ArtifactDirectory)
         {
             var gameObject = new GameObject("QA Episode Controller");
             var controller = gameObject.AddComponent<QaEpisodeController>();
-            controller.ConfigureForTesting(123, null, "QA Level", ArtifactDirectory, new FixedPolicy(action), reloader ?? new RecordingSceneReloader());
+            controller.ConfigureForTesting(123, null, "QA Level", outputDirectory, new FixedPolicy(action), reloader ?? new RecordingSceneReloader());
             return controller;
         }
 
@@ -393,7 +459,7 @@ namespace Vampire.Tests.EditMode
             public int MoveDirectoryCalls { get; private set; }
             public int DeleteDirectoryCalls { get; private set; }
 
-            public bool DirectoryExists(string path) { return FinalDirectoryAlreadyExists; }
+            public bool DirectoryExists(string path) { return FinalDirectoryAlreadyExists || PublishedDirectories.Contains(path); }
             public void CreateDirectory(string path) { CreateDirectoryCalls++; }
             public void WriteAllText(string path, string contents)
             {
@@ -411,8 +477,10 @@ namespace Vampire.Tests.EditMode
                 if (FinalDirectoryAlreadyExists) throw new IOException("collision");
                 MoveDirectoryCalls++;
                 PublishedFileCount = 3;
+                PublishedDirectories.Add(destinationPath);
             }
             public void DeleteDirectory(string path) { DeleteDirectoryCalls++; }
+            public List<string> PublishedDirectories { get; } = new List<string>();
         }
     }
 }

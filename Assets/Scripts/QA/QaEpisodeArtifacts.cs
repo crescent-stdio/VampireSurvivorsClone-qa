@@ -144,15 +144,19 @@ namespace Vampire
 
         private readonly string directory;
         private readonly int seed;
+        private readonly string episodeId;
         private readonly IQaArtifactFileSystem fileSystem;
         private readonly string invalidDirectoryReason;
+        private readonly string invalidEpisodeIdReason;
 
-        public QaArtifactWriter(string directory, int seed, IQaArtifactFileSystem fileSystem = null)
+        public QaArtifactWriter(string directory, int seed, IQaArtifactFileSystem fileSystem = null, string episodeId = null)
         {
             this.seed = seed;
             this.fileSystem = fileSystem ?? new SystemQaArtifactFileSystem();
             if (!TryNormalizeDirectory(directory, out this.directory))
                 invalidDirectoryReason = "Artifact directory must be a relative path inside the launch directory.";
+            if (!TryNormalizeEpisodeId(episodeId, out this.episodeId))
+                invalidEpisodeIdReason = "Episode ID must be a filesystem-safe path segment.";
         }
 
         public QaArtifactWriteResult Write(
@@ -163,10 +167,12 @@ namespace Vampire
         {
             if (invalidDirectoryReason != null)
                 return QaArtifactWriteResult.Failed(invalidDirectoryReason);
+            if (invalidEpisodeIdReason != null)
+                return QaArtifactWriteResult.Failed(invalidEpisodeIdReason);
 
             try
             {
-                var episodeName = "episode-" + seed.ToString("D8");
+                var episodeName = "episode-" + seed.ToString("D8") + "-" + episodeId;
                 var finalDirectory = Path.Combine(directory, episodeName);
                 if (fileSystem.DirectoryExists(finalDirectory))
                     return QaArtifactWriteResult.Failed("Episode artifact directory already exists.");
@@ -259,6 +265,27 @@ namespace Vampire
             }
 
             normalized = safeSegments.Count == 0 ? DefaultDirectory : string.Join("/", safeSegments.ToArray());
+            return true;
+        }
+
+        private static bool TryNormalizeEpisodeId(string candidate, out string normalized)
+        {
+            if (string.IsNullOrWhiteSpace(candidate))
+            {
+                normalized = Guid.NewGuid().ToString("N");
+                return true;
+            }
+
+            foreach (var character in candidate)
+            {
+                if (!char.IsLetterOrDigit(character) && character != '-' && character != '_')
+                {
+                    normalized = null;
+                    return false;
+                }
+            }
+
+            normalized = candidate;
             return true;
         }
     }
