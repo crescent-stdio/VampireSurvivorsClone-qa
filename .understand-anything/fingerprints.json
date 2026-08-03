@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
-  "gitCommitHash": "408b6c91e69935b780f015150a2b5775bffff458",
-  "generatedAt": "2026-08-03T15:13:45.118Z",
+  "gitCommitHash": "03e2f9f2ae4289beef7be9b56d4a7fc7602a5d2e",
+  "generatedAt": "2026-08-03T16:21:08.655Z",
   "files": {
     ".gitattributes": {
       "filePath": ".gitattributes",
@@ -15,22 +15,22 @@
     },
     ".superpowers/sdd/2026-08-03-ai-qa-poc/artifacts/task-7/verification.md": {
       "filePath": ".superpowers/sdd/2026-08-03-ai-qa-poc/artifacts/task-7/verification.md",
-      "contentHash": "a672d968662a4cf299ba210ac62acac3b2424fd994f32e6074f80f76f12153b5",
+      "contentHash": "296a1e35ad96e27e07b49093820cd38fabac82007db6075e48198b3d1d4f9d13",
       "functions": [],
       "classes": [],
       "imports": [],
       "exports": [],
-      "totalLines": 61,
+      "totalLines": 78,
       "hasStructuralAnalysis": true
     },
     ".superpowers/sdd/2026-08-03-ai-qa-poc/progress.md": {
       "filePath": ".superpowers/sdd/2026-08-03-ai-qa-poc/progress.md",
-      "contentHash": "f7bb3ff6d9f030a7c8b6c1677de0179ee3e18a5e64c589ce0793420c77b20244",
+      "contentHash": "81e9966c53f265c098d80cda191b2065781eef9ba51423e3258ffc19a9fc41f3",
       "functions": [],
       "classes": [],
       "imports": [],
       "exports": [],
-      "totalLines": 10,
+      "totalLines": 11,
       "hasStructuralAnalysis": true
     },
     ".superpowers/sdd/2026-08-03-ai-qa-poc/task-1-report.md": {
@@ -5625,7 +5625,7 @@
     },
     "Assets/Scripts/Character/Abilities/AbilityManager.cs": {
       "filePath": "Assets/Scripts/Character/Abilities/AbilityManager.cs",
-      "contentHash": "74dd304937743c5706f690778319ad3a774c0ed1474444398b293207db2653ec",
+      "contentHash": "2f905e3f9bdd37a1c9565259a8e391e470172a3a7be2688bef1d7489d83e0f36",
       "functions": [
         {
           "name": "Init",
@@ -5704,7 +5704,7 @@
           ],
           "returnType": "Ability",
           "exported": false,
-          "lineCount": 16
+          "lineCount": 17
         },
         {
           "name": "OwnedChance",
@@ -5772,7 +5772,7 @@
             "RotationSpeedUpgradeablesCount"
           ],
           "exported": true,
-          "lineCount": 257
+          "lineCount": 258
         }
       ],
       "imports": [
@@ -5828,7 +5828,7 @@
         "HasAvailableAbilities",
         "AbilityManager"
       ],
-      "totalLines": 266,
+      "totalLines": 267,
       "hasStructuralAnalysis": true
     },
     "Assets/Scripts/Character/Abilities/AbilityManager.cs.meta": {
@@ -13702,7 +13702,7 @@
     },
     "Assets/Scripts/Monsters/MonsterSpawnTable.cs": {
       "filePath": "Assets/Scripts/Monsters/MonsterSpawnTable.cs",
-      "contentHash": "c815a063488d6e10f2584e3e43633c7cdafeb05af5924e51c9d4b6cef60245cd",
+      "contentHash": "e4a7cf0c95bb0c663f705e794257717bc4aad7af2852076e4247b583dc3fcb17",
       "functions": [
         {
           "name": "GetSpawnRate",
@@ -13739,7 +13739,7 @@
           ],
           "returnType": "int",
           "exported": true,
-          "lineCount": 13
+          "lineCount": 17
         },
         {
           "name": "GetHPBuff",
@@ -13781,7 +13781,7 @@
             "hpMultiplierKeyframes"
           ],
           "exported": true,
-          "lineCount": 105
+          "lineCount": 109
         }
       ],
       "imports": [
@@ -13801,7 +13801,7 @@
         "SelectMonster",
         "MonsterSpawnTable"
       ],
-      "totalLines": 110,
+      "totalLines": 115,
       "hasStructuralAnalysis": true
     },
     "Assets/Scripts/Monsters/MonsterSpawnTable.cs.meta": {
@@ -14372,7 +14372,7 @@
     },
     "Assets/Scripts/QA/IQaGameplayController.cs": {
       "filePath": "Assets/Scripts/QA/IQaGameplayController.cs",
-      "contentHash": "1d7a65ca5920b6bde9f5b2d3b0f6d4c7f7bba0254305becc68f75780c3774117",
+      "contentHash": "9bfdf2e571ff9028c76eebb3b811b2282f934e2c35d02d3eeb6a7fbbf8edd613",
       "functions": [],
       "classes": [
         {
@@ -14380,20 +14380,28 @@
           "methods": [
             "CaptureAgentObservation",
             "EnableExternalAgentControl",
-            "SubmitExternalAction"
+            "SubmitExternalAction",
+            "AcknowledgeTerminal"
           ],
           "properties": [
             "CurrentOutcome"
           ],
           "exported": true,
-          "lineCount": 7
+          "lineCount": 9
         }
       ],
-      "imports": [],
+      "imports": [
+        {
+          "source": "System",
+          "specifiers": [
+            "System"
+          ]
+        }
+      ],
       "exports": [
         "IQaGameplayController"
       ],
-      "totalLines": 11,
+      "totalLines": 15,
       "hasStructuralAnalysis": true
     },
     "Assets/Scripts/QA/IQaGameplayController.cs.meta": {
@@ -15131,7 +15139,7 @@
     },
     "Assets/Scripts/QA/QaEpisodeController.cs": {
       "filePath": "Assets/Scripts/QA/QaEpisodeController.cs",
-      "contentHash": "1ff67b4d597990454005c9ca7d50b48ed92dc40d245f25c45ebb944b102bdbe8",
+      "contentHash": "6a8e82e885ae637338b0b21426fa80c41df28c485401b8d9bb8fc2b9d39d34cc",
       "functions": [
         {
           "name": "Awake",
@@ -15152,7 +15160,7 @@
           "params": [],
           "returnType": "void",
           "exported": false,
-          "lineCount": 6
+          "lineCount": 7
         },
         {
           "name": "ConfigureForTesting",
@@ -15166,7 +15174,7 @@
           ],
           "returnType": "void",
           "exported": true,
-          "lineCount": 38
+          "lineCount": 42
         },
         {
           "name": "SetArtifactWriterForTesting",
@@ -15185,7 +15193,7 @@
           ],
           "returnType": "void",
           "exported": true,
-          "lineCount": 10
+          "lineCount": 12
         },
         {
           "name": "ConfigureSmokeForTesting",
@@ -15260,11 +15268,18 @@
           "lineCount": 8
         },
         {
+          "name": "AcknowledgeTerminal",
+          "params": [],
+          "returnType": "bool",
+          "exported": true,
+          "lineCount": 8
+        },
+        {
           "name": "BeginEpisode",
           "params": [],
           "returnType": "void",
           "exported": false,
-          "lineCount": 38
+          "lineCount": 47
         },
         {
           "name": "Advance",
@@ -15275,7 +15290,7 @@
           ],
           "returnType": "void",
           "exported": false,
-          "lineCount": 40
+          "lineCount": 51
         },
         {
           "name": "RunControlStep",
@@ -15326,7 +15341,7 @@
           ],
           "returnType": "bool",
           "exported": false,
-          "lineCount": 53
+          "lineCount": 64
         },
         {
           "name": "WriteArtifacts",
@@ -15348,6 +15363,13 @@
         },
         {
           "name": "UnsubscribeLogs",
+          "params": [],
+          "returnType": "void",
+          "exported": false,
+          "lineCount": 8
+        },
+        {
+          "name": "UnsubscribeRandomDecisions",
           "params": [],
           "returnType": "void",
           "exported": false,
@@ -15430,6 +15452,7 @@
             "CaptureAgentObservation",
             "EnableExternalAgentControl",
             "SubmitExternalAction",
+            "AcknowledgeTerminal",
             "BeginEpisode",
             "Advance",
             "RunControlStep",
@@ -15441,6 +15464,7 @@
             "WriteArtifacts",
             "HandleLogMessage",
             "UnsubscribeLogs",
+            "UnsubscribeRandomDecisions",
             "SnapshotCoins",
             "RestoreCoins",
             "RestoreTimeScale"
@@ -15448,6 +15472,7 @@
           "properties": [
             "ControlIntervalSeconds",
             "MaxCatchUpSteps",
+            "MaximumConsecutiveBacklogFrames",
             "episodeSeed",
             "qaCharacter",
             "qaSceneName",
@@ -15480,9 +15505,13 @@
             "actionSequence",
             "controlTick",
             "pendingControlSeconds",
+            "consecutiveBacklogFrames",
             "elapsedUnscaledSeconds",
             "smokeRequested",
             "originalTimeScale",
+            "terminalNotificationInProgress",
+            "terminalAcknowledged",
+            "randomDecisionSubscribed",
             "invalidSeedWarningLogged",
             "ActionTrace",
             "Telemetry",
@@ -15500,7 +15529,7 @@
             "CurrentOutcome"
           ],
           "exported": true,
-          "lineCount": 464
+          "lineCount": 527
         },
         {
           "name": "QaEpisodeBootstrap",
@@ -15595,6 +15624,7 @@
       "exports": [
         "ControlIntervalSeconds",
         "MaxCatchUpSteps",
+        "MaximumConsecutiveBacklogFrames",
         "ActionTrace",
         "Telemetry",
         "LastActionAcknowledgement",
@@ -15620,6 +15650,7 @@
         "CaptureAgentObservation",
         "EnableExternalAgentControl",
         "SubmitExternalAction",
+        "AcknowledgeTerminal",
         "QaEpisodeController",
         "Prepare",
         "QaEpisodeBootstrap",
@@ -15633,7 +15664,7 @@
         "Reload",
         "UnityQaSceneReloader"
       ],
-      "totalLines": 565,
+      "totalLines": 628,
       "hasStructuralAnalysis": true
     },
     "Assets/Scripts/QA/QaEpisodeController.cs.meta": {
@@ -15648,7 +15679,7 @@
     },
     "Assets/Scripts/QA/QaEpisodeOracles.cs": {
       "filePath": "Assets/Scripts/QA/QaEpisodeOracles.cs",
-      "contentHash": "f653b12d6ce577671fd0842e50f266992ffa338b9e6e956e3328133736c54f9b",
+      "contentHash": "a30636a3437d1f3a59fbd26dd603f1d90745e9ec184fad9cc211f13510ee3dba",
       "functions": [
         {
           "name": "Evaluate",
@@ -15678,7 +15709,7 @@
           ],
           "returnType": "bool",
           "exported": false,
-          "lineCount": 13
+          "lineCount": 14
         },
         {
           "name": "IsFinite",
@@ -15718,7 +15749,7 @@
             "modalSeconds"
           ],
           "exported": true,
-          "lineCount": 78
+          "lineCount": 79
         }
       ],
       "imports": [
@@ -15736,7 +15767,7 @@
         "Reset",
         "QaEpisodeOracles"
       ],
-      "totalLines": 93,
+      "totalLines": 94,
       "hasStructuralAnalysis": true
     },
     "Assets/Scripts/QA/QaEpisodeOracles.cs.meta": {
@@ -15751,7 +15782,7 @@
     },
     "Assets/Scripts/QA/QaEpisodeReplay.cs": {
       "filePath": "Assets/Scripts/QA/QaEpisodeReplay.cs",
-      "contentHash": "4e1c53c796813d433a0170023147b9bdb3d36b8dffe4aaa4c2053d275d16954f",
+      "contentHash": "4ae89750fde43ed35fbc2b20eed21ebb0402f7c2c62785dfd81f455a750ee0f9",
       "functions": [
         {
           "name": "RecordObservation",
@@ -15833,7 +15864,7 @@
           ],
           "returnType": "bool",
           "exported": true,
-          "lineCount": 42
+          "lineCount": 48
         },
         {
           "name": "QaReplayPolicy",
@@ -15921,13 +15952,14 @@
           "properties": [
             "SchemaVersion",
             "Schema",
+            "Seed",
             "Outcome",
             "Actions",
             "DiscreteEvents",
             "Positions"
           ],
           "exported": true,
-          "lineCount": 90
+          "lineCount": 97
         },
         {
           "name": "QaReplayPolicy",
@@ -16006,6 +16038,7 @@
         "QaRecordedEpisode",
         "SchemaVersion",
         "Schema",
+        "Seed",
         "Outcome",
         "Actions",
         "DiscreteEvents",
@@ -16026,7 +16059,7 @@
         "Compare",
         "QaReplayComparator"
       ],
-      "totalLines": 215,
+      "totalLines": 222,
       "hasStructuralAnalysis": true
     },
     "Assets/Scripts/QA/QaEpisodeReplay.cs.meta": {
@@ -16092,14 +16125,21 @@
     },
     "Assets/Scripts/QA/QaGameplayAgent.cs": {
       "filePath": "Assets/Scripts/QA/QaGameplayAgent.cs",
-      "contentHash": "8b108bfc48a8610a215280161974453211b05f3f1e355d1f4c26bb714c009cba",
+      "contentHash": "ef8a99d8ae6fd387936799239df7778cf229b5f54d550298a51cdc418ec43307",
       "functions": [
         {
           "name": "Initialize",
           "params": [],
           "returnType": "void",
           "exported": true,
-          "lineCount": 9
+          "lineCount": 12
+        },
+        {
+          "name": "OnDestroy",
+          "params": [],
+          "returnType": "void",
+          "exported": false,
+          "lineCount": 4
         },
         {
           "name": "ConfigureControllerForTesting",
@@ -16170,6 +16210,22 @@
           "lineCount": 9
         },
         {
+          "name": "HandleTerminalReached",
+          "params": [
+            "outcome"
+          ],
+          "returnType": "void",
+          "exported": false,
+          "lineCount": 5
+        },
+        {
+          "name": "UnsubscribeTerminal",
+          "params": [],
+          "returnType": "void",
+          "exported": false,
+          "lineCount": 8
+        },
+        {
           "name": "CreateStateBucket",
           "params": [
             "observation"
@@ -16232,6 +16288,7 @@
           "name": "QaGameplayAgent",
           "methods": [
             "Initialize",
+            "OnDestroy",
             "ConfigureControllerForTesting",
             "OnEpisodeBegin",
             "CollectObservations",
@@ -16240,6 +16297,8 @@
             "CaptureObservation",
             "AddProgressReward",
             "CompleteIfTerminal",
+            "HandleTerminalReached",
+            "UnsubscribeTerminal",
             "CreateStateBucket",
             "ApplyQaReward",
             "EndQaEpisode",
@@ -16258,10 +16317,11 @@
             "controllerOverride",
             "rewardTracker",
             "heuristicPolicy",
-            "terminalHandled"
+            "terminalHandled",
+            "subscribedController"
           ],
           "exported": true,
-          "lineCount": 145
+          "lineCount": 169
         }
       ],
       "imports": [
@@ -16304,7 +16364,7 @@
         "Heuristic",
         "QaGameplayAgent"
       ],
-      "totalLines": 154,
+      "totalLines": 178,
       "hasStructuralAnalysis": true
     },
     "Assets/Scripts/QA/QaGameplayAgent.cs.meta": {
@@ -16537,6 +16597,87 @@
       "totalLines": 12,
       "hasStructuralAnalysis": false
     },
+    "Assets/Scripts/QA/QaRandomDecisionRecorder.cs": {
+      "filePath": "Assets/Scripts/QA/QaRandomDecisionRecorder.cs",
+      "contentHash": "ae1577d0ed6b85b0286ba9ace77c0d5cbd745608116900e4844deccd0b2d2013",
+      "functions": [
+        {
+          "name": "Record",
+          "params": [
+            "category",
+            "stableId"
+          ],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "Record",
+          "params": [
+            "category",
+            "stableId"
+          ],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "Record",
+          "params": [
+            "category",
+            "stableId"
+          ],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 9
+        }
+      ],
+      "classes": [
+        {
+          "name": "QaRandomDecisionRecorder",
+          "methods": [
+            "Record",
+            "Record",
+            "Record"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 32
+        }
+      ],
+      "imports": [
+        {
+          "source": "System",
+          "specifiers": [
+            "System"
+          ]
+        },
+        {
+          "source": "System.Globalization",
+          "specifiers": [
+            "Globalization"
+          ]
+        }
+      ],
+      "exports": [
+        "Record",
+        "Record",
+        "Record",
+        "QaRandomDecisionRecorder"
+      ],
+      "totalLines": 42,
+      "hasStructuralAnalysis": true
+    },
+    "Assets/Scripts/QA/QaRandomDecisionRecorder.cs.meta": {
+      "filePath": "Assets/Scripts/QA/QaRandomDecisionRecorder.cs.meta",
+      "contentHash": "7ca05b667ecef4767f74d1ab29e2f1e9ec7e304067007b1d6353b384a6fb5514",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 12,
+      "hasStructuralAnalysis": false
+    },
     "Assets/Scripts/QA/QaRewardTracker.cs": {
       "filePath": "Assets/Scripts/QA/QaRewardTracker.cs",
       "contentHash": "efc8d102fc0bc67d3883c584aeaca70b89c29644ea11d2e854c4f42e70872e8d",
@@ -16666,7 +16807,7 @@
     },
     "Assets/Scripts/QA/QaSmokeOptions.cs": {
       "filePath": "Assets/Scripts/QA/QaSmokeOptions.cs",
-      "contentHash": "c54e2793af4d54b05da6f601a7e353c0651f851e8f908381846dea43e680229b",
+      "contentHash": "f72a59058656695997685f233311fe2084f3759896f2231700949b5f47de7779",
       "functions": [
         {
           "name": "Resolve",
@@ -16707,7 +16848,7 @@
         "Resolve",
         "QaLevelPhaseResolver"
       ],
-      "totalLines": 64,
+      "totalLines": 70,
       "hasStructuralAnalysis": true
     },
     "Assets/Scripts/QA/QaSmokeOptions.cs.meta": {
@@ -19948,7 +20089,7 @@
     },
     "Assets/Scripts/Utilities/LootTable.cs": {
       "filePath": "Assets/Scripts/Utilities/LootTable.cs",
-      "contentHash": "ad528848c78c164c4b842117056181e2048a8bc93ad1f1ec02706b428445f15c",
+      "contentHash": "95448242d214675bee4f6c5602cbce9a8eb1b51faa9ad6076e38acc6733d82f9",
       "functions": [
         {
           "name": "TryDropLoot",
@@ -19966,7 +20107,7 @@
           ],
           "returnType": "bool",
           "exported": true,
-          "lineCount": 16
+          "lineCount": 19
         },
         {
           "name": "DropLoot",
@@ -19980,7 +20121,7 @@
           "params": [],
           "returnType": "Loot<T>",
           "exported": true,
-          "lineCount": 21
+          "lineCount": 25
         }
       ],
       "classes": [
@@ -19996,7 +20137,7 @@
             "lootTable"
           ],
           "exported": true,
-          "lineCount": 75
+          "lineCount": 82
         }
       ],
       "imports": [
@@ -20015,7 +20156,7 @@
         "DropLootObject",
         "LootTable"
       ],
-      "totalLines": 80,
+      "totalLines": 88,
       "hasStructuralAnalysis": true
     },
     "Assets/Scripts/Utilities/LootTable.cs.meta": {
@@ -22285,7 +22426,7 @@
     },
     "Assets/Tests/EditMode/QaEpisodeControllerTests.cs": {
       "filePath": "Assets/Tests/EditMode/QaEpisodeControllerTests.cs",
-      "contentHash": "624b2bf28080270c2c48cd18482e5f12310c4c008ce6dc064658bf3d47e65b02",
+      "contentHash": "d48a88c382deab40da8bd0fbfd6d683fa9725bb848e495c2bf146a511d7d5eb0",
       "functions": [
         {
           "name": "SetUp",
@@ -22337,6 +22478,40 @@
           "returnType": "void",
           "exported": true,
           "lineCount": 9
+        },
+        {
+          "name": "Oracles_reject_non_finite_game_time_and_time_scale",
+          "params": [
+            "invalidValue"
+          ],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "Oracles_reject_non_finite_unscaled_delta_time",
+          "params": [
+            "invalidValue"
+          ],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "Oracles_reject_nan_and_infinity_for_every_float_observation_field",
+          "params": [
+            "field"
+          ],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 18
+        },
+        {
+          "name": "Controller_classifies_a_bounded_catch_up_overflow_instead_of_silently_drifting",
+          "params": [],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 16
         },
         {
           "name": "Oracles_reject_unknown_pauses_but_allow_known_modal_and_terminal_pauses",
@@ -22480,6 +22655,16 @@
           "lineCount": 4
         },
         {
+          "name": "ObservationWithInvalidField",
+          "params": [
+            "field",
+            "value"
+          ],
+          "returnType": "QaObservation",
+          "exported": false,
+          "lineCount": 19
+        },
+        {
           "name": "CreateController",
           "params": [
             "action",
@@ -22502,6 +22687,10 @@
             "Controller_limits_control_catch_up_without_losing_deterministic_remainder",
             "Controller_captures_fixed_size_observations",
             "Oracles_reject_non_finite_observations",
+            "Oracles_reject_non_finite_game_time_and_time_scale",
+            "Oracles_reject_non_finite_unscaled_delta_time",
+            "Oracles_reject_nan_and_infinity_for_every_float_observation_field",
+            "Controller_classifies_a_bounded_catch_up_overflow_instead_of_silently_drifting",
             "Oracles_reject_unknown_pauses_but_allow_known_modal_and_terminal_pauses",
             "Oracles_detect_stalled_game_time_and_modal_timeout_using_unscaled_time",
             "Controller_emits_one_terminal_result_detects_duplicates_and_reloads_once",
@@ -22521,6 +22710,7 @@
             "Artifact_writer_rejects_unsafe_explicit_episode_ids",
             "Controller_records_five_same_seed_episodes_without_artifact_collisions",
             "RecordedEpisode",
+            "ObservationWithInvalidField",
             "CreateController"
           ],
           "properties": [
@@ -22528,7 +22718,7 @@
             "CoinsKey"
           ],
           "exported": true,
-          "lineCount": 475
+          "lineCount": 546
         }
       ],
       "imports": [
@@ -22583,6 +22773,10 @@
         "Controller_limits_control_catch_up_without_losing_deterministic_remainder",
         "Controller_captures_fixed_size_observations",
         "Oracles_reject_non_finite_observations",
+        "Oracles_reject_non_finite_game_time_and_time_scale",
+        "Oracles_reject_non_finite_unscaled_delta_time",
+        "Oracles_reject_nan_and_infinity_for_every_float_observation_field",
+        "Controller_classifies_a_bounded_catch_up_overflow_instead_of_silently_drifting",
         "Oracles_reject_unknown_pauses_but_allow_known_modal_and_terminal_pauses",
         "Oracles_detect_stalled_game_time_and_modal_timeout_using_unscaled_time",
         "Controller_emits_one_terminal_result_detects_duplicates_and_reloads_once",
@@ -22603,7 +22797,7 @@
         "Controller_records_five_same_seed_episodes_without_artifact_collisions",
         "QaEpisodeControllerTests"
       ],
-      "totalLines": 487,
+      "totalLines": 558,
       "hasStructuralAnalysis": true
     },
     "Assets/Tests/EditMode/QaEpisodeControllerTests.cs.meta": {
@@ -22618,7 +22812,7 @@
     },
     "Assets/Tests/EditMode/QaFixtureSnapshot.cs": {
       "filePath": "Assets/Tests/EditMode/QaFixtureSnapshot.cs",
-      "contentHash": "223ceb3a7573a50a9ca9f487cd806d93ebc9347cba6420d2c8ff83937d237ed4",
+      "contentHash": "d6ef70e5d727c999761db0f707527164975d3771239100592e91f11a01f2c81a",
       "functions": [
         {
           "name": "QaFixtureSnapshot",
@@ -22661,7 +22855,7 @@
             "disposed"
           ],
           "exported": false,
-          "lineCount": 50
+          "lineCount": 51
         }
       ],
       "imports": [
@@ -22712,7 +22906,7 @@
         "Capture",
         "Dispose"
       ],
-      "totalLines": 65,
+      "totalLines": 66,
       "hasStructuralAnalysis": true
     },
     "Assets/Tests/EditMode/QaFixtureSnapshot.cs.meta": {
@@ -22727,7 +22921,7 @@
     },
     "Assets/Tests/EditMode/QaFixtureSnapshotTests.cs": {
       "filePath": "Assets/Tests/EditMode/QaFixtureSnapshotTests.cs",
-      "contentHash": "9ee08ed68e5f0665a56f6015cf1819402bd9c06fc08782d00555aaa84ac830bb",
+      "contentHash": "7f83d2c29f638da8fff5237fcf7c5340f2fe915554adc068a6779814e688e7ec",
       "functions": [
         {
           "name": "Fixture_snapshot_restores_qa_asset_after_the_test_body_throws",
@@ -22735,17 +22929,25 @@
           "returnType": "void",
           "exported": true,
           "lineCount": 19
+        },
+        {
+          "name": "Fixture_snapshot_restores_the_qa_character_bytes_after_the_test_body_throws",
+          "params": [],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 20
         }
       ],
       "classes": [
         {
           "name": "QaFixtureSnapshotTests",
           "methods": [
-            "Fixture_snapshot_restores_qa_asset_after_the_test_body_throws"
+            "Fixture_snapshot_restores_qa_asset_after_the_test_body_throws",
+            "Fixture_snapshot_restores_the_qa_character_bytes_after_the_test_body_throws"
           ],
           "properties": [],
           "exported": true,
-          "lineCount": 22
+          "lineCount": 43
         }
       ],
       "imports": [
@@ -22776,9 +22978,10 @@
       ],
       "exports": [
         "Fixture_snapshot_restores_qa_asset_after_the_test_body_throws",
+        "Fixture_snapshot_restores_the_qa_character_bytes_after_the_test_body_throws",
         "QaFixtureSnapshotTests"
       ],
-      "totalLines": 31,
+      "totalLines": 52,
       "hasStructuralAnalysis": true
     },
     "Assets/Tests/EditMode/QaFixtureSnapshotTests.cs.meta": {
@@ -22793,7 +22996,7 @@
     },
     "Assets/Tests/EditMode/QaGameplayAgentTests.cs": {
       "filePath": "Assets/Tests/EditMode/QaGameplayAgentTests.cs",
-      "contentHash": "f4118cd5c42fdfb532b97f981139a421f0e59280f20d1d26498a0aeff4f078d2",
+      "contentHash": "b4bf48ccde2a3ce92e27f7684aadcdb22e3fc9ab0cac08e1b850c16202ee500a",
       "functions": [
         {
           "name": "ActionMapper_clamps_two_continuous_actions_and_converts_discrete_branch_offset",
@@ -22890,6 +23093,16 @@
           "lineCount": 20
         },
         {
+          "name": "External_terminal_notifies_the_agent_once_before_the_controller_reloads",
+          "params": [
+            "outcome",
+            "expectedReward"
+          ],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 28
+        },
+        {
           "name": "GameplayAgent_heuristic_writes_deterministic_actions_with_the_discrete_branch_offset",
           "params": [],
           "returnType": "void",
@@ -22953,6 +23166,7 @@
             "GameplayAgent_submits_each_received_action_once_through_external_controller_contract",
             "GameplayAgent_applies_progress_and_terminal_rewards_once_and_resets_episode_state",
             "GameplayAgent_rejects_actions_already_terminal_before_receipt",
+            "External_terminal_notifies_the_agent_once_before_the_controller_reloads",
             "GameplayAgent_heuristic_writes_deterministic_actions_with_the_discrete_branch_offset",
             "EpisodeController_external_mode_suppresses_scripted_ticks_and_acknowledges_the_single_external_action",
             "EpisodeController_rejects_external_actions_after_level_outcome_before_controller_completion",
@@ -22962,7 +23176,7 @@
           ],
           "properties": [],
           "exported": true,
-          "lineCount": 354
+          "lineCount": 400
         }
       ],
       "imports": [
@@ -23017,13 +23231,14 @@
         "GameplayAgent_submits_each_received_action_once_through_external_controller_contract",
         "GameplayAgent_applies_progress_and_terminal_rewards_once_and_resets_episode_state",
         "GameplayAgent_rejects_actions_already_terminal_before_receipt",
+        "External_terminal_notifies_the_agent_once_before_the_controller_reloads",
         "GameplayAgent_heuristic_writes_deterministic_actions_with_the_discrete_branch_offset",
         "EpisodeController_external_mode_suppresses_scripted_ticks_and_acknowledges_the_single_external_action",
         "EpisodeController_rejects_external_actions_after_level_outcome_before_controller_completion",
         "QaEpisodeSeedParser_prefers_only_valid_explicit_qa_seed_arguments",
         "QaGameplayAgentTests"
       ],
-      "totalLines": 365,
+      "totalLines": 411,
       "hasStructuralAnalysis": true
     },
     "Assets/Tests/EditMode/QaGameplayAgentTests.cs.meta": {
@@ -23036,16 +23251,135 @@
       "totalLines": 12,
       "hasStructuralAnalysis": false
     },
+    "Assets/Tests/EditMode/QaRandomDecisionRecordingTests.cs": {
+      "filePath": "Assets/Tests/EditMode/QaRandomDecisionRecordingTests.cs",
+      "contentHash": "6564e954733f0a037f26c16d748be39024dfc1b4decbf504fd62948f75aa187d",
+      "functions": [
+        {
+          "name": "Real_monster_and_loot_selection_seams_record_stable_decision_ids",
+          "params": [],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 25
+        },
+        {
+          "name": "Recorder_exposes_lazy_integer_and_generic_integer_apis",
+          "params": [],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 12
+        },
+        {
+          "name": "Real_loot_seams_include_stable_table_type_identity_for_the_same_index",
+          "params": [],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 20
+        },
+        {
+          "name": "Real_ability_selection_seam_records_the_selected_ability_type",
+          "params": [],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 36
+        },
+        {
+          "name": "CreateController",
+          "params": [],
+          "returnType": "QaEpisodeController",
+          "exported": false,
+          "lineCount": 7
+        },
+        {
+          "name": "RequirementsMet",
+          "params": [],
+          "returnType": "bool",
+          "exported": true,
+          "lineCount": 1
+        }
+      ],
+      "classes": [
+        {
+          "name": "QaRandomDecisionRecordingTests",
+          "methods": [
+            "Real_monster_and_loot_selection_seams_record_stable_decision_ids",
+            "Recorder_exposes_lazy_integer_and_generic_integer_apis",
+            "Real_loot_seams_include_stable_table_type_identity_for_the_same_index",
+            "Real_ability_selection_seam_records_the_selected_ability_type",
+            "CreateController"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 112
+        },
+        {
+          "name": "QaSelectableTestAbility",
+          "methods": [
+            "RequirementsMet"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 4
+        }
+      ],
+      "imports": [
+        {
+          "source": "System.Reflection",
+          "specifiers": [
+            "Reflection"
+          ]
+        },
+        {
+          "source": "System.Linq",
+          "specifiers": [
+            "Linq"
+          ]
+        },
+        {
+          "source": "NUnit.Framework",
+          "specifiers": [
+            "Framework"
+          ]
+        },
+        {
+          "source": "UnityEngine",
+          "specifiers": [
+            "UnityEngine"
+          ]
+        }
+      ],
+      "exports": [
+        "Real_monster_and_loot_selection_seams_record_stable_decision_ids",
+        "Recorder_exposes_lazy_integer_and_generic_integer_apis",
+        "Real_loot_seams_include_stable_table_type_identity_for_the_same_index",
+        "Real_ability_selection_seam_records_the_selected_ability_type",
+        "QaRandomDecisionRecordingTests",
+        "RequirementsMet",
+        "QaSelectableTestAbility"
+      ],
+      "totalLines": 126,
+      "hasStructuralAnalysis": true
+    },
+    "Assets/Tests/EditMode/QaRandomDecisionRecordingTests.cs.meta": {
+      "filePath": "Assets/Tests/EditMode/QaRandomDecisionRecordingTests.cs.meta",
+      "contentHash": "78dba10c56ca4d61f891c0025deae4bc892427723d5f6eb6df185dc42a1091fd",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 12,
+      "hasStructuralAnalysis": false
+    },
     "Assets/Tests/EditMode/QaReplayRuntimeTests.cs": {
       "filePath": "Assets/Tests/EditMode/QaReplayRuntimeTests.cs",
-      "contentHash": "3082c0eb453532b10235228472fc3b02ca65b74836e9b7be8c34b9714d31cf80",
+      "contentHash": "a476ce89b0dae85f6a3ad0e6c302d397b50d4f53d057eca27f1905e4be63221f",
       "functions": [
         {
           "name": "Replay_trace_feeds_actions_and_exits_after_a_matching_terminal_comparison",
           "params": [],
           "returnType": "void",
           "exported": true,
-          "lineCount": 28
+          "lineCount": 30
         },
         {
           "name": "Replay_trace_parser_requires_replay_mode_and_a_json_trace_path",
@@ -23059,7 +23393,14 @@
           "params": [],
           "returnType": "void",
           "exported": true,
-          "lineCount": 28
+          "lineCount": 30
+        },
+        {
+          "name": "Replay_trace_without_a_seed_is_rejected_with_an_actionable_compatibility_error",
+          "params": [],
+          "returnType": "void",
+          "exported": true,
+          "lineCount": 20
         }
       ],
       "classes": [
@@ -23068,11 +23409,12 @@
           "methods": [
             "Replay_trace_feeds_actions_and_exits_after_a_matching_terminal_comparison",
             "Replay_trace_parser_requires_replay_mode_and_a_json_trace_path",
-            "Replay_trace_loads_the_existing_summary_artifact_schema"
+            "Replay_trace_loads_the_existing_summary_artifact_schema",
+            "Replay_trace_without_a_seed_is_rejected_with_an_actionable_compatibility_error"
           ],
           "properties": [],
           "exported": true,
-          "lineCount": 80
+          "lineCount": 105
         }
       ],
       "imports": [
@@ -23105,9 +23447,10 @@
         "Replay_trace_feeds_actions_and_exits_after_a_matching_terminal_comparison",
         "Replay_trace_parser_requires_replay_mode_and_a_json_trace_path",
         "Replay_trace_loads_the_existing_summary_artifact_schema",
+        "Replay_trace_without_a_seed_is_rejected_with_an_actionable_compatibility_error",
         "QaReplayRuntimeTests"
       ],
-      "totalLines": 89,
+      "totalLines": 114,
       "hasStructuralAnalysis": true
     },
     "Assets/Tests/EditMode/QaReplayRuntimeTests.cs.meta": {
@@ -23122,14 +23465,14 @@
     },
     "Assets/Tests/EditMode/QaSmokeRuntimeTests.cs": {
       "filePath": "Assets/Tests/EditMode/QaSmokeRuntimeTests.cs",
-      "contentHash": "0341856aade32257291ec00bda0b5f0d6a43ffcd11b89fead8184ecba84964c1",
+      "contentHash": "b39cfd9431cc95d7b4c91f158fd98d161c184e25d92500780ae82109af6fcb70",
       "functions": [
         {
           "name": "Smoke_options_require_explicit_mode_and_accept_a_bounded_time_scale",
           "params": [],
           "returnType": "void",
           "exported": true,
-          "lineCount": 11
+          "lineCount": 15
         },
         {
           "name": "Qa_level_phase_resolver_marks_the_miniboss_and_final_boss_boundaries",
@@ -23198,7 +23541,7 @@
           ],
           "properties": [],
           "exported": true,
-          "lineCount": 148
+          "lineCount": 152
         }
       ],
       "imports": [
@@ -23237,7 +23580,7 @@
         "Smoke_mode_keeps_the_control_cadence_in_game_time_when_accelerated",
         "QaSmokeRuntimeTests"
       ],
-      "totalLines": 157,
+      "totalLines": 161,
       "hasStructuralAnalysis": true
     },
     "Assets/Tests/EditMode/QaSmokeRuntimeTests.cs.meta": {
@@ -24425,12 +24768,12 @@
     },
     "docs/qa/README.md": {
       "filePath": "docs/qa/README.md",
-      "contentHash": "619da50f1caac28201ce378cd911fe5103521877dbfe5296f49967cb0defe7ca",
+      "contentHash": "a7e6c61e7cabe43eff93de0c9d4dcf77024eef62717b791c9d67b29bcf8e3be7",
       "functions": [],
       "classes": [],
       "imports": [],
       "exports": [],
-      "totalLines": 62,
+      "totalLines": 64,
       "hasStructuralAnalysis": true
     },
     "docs/qa/task-1-tdd-evidence.md": {
@@ -24885,7 +25228,7 @@
     },
     "scripts/qa/replay.sh": {
       "filePath": "scripts/qa/replay.sh",
-      "contentHash": "8f9669e2c2c13ce0995ee2f3551674d40bf5a3c7d757387f160bbef728b64494",
+      "contentHash": "d581477eb0a20051d7b0be6445c8676cf69b3b867657e10e5aeead5681cf7bb9",
       "functions": [],
       "classes": [],
       "imports": [],
@@ -24905,22 +25248,22 @@
     },
     "scripts/qa/smoke.sh": {
       "filePath": "scripts/qa/smoke.sh",
-      "contentHash": "72d3c2f491fe660a4230f3b252cd54085c7875e64b58057b7ef739e6bf47b286",
+      "contentHash": "f6036c31259d58884729e5eb4344c31f3f11f14a87feac76f0548d37f2969587",
       "functions": [],
       "classes": [],
       "imports": [],
       "exports": [],
-      "totalLines": 115,
+      "totalLines": 119,
       "hasStructuralAnalysis": true
     },
     "scripts/qa/test-contracts.sh": {
       "filePath": "scripts/qa/test-contracts.sh",
-      "contentHash": "2e37077d9a6fc3169d3d923d7912295fd4cbf3e116e7daa3fa08bcc749fabf9c",
+      "contentHash": "ca65fe72f9285eb2924e0ea118075675c79d0ff0c69b7e6711681a095156cf05",
       "functions": [],
       "classes": [],
       "imports": [],
       "exports": [],
-      "totalLines": 102,
+      "totalLines": 113,
       "hasStructuralAnalysis": true
     },
     "scripts/qa/test-editmode.sh": {
