@@ -1,14 +1,12 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Text;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace Vampire
 {
     /// <summary>
-    /// Prepares and drives a single deterministic QA episode without changing the normal gameplay composition root.
+    /// Orchestrates one deterministic QA episode around existing gameplay components.
     /// </summary>
     [DefaultExecutionOrder(-1000)]
     public sealed class QaEpisodeController : MonoBehaviour
@@ -29,8 +27,10 @@ namespace Vampire
         private readonly List<QaActionTraceEntry> actionTrace = new List<QaActionTraceEntry>();
         private readonly List<QaTelemetryEntry> telemetry = new List<QaTelemetryEntry>();
         private readonly QaEpisodeOracles oracles = new QaEpisodeOracles();
+        private readonly QaEpisodeRecorder recorder = new QaEpisodeRecorder();
         private IQaPolicy policy;
         private IQaSceneReloader sceneReloader;
+        private IQaArtifactWriter artifactWriter;
         private bool episodeStarted;
         private bool logSubscribed;
         private bool reloadRequested;
@@ -47,8 +47,11 @@ namespace Vampire
         public QaActionAcknowledgement LastActionAcknowledgement { get; private set; }
         public QaObservation LastObservation { get; private set; }
         public QaEpisodeResult TerminalResult { get; private set; }
+        public QaArtifactWriteResult LastArtifactWrite { get; private set; }
+        public QaRecordedEpisode RecordedEpisode => recorder.Create(TerminalResult == null ? QaEpisodeOutcome.InProgress : TerminalResult.Outcome);
         public int DuplicateTerminalCount { get; private set; }
         public float PendingControlSeconds => pendingControlSeconds;
+        public bool IsLogSubscribed => logSubscribed;
 
         private void Awake()
         {
@@ -63,12 +66,7 @@ namespace Vampire
 
         private void OnDestroy()
         {
-            if (logSubscribed)
-            {
-                Application.logMessageReceived -= HandleLogMessage;
-                logSubscribed = false;
-            }
-
+            UnsubscribeLogs();
             RestoreCoins();
         }
 
@@ -87,9 +85,11 @@ namespace Vampire
             artifactDirectory = outputDirectory;
             policy = testPolicy;
             sceneReloader = testSceneReloader;
+            artifactWriter = null;
             episodeStarted = false;
             reloadRequested = false;
             TerminalResult = null;
+            LastArtifactWrite = null;
             DuplicateTerminalCount = 0;
             actionSequence = 0;
             controlTick = 0;
@@ -97,8 +97,14 @@ namespace Vampire
             elapsedUnscaledSeconds = 0f;
             actionTrace.Clear();
             telemetry.Clear();
+            recorder.Reset();
             oracles.Reset();
             BeginEpisode();
+        }
+
+        public void SetArtifactWriterForTesting(IQaArtifactWriter writer)
+        {
+            artifactWriter = writer;
         }
 
         public void AdvanceForTesting(float unscaledDeltaSeconds, float gameTime, float currentTimeScale)
@@ -114,6 +120,11 @@ namespace Vampire
         public void CaptureLogForTesting(LogType type)
         {
             HandleLogMessage("test", string.Empty, type);
+        }
+
+        public void RecordDiscreteEvent(string eventName)
+        {
+            recorder.RecordDiscreteEvent(eventName);
         }
 
         private void BeginEpisode()
@@ -166,12 +177,16 @@ namespace Vampire
         {
             controlTick++;
             LastObservation = CaptureObservation();
+            recorder.RecordObservation(LastObservation);
             var action = policy.Decide(LastObservation);
             Apply(action);
             actionSequence++;
             LastActionAcknowledgement = new QaActionAcknowledgement(actionSequence, controlTick);
             actionTrace.Add(new QaActionTraceEntry(actionSequence, controlTick, controlTick * ControlIntervalSeconds, action));
             telemetry.Add(new QaTelemetryEntry(controlTick, controlTick * ControlIntervalSeconds, "observation"));
+            recorder.RecordDiscreteEvent("action-ack:" + actionSequence + ":" + controlTick);
+            recorder.RecordDiscreteEvent("phase:" + (int)LastObservation.LevelPhase);
+            recorder.RecordDiscreteEvent("modal:" + (LastObservation.IsAbilitySelectionOpen ? "1" : "0"));
         }
 
         private QaObservation CaptureObservation()
@@ -180,7 +195,6 @@ namespace Vampire
             {
                 ElapsedSeconds = elapsedUnscaledSeconds,
                 LevelPhase = QaLevelPhase.Early,
-                EnemyCount = entityManager == null ? 0 : entityManager.EntityCount,
                 IsAbilitySelectionOpen = abilitySelectionDialog != null && abilitySelectionDialog.MenuOpen,
                 KillCount = statsManager == null ? 0 : statsManager.MonstersKilled,
                 DamageTaken = statsManager == null ? 0f : statsManager.DamageTaken
@@ -195,6 +209,11 @@ namespace Vampire
                 observation.PlayerLevel = playerCharacter.CurrentLevel;
                 observation.IsPlayerAlive = playerCharacter.IsAlive;
             }
+
+            QaObservationCapture.PopulateNearestEnemies(
+                observation,
+                observation.PlayerPosition,
+                entityManager == null ? null : entityManager.LivingMonsters);
 
             if (abilitySelectionDialog != null)
             {
@@ -237,8 +256,10 @@ namespace Vampire
                 FailureReason = reason
             };
             telemetry.Add(new QaTelemetryEntry(controlTick, elapsedUnscaledSeconds, "terminal"));
+            recorder.RecordDiscreteEvent("terminal:" + outcome);
+            UnsubscribeLogs();
             RestoreCoins();
-            new QaArtifactWriter(artifactDirectory, episodeSeed).Write(TerminalResult, actionTrace, telemetry);
+            WriteArtifacts();
 
             if (!reloadRequested)
             {
@@ -249,10 +270,32 @@ namespace Vampire
             return true;
         }
 
+        private void WriteArtifacts()
+        {
+            try
+            {
+                var writer = artifactWriter ?? new QaArtifactWriter(artifactDirectory, episodeSeed);
+                LastArtifactWrite = writer.Write(TerminalResult, actionTrace, telemetry, RecordedEpisode);
+            }
+            catch (Exception exception)
+            {
+                LastArtifactWrite = QaArtifactWriteResult.Failed(exception.Message);
+            }
+        }
+
         private void HandleLogMessage(string condition, string stackTrace, LogType type)
         {
             if (type == LogType.Error || type == LogType.Assert || type == LogType.Exception)
                 Complete(QaEpisodeOutcome.Error, "UnityLog:" + type);
+        }
+
+        private void UnsubscribeLogs()
+        {
+            if (!logSubscribed)
+                return;
+
+            Application.logMessageReceived -= HandleLogMessage;
+            logSubscribed = false;
         }
 
         private void SnapshotCoins()
@@ -309,271 +352,5 @@ namespace Vampire
 
         public int Sequence { get; }
         public int Tick { get; }
-    }
-
-    public enum QaOracleFailure
-    {
-        None,
-        NonFiniteValue,
-        UnknownTimeScalePause,
-        StalledGameTime,
-        ModalTimeout
-    }
-
-    public sealed class QaEpisodeOracles
-    {
-        public const float StalledGameTimeTimeoutSeconds = 2f;
-        public const float ModalTimeoutSeconds = 2f;
-
-        private bool hasGameTime;
-        private float lastGameTime;
-        private float stalledSeconds;
-        private float modalSeconds;
-
-        public QaOracleFailure Evaluate(QaObservation observation, float gameTime, float timeScale, bool knownModal, bool knownTerminal, float unscaledDeltaSeconds = 1f)
-        {
-            if (!IsFinite(observation))
-                return QaOracleFailure.NonFiniteValue;
-
-            if (Mathf.Approximately(timeScale, 0f) && !knownModal && !knownTerminal)
-                return QaOracleFailure.UnknownTimeScalePause;
-
-            var delta = Mathf.Max(0f, unscaledDeltaSeconds);
-            if (knownModal)
-            {
-                modalSeconds += delta;
-                if (modalSeconds >= ModalTimeoutSeconds)
-                    return QaOracleFailure.ModalTimeout;
-            }
-            else
-            {
-                modalSeconds = 0f;
-            }
-
-            if (hasGameTime && Mathf.Approximately(gameTime, lastGameTime) && !knownModal && !knownTerminal)
-            {
-                stalledSeconds += delta;
-                if (stalledSeconds >= StalledGameTimeTimeoutSeconds)
-                    return QaOracleFailure.StalledGameTime;
-            }
-            else
-            {
-                stalledSeconds = 0f;
-            }
-
-            lastGameTime = gameTime;
-            hasGameTime = true;
-            return QaOracleFailure.None;
-        }
-
-        public void Reset()
-        {
-            hasGameTime = false;
-            lastGameTime = 0f;
-            stalledSeconds = 0f;
-            modalSeconds = 0f;
-        }
-
-        private static bool IsFinite(QaObservation observation)
-        {
-            if (observation == null || !IsFinite(observation.PlayerPosition) || !IsFinite(observation.PlayerHealth) ||
-                !IsFinite(observation.PlayerMaxHealth) || !IsFinite(observation.PlayerExperience) ||
-                !IsFinite(observation.CollectiblePosition) || !IsFinite(observation.ChestPosition) ||
-                !IsFinite(observation.ElapsedSeconds) || !IsFinite(observation.DamageTaken))
-                return false;
-
-            foreach (var position in observation.NearestEnemyPositions)
-                if (!IsFinite(position)) return false;
-
-            return true;
-        }
-
-        private static bool IsFinite(Vector2 value)
-        {
-            return IsFinite(value.x) && IsFinite(value.y);
-        }
-
-        private static bool IsFinite(float value)
-        {
-            return !float.IsNaN(value) && !float.IsInfinity(value);
-        }
-    }
-
-    [Serializable]
-    public sealed class QaActionTraceEntry
-    {
-        public int Sequence;
-        public int Tick;
-        public float Time;
-        public float MovementX;
-        public float MovementY;
-        public int AbilityChoice;
-
-        public QaActionTraceEntry(int sequence, int tick, float time, QaAction action)
-        {
-            Sequence = sequence;
-            Tick = tick;
-            Time = time;
-            MovementX = action.Movement.x;
-            MovementY = action.Movement.y;
-            AbilityChoice = action.AbilityChoice;
-        }
-    }
-
-    [Serializable]
-    public sealed class QaTelemetryEntry
-    {
-        public int Tick;
-        public float Time;
-        public string Event;
-
-        public QaTelemetryEntry(int tick, float time, string eventName)
-        {
-            Tick = tick;
-            Time = time;
-            Event = eventName;
-        }
-    }
-
-    [Serializable]
-    public sealed class QaArtifactLine
-    {
-        public string Schema;
-        public string Kind;
-        public int Seed;
-        public int Tick;
-        public int Sequence;
-        public float Time;
-        public QaEpisodeOutcome Outcome;
-        public string Event;
-        public float MovementX;
-        public float MovementY;
-        public int AbilityChoice;
-    }
-
-    [Serializable]
-    public sealed class QaEpisodeSummary
-    {
-        public string Schema;
-        public int Seed;
-        public QaEpisodeOutcome Outcome;
-        public float ElapsedSeconds;
-        public int KillCount;
-        public int FinalLevel;
-        public string FailureReason;
-    }
-
-    public sealed class QaArtifactPaths
-    {
-        public string ActionTracePath { get; }
-        public string TelemetryPath { get; }
-        public string SummaryPath { get; }
-
-        public QaArtifactPaths(string actionTracePath, string telemetryPath, string summaryPath)
-        {
-            ActionTracePath = actionTracePath;
-            TelemetryPath = telemetryPath;
-            SummaryPath = summaryPath;
-        }
-    }
-
-    public sealed class QaArtifactWriter
-    {
-        public const string SchemaVersion = "qa-episode/v1";
-
-        private readonly string directory;
-        private readonly int seed;
-
-        public QaArtifactWriter(string directory, int seed)
-        {
-            this.directory = string.IsNullOrWhiteSpace(directory) ? "QAArtifacts" : directory;
-            this.seed = seed;
-        }
-
-        public QaArtifactPaths Write(QaEpisodeResult result, IReadOnlyList<QaActionTraceEntry> trace, IReadOnlyList<QaTelemetryEntry> telemetry)
-        {
-            Directory.CreateDirectory(directory);
-            var prefix = "episode-" + seed.ToString("D8");
-            var actionPath = Path.Combine(directory, prefix + "-actions.jsonl");
-            var telemetryPath = Path.Combine(directory, prefix + "-telemetry.jsonl");
-            var summaryPath = Path.Combine(directory, prefix + "-summary.json");
-            WriteLines(actionPath, trace, entry => new QaArtifactLine
-            {
-                Schema = SchemaVersion, Kind = "action", Seed = seed, Tick = entry.Tick, Sequence = entry.Sequence,
-                Time = entry.Time, MovementX = entry.MovementX, MovementY = entry.MovementY, AbilityChoice = entry.AbilityChoice
-            });
-            WriteLines(telemetryPath, telemetry, entry => new QaArtifactLine
-            {
-                Schema = SchemaVersion, Kind = "telemetry", Seed = seed, Tick = entry.Tick, Time = entry.Time,
-                Outcome = result.Outcome, Event = entry.Event
-            });
-            var summary = new QaEpisodeSummary
-            {
-                Schema = SchemaVersion, Seed = result.Seed, Outcome = result.Outcome, ElapsedSeconds = result.ElapsedSeconds,
-                KillCount = result.KillCount, FinalLevel = result.FinalLevel, FailureReason = result.FailureReason
-            };
-            File.WriteAllText(summaryPath, JsonUtility.ToJson(summary), new UTF8Encoding(false));
-            return new QaArtifactPaths(actionPath, telemetryPath, summaryPath);
-        }
-
-        private static void WriteLines<T>(string path, IReadOnlyList<T> entries, Func<T, QaArtifactLine> toLine)
-        {
-            var builder = new StringBuilder();
-            for (var index = 0; index < entries.Count; index++)
-                builder.Append(JsonUtility.ToJson(toLine(entries[index]))).Append('\n');
-
-            File.WriteAllText(path, builder.ToString(), new UTF8Encoding(false));
-        }
-    }
-
-    public sealed class QaRecordedEpisode
-    {
-        public QaRecordedEpisode(QaEpisodeOutcome outcome, IReadOnlyList<string> discreteEvents, IReadOnlyList<Vector2> positions)
-        {
-            Outcome = outcome;
-            DiscreteEvents = discreteEvents;
-            Positions = positions;
-        }
-
-        public QaEpisodeOutcome Outcome { get; }
-        public IReadOnlyList<string> DiscreteEvents { get; }
-        public IReadOnlyList<Vector2> Positions { get; }
-    }
-
-    public sealed class QaReplayComparison
-    {
-        public QaReplayComparison(bool isMatch, string reason)
-        {
-            IsMatch = isMatch;
-            Reason = reason;
-        }
-
-        public bool IsMatch { get; }
-        public string Reason { get; }
-    }
-
-    public static class QaReplayComparator
-    {
-        public const float PositionTolerance = 0.05f;
-
-        public static QaReplayComparison Compare(QaRecordedEpisode expected, QaRecordedEpisode actual)
-        {
-            if (expected.Outcome != actual.Outcome)
-                return new QaReplayComparison(false, "outcome");
-            if (expected.DiscreteEvents.Count != actual.DiscreteEvents.Count)
-                return new QaReplayComparison(false, "discrete-event-count");
-            if (expected.Positions.Count != actual.Positions.Count)
-                return new QaReplayComparison(false, "position-count");
-
-            for (var index = 0; index < expected.DiscreteEvents.Count; index++)
-                if (!string.Equals(expected.DiscreteEvents[index], actual.DiscreteEvents[index], StringComparison.Ordinal))
-                    return new QaReplayComparison(false, "discrete-event-" + index);
-
-            for (var index = 0; index < expected.Positions.Count; index++)
-                if (Vector2.Distance(expected.Positions[index], actual.Positions[index]) > PositionTolerance)
-                    return new QaReplayComparison(false, "position-" + index);
-
-            return new QaReplayComparison(true, string.Empty);
-        }
     }
 }

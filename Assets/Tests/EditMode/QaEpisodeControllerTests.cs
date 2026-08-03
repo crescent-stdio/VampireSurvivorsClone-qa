@@ -164,7 +164,9 @@ namespace Vampire.Tests.EditMode
                 new QaTelemetryEntry(1, 0.1f, "observation")
             };
 
-            var paths = writer.Write(result, trace, telemetry);
+            var write = writer.Write(result, trace, telemetry, new QaRecordedEpisode(QaEpisodeOutcome.Passed, new string[0], new Vector2[0]));
+            Assert.That(write.Success, Is.True, write.FailureReason);
+            var paths = write.Paths;
 
             Assert.That(JsonUtility.FromJson<QaArtifactLine>(File.ReadAllLines(paths.ActionTracePath)[0]).Schema, Is.EqualTo(QaArtifactWriter.SchemaVersion));
             Assert.That(JsonUtility.FromJson<QaArtifactLine>(File.ReadAllLines(paths.TelemetryPath)[0]).Tick, Is.EqualTo(1));
@@ -204,6 +206,107 @@ namespace Vampire.Tests.EditMode
             Assert.That(QaReplayComparator.Compare(baseline, RecordedEpisode(QaEpisodeOutcome.Passed, "spawn:a", new Vector2(2.06f, 3f))).IsMatch, Is.False);
         }
 
+        [Test]
+        public void Controller_recorder_captures_observations_and_known_discrete_events_for_five_runs()
+        {
+            QaRecordedEpisode baseline = null;
+            for (var run = 0; run < 5; run++)
+            {
+                var controller = CreateController(new QaAction(Vector2.right));
+                controller.AdvanceForTesting(0.1f, 0f, 1f);
+                controller.RecordDiscreteEvent("spawn:seeded");
+                controller.CompleteForTesting(QaEpisodeOutcome.Passed, "passed");
+
+                var recorded = controller.RecordedEpisode;
+                Assert.That(recorded.Positions, Has.Count.EqualTo(1));
+                Assert.That(recorded.DiscreteEvents, Does.Contain("action-ack:1:1"));
+                Assert.That(recorded.DiscreteEvents, Does.Contain("phase:0"));
+                Assert.That(recorded.DiscreteEvents, Does.Contain("modal:0"));
+                Assert.That(recorded.DiscreteEvents, Does.Contain("terminal:Passed"));
+                Assert.That(recorded.Outcome, Is.EqualTo(QaEpisodeOutcome.Passed));
+                if (baseline != null)
+                    Assert.That(QaReplayComparator.Compare(baseline, recorded).IsMatch, Is.True, $"run {run}");
+                baseline = recorded;
+                Object.DestroyImmediate(controller.gameObject);
+            }
+        }
+
+        [Test]
+        public void Replay_comparator_rejects_non_finite_values_and_length_mismatches_but_includes_the_tolerance_boundary()
+        {
+            var baseline = new QaRecordedEpisode(QaEpisodeOutcome.Passed, new[] { "event" }, new[] { Vector2.zero });
+
+            Assert.That(QaReplayComparator.Compare(baseline, new QaRecordedEpisode(QaEpisodeOutcome.Passed, new string[0], new[] { Vector2.zero })).IsMatch, Is.False);
+            Assert.That(QaReplayComparator.Compare(baseline, new QaRecordedEpisode(QaEpisodeOutcome.Passed, new[] { "event" }, new Vector2[0])).IsMatch, Is.False);
+            Assert.That(QaReplayComparator.Compare(baseline, new QaRecordedEpisode(QaEpisodeOutcome.Passed, new[] { "other" }, new[] { Vector2.zero })).IsMatch, Is.False);
+            Assert.That(QaReplayComparator.Compare(baseline, new QaRecordedEpisode(QaEpisodeOutcome.Passed, new[] { "event" }, new[] { new Vector2(float.NaN, 0f) })).IsMatch, Is.False);
+            Assert.That(QaReplayComparator.Compare(baseline, new QaRecordedEpisode(QaEpisodeOutcome.Passed, new[] { "event" }, new[] { new Vector2(float.PositiveInfinity, 0f) })).IsMatch, Is.False);
+            Assert.That(QaReplayComparator.Compare(baseline, new QaRecordedEpisode(QaEpisodeOutcome.Passed, new[] { "event" }, new[] { new Vector2(0.05f, 0f) })).IsMatch, Is.True);
+        }
+
+        [Test]
+        public void Observation_capture_sorts_live_monsters_by_distance_and_uses_a_bounded_enemy_count()
+        {
+            var monsters = new FastList<Monster>();
+            var objects = new List<GameObject>();
+            foreach (var position in new[] { new Vector2(3f, 0f), new Vector2(1f, 0f), new Vector2(-1f, 0f), new Vector2(2f, 0f), new Vector2(4f, 0f), new Vector2(5f, 0f), new Vector2(6f, 0f), new Vector2(7f, 0f), new Vector2(8f, 0f) })
+            {
+                var gameObject = new GameObject("Monster");
+                gameObject.SetActive(false);
+                gameObject.transform.position = position;
+                monsters.Add(gameObject.AddComponent<Monster>());
+                objects.Add(gameObject);
+            }
+
+            var observation = new QaObservation { NearestEnemyPositions = { } };
+            QaObservationCapture.PopulateNearestEnemies(observation, Vector2.zero, monsters);
+
+            Assert.That(observation.EnemyCount, Is.EqualTo(QaObservation.MaxNearestEnemies));
+            Assert.That(observation.NearestEnemyPositions[0], Is.EqualTo(new Vector2(-1f, 0f)));
+            Assert.That(observation.NearestEnemyPositions[1], Is.EqualTo(new Vector2(1f, 0f)));
+            Assert.That(observation.NearestEnemyPositions[7], Is.EqualTo(new Vector2(7f, 0f)));
+            Assert.That(observation.NearestEnemyPositions, Has.Length.EqualTo(QaObservation.MaxNearestEnemies));
+            QaObservationCapture.PopulateNearestEnemies(observation, Vector2.zero, null);
+            Assert.That(observation.EnemyCount, Is.Zero);
+            Assert.That(observation.NearestEnemyPositions[0], Is.EqualTo(Vector2.zero));
+            foreach (var gameObject in objects)
+                Object.DestroyImmediate(gameObject);
+        }
+
+        [Test]
+        public void Artifact_writer_rejects_escaping_paths_and_reports_io_failures_without_throwing()
+        {
+            var result = new QaEpisodeResult { Seed = 3, Outcome = QaEpisodeOutcome.Error };
+            var recorded = new QaRecordedEpisode(QaEpisodeOutcome.Error, new string[0], new Vector2[0]);
+            var rejected = new QaArtifactWriter("../escape", 3).Write(result, new List<QaActionTraceEntry>(), new List<QaTelemetryEntry>(), recorded);
+            var rooted = new QaArtifactWriter("/escape", 3).Write(result, new List<QaActionTraceEntry>(), new List<QaTelemetryEntry>(), recorded);
+            var failed = new QaArtifactWriter("tests/focused-io", 3, new ThrowingArtifactFileSystem()).Write(result, new List<QaActionTraceEntry>(), new List<QaTelemetryEntry>(), recorded);
+
+            Assert.That(rejected.Success, Is.False);
+            Assert.That(rooted.Success, Is.False);
+            Assert.That(failed.Success, Is.False);
+        }
+
+        [Test]
+        public void Artifact_failures_do_not_block_terminal_cleanup_or_the_single_reload()
+        {
+            PlayerPrefs.SetInt(CoinsKey, 31);
+            var reloader = new RecordingSceneReloader();
+            var controller = CreateController(new QaAction(Vector2.zero), reloader);
+            controller.SetArtifactWriterForTesting(new QaArtifactWriter("tests/focused-io", 123, new ThrowingArtifactFileSystem()));
+            PlayerPrefs.SetInt(CoinsKey, 99);
+
+            Assert.That(controller.CompleteForTesting(QaEpisodeOutcome.Error, "write-failure"), Is.True);
+            Assert.That(controller.LastArtifactWrite.Success, Is.False);
+            Assert.That(controller.TerminalResult.Outcome, Is.EqualTo(QaEpisodeOutcome.Error));
+            Assert.That(PlayerPrefs.GetInt(CoinsKey), Is.EqualTo(31));
+            Assert.That(controller.IsLogSubscribed, Is.False);
+            Assert.That(reloader.SceneNames, Is.EqualTo(new[] { "QA Level" }));
+            Assert.That(controller.CompleteForTesting(QaEpisodeOutcome.Passed, "duplicate"), Is.False);
+            Assert.That(reloader.SceneNames, Has.Count.EqualTo(1));
+            Object.DestroyImmediate(controller.gameObject);
+        }
+
         private static QaRecordedEpisode RecordedEpisode(QaEpisodeOutcome outcome, string discreteEvent, Vector2 position)
         {
             return new QaRecordedEpisode(outcome, new[] { discreteEvent }, new[] { position });
@@ -228,6 +331,14 @@ namespace Vampire.Tests.EditMode
         {
             public List<string> SceneNames { get; } = new List<string>();
             public void Reload(string sceneName) { SceneNames.Add(sceneName); }
+        }
+
+        private sealed class ThrowingArtifactFileSystem : IQaArtifactFileSystem
+        {
+            public void CreateDirectory(string path) { throw new IOException("forced"); }
+            public void WriteAllText(string path, string contents) { throw new IOException("forced"); }
+            public void MoveReplace(string sourcePath, string destinationPath) { throw new IOException("forced"); }
+            public void DeleteFile(string path) { }
         }
     }
 }
