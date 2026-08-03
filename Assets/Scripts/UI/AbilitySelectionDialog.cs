@@ -19,6 +19,8 @@ namespace Vampire
         private List<Ability> displayedAbilities;
         private bool menuOpen = false;
         public bool MenuOpen { get => menuOpen; }
+        public IReadOnlyList<Ability> DisplayedAbilities { get => (IReadOnlyList<Ability>)displayedAbilities ?? System.Array.Empty<Ability>(); }
+        public bool PauseOnOpen { get; set; } = true;
 
         public void Init(AbilityManager abilityManager, EntityManager entityManager, Character playerCharacter)
         {
@@ -31,8 +33,11 @@ namespace Vampire
         {
             base.Open();
             menuOpen = true;
-            Time.timeScale = 0;
-            pauseMenu.TimeIsFrozen = true;
+            if (PauseOnOpen)
+            {
+                Time.timeScale = 0;
+                pauseMenu.TimeIsFrozen = true;
+            }
             particles.SetActive(true);
 
             // Select abilities/upgrades to display
@@ -73,10 +78,23 @@ namespace Vampire
         {
             abilityManager.ReturnAbilities(displayedAbilities);
             menuOpen = false;
-            Time.timeScale = 1;
-            pauseMenu.TimeIsFrozen = false;
+            if (PauseOnOpen)
+            {
+                Time.timeScale = 1;
+                pauseMenu.TimeIsFrozen = false;
+            }
             particles.SetActive(false);
             base.Close();
+        }
+
+        public bool TrySelectOption(int optionIndex)
+        {
+            if (!menuOpen || displayedAbilities == null || optionIndex < 0 || optionIndex >= displayedAbilities.Count)
+                return false;
+
+            displayedAbilities[optionIndex].Select();
+            Close();
+            return true;
         }
 
         public bool HasAvailableAbilities()

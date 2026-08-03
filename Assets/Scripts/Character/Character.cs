@@ -55,6 +55,11 @@ namespace Vampire
         public Collider2D CollectableCollider { get => collectableCollider; }
         public float Luck { get => characterBlueprint.luck; }
         public int CurrentLevel { get => currentLevel; }
+        public float CurrentHealth { get => currentHealth; }
+        public float MaxHealth { get => characterBlueprint.hp; }
+        public float CurrentExperience { get => currentExp; }
+        public float NextExperience { get => nextLevelExp; }
+        public bool IsAlive { get => alive; }
         public UnityEvent<float> OnDealDamage { get; } = new UnityEvent<float>();
         public UnityEvent OnDeath { get; } = new UnityEvent();
         public CharacterBlueprint Blueprint { get => characterBlueprint; }

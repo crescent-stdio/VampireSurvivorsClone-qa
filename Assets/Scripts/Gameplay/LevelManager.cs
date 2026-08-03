@@ -20,11 +20,19 @@ namespace Vampire
         private float timeSinceLastChestSpawned;
         private bool miniBossSpawned = false;
         private bool finalBossSpawned = false;
+        private bool initialized = false;
+        private QaEpisodeOutcome outcome = QaEpisodeOutcome.InProgress;
+
+        public bool Initialized { get => initialized; }
+        public float LevelTime { get => levelTime; }
+        public QaEpisodeOutcome Outcome { get => outcome; }
 
         public void Init(LevelBlueprint levelBlueprint)
         {
             this.levelBlueprint = levelBlueprint;
             levelTime = 0;
+            outcome = QaEpisodeOutcome.InProgress;
+            initialized = false;
             
             // Initialize the entity manager
             entityManager.Init(this.levelBlueprint, playerCharacter, inventory, statsManager, infiniteBackground, abilitySelectionDialog);
@@ -42,6 +50,7 @@ namespace Vampire
             infiniteBackground.Init(this.levelBlueprint.backgroundTexture, playerCharacter.transform);
             // Initialize inventory
             inventory.Init();
+            initialized = true;
         }
 
         // Start is called before the first frame update
@@ -99,6 +108,8 @@ namespace Vampire
 
         public void GameOver()
         {
+            if (!TryTransitionToOutcome(QaEpisodeOutcome.PlayerDied)) return;
+
             Time.timeScale = 0;
             int coinCount = PlayerPrefs.GetInt("Coins");
             PlayerPrefs.SetInt("Coins", coinCount + statsManager.CoinsGained);
@@ -107,10 +118,21 @@ namespace Vampire
 
         public void LevelPassed(Monster finalBossKilled)
         {
+            if (!TryTransitionToOutcome(QaEpisodeOutcome.Passed)) return;
+
             Time.timeScale = 0;
             int coinCount = PlayerPrefs.GetInt("Coins");
             PlayerPrefs.SetInt("Coins", coinCount + statsManager.CoinsGained);
             gameOverDialog.Open(true, statsManager);
+        }
+
+        public bool TryTransitionToOutcome(QaEpisodeOutcome terminalOutcome)
+        {
+            if (terminalOutcome == QaEpisodeOutcome.InProgress || outcome != QaEpisodeOutcome.InProgress)
+                return false;
+
+            outcome = terminalOutcome;
+            return true;
         }
 
         public void Restart()
