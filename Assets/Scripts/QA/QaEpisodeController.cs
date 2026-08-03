@@ -32,6 +32,10 @@ namespace Vampire
         private IQaPolicy policy;
         private IQaSceneReloader sceneReloader;
         private IQaArtifactWriter artifactWriter;
+        private IQaProcessExit processExit;
+        private QaRecordedEpisode expectedReplay;
+        private bool replayRequested;
+        private string replayLoadFailure;
         private bool episodeStarted;
         private bool logSubscribed;
         private bool reloadRequested;
@@ -50,6 +54,7 @@ namespace Vampire
         public QaObservation LastObservation { get; private set; }
         public QaEpisodeResult TerminalResult { get; private set; }
         public QaArtifactWriteResult LastArtifactWrite { get; private set; }
+        public QaReplayComparison LastReplayComparison { get; private set; }
         public QaRecordedEpisode RecordedEpisode => recorder.Create(TerminalResult == null ? QaEpisodeOutcome.InProgress : TerminalResult.Outcome);
         public int DuplicateTerminalCount { get; private set; }
         public float PendingControlSeconds => pendingControlSeconds;
@@ -98,6 +103,11 @@ namespace Vampire
             reloadRequested = false;
             TerminalResult = null;
             LastArtifactWrite = null;
+            LastReplayComparison = null;
+            expectedReplay = null;
+            replayRequested = false;
+            replayLoadFailure = null;
+            processExit = null;
             DuplicateTerminalCount = 0;
             actionSequence = 0;
             controlTick = 0;
@@ -113,6 +123,17 @@ namespace Vampire
         public void SetArtifactWriterForTesting(IQaArtifactWriter writer)
         {
             artifactWriter = writer;
+        }
+
+        public void ConfigureReplayForTesting(QaReplayTrace trace, IQaProcessExit testProcessExit)
+        {
+            if (trace == null)
+                throw new ArgumentNullException(nameof(trace));
+
+            replayRequested = true;
+            expectedReplay = trace.ToRecordedEpisode();
+            policy = new QaReplayPolicy(trace.Actions);
+            processExit = testProcessExit;
         }
 
         public void AdvanceForTesting(float unscaledDeltaSeconds, float gameTime, float currentTimeScale)
@@ -142,6 +163,8 @@ namespace Vampire
 
         public void EnableExternalAgentControl()
         {
+            if (replayRequested)
+                return;
             ControlMode = QaControlMode.ExternalAgent;
         }
 
@@ -162,11 +185,27 @@ namespace Vampire
             episodeSeed = ResolveEpisodeSeed(episodeSeed);
             QaEpisodeBootstrap.Prepare(episodeSeed, qaCharacter);
             SnapshotCoins();
+            replayRequested = QaReplayTrace.IsReplayRequested(Environment.GetCommandLineArgs());
+            if (replayRequested && expectedReplay == null)
+            {
+                if (QaReplayTrace.TryLoadFromCommandLine(Environment.GetCommandLineArgs(), out var trace, out var error))
+                {
+                    expectedReplay = trace.ToRecordedEpisode();
+                    policy = new QaReplayPolicy(trace.Actions);
+                }
+                else
+                {
+                    replayLoadFailure = error;
+                }
+            }
             policy = policy ?? new ScriptedQaPolicy();
             sceneReloader = sceneReloader ?? new UnityQaSceneReloader();
+            processExit = processExit ?? new UnityQaProcessExit();
             Application.logMessageReceived += HandleLogMessage;
             logSubscribed = true;
             episodeStarted = true;
+            if (!string.IsNullOrEmpty(replayLoadFailure))
+                Complete(QaEpisodeOutcome.Error, replayLoadFailure);
         }
 
         private void Advance(float unscaledDeltaSeconds, float gameTime, float currentTimeScale)
@@ -315,6 +354,15 @@ namespace Vampire
             RestoreCoins();
             WriteArtifacts();
 
+            if (replayRequested)
+            {
+                LastReplayComparison = expectedReplay == null
+                    ? new QaReplayComparison(false, "trace-load")
+                    : QaReplayComparator.Compare(expectedReplay, RecordedEpisode);
+                processExit.Exit(LastReplayComparison.IsMatch ? 0 : 1);
+                return true;
+            }
+
             if (!reloadRequested)
             {
                 reloadRequested = true;
@@ -386,6 +434,19 @@ namespace Vampire
     public interface IQaSceneReloader
     {
         void Reload(string sceneName);
+    }
+
+    public interface IQaProcessExit
+    {
+        void Exit(int code);
+    }
+
+    public sealed class UnityQaProcessExit : IQaProcessExit
+    {
+        public void Exit(int code)
+        {
+            Application.Quit(code);
+        }
     }
 
     public sealed class UnityQaSceneReloader : IQaSceneReloader

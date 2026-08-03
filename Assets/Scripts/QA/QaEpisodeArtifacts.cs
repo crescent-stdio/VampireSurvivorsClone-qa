@@ -70,6 +70,9 @@ namespace Vampire
         public string FailureReason;
         public int RecordedPositionCount;
         public int DiscreteEventCount;
+        public QaActionTraceEntry[] ReplayActions;
+        public string[] ReplayDiscreteEvents;
+        public Vector2[] ReplayPositions;
     }
 
     public sealed class QaArtifactPaths
@@ -206,7 +209,10 @@ namespace Vampire
                         FinalLevel = result.FinalLevel,
                         FailureReason = result.FailureReason,
                         RecordedPositionCount = recordedEpisode.Positions.Count,
-                        DiscreteEventCount = recordedEpisode.DiscreteEvents.Count
+                        DiscreteEventCount = recordedEpisode.DiscreteEvents.Count,
+                        ReplayActions = new List<QaActionTraceEntry>(trace).ToArray(),
+                        ReplayDiscreteEvents = new List<string>(recordedEpisode.DiscreteEvents).ToArray(),
+                        ReplayPositions = new List<Vector2>(recordedEpisode.Positions).ToArray()
                     }));
                     fileSystem.MoveDirectory(stagingDirectory, finalDirectory);
                     published = true;

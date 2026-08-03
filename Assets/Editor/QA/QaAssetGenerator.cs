@@ -31,18 +31,15 @@ namespace Vampire.Editor.QA
         {
             EnsureFolder("Assets/Blueprints", "QA");
             EnsureFolder("Assets/Scenes", "QA");
-            CopyIfMissing(SourceLevelPath, QaLevelPath);
-            CopyIfMissing(SourceChestPath, QaChestPath);
-            AssetDatabase.Refresh();
+            SynchronizeAssetCopy(SourceLevelPath, QaLevelPath);
+            SynchronizeAssetCopy(SourceChestPath, QaChestPath);
 
             ConfigureQaChest();
             ConfigureQaLevel();
-            CopyIfMissing(SourceScenePath, QaScenePath);
-            AssetDatabase.Refresh();
+            SynchronizeQaSceneCopy();
             ConfigureQaScene();
             ConfigureBuildSettings();
             AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
         }
 
         public static void GenerateForBatchMode()
@@ -64,12 +61,20 @@ namespace Vampire.Editor.QA
                 System.IO.Directory.CreateDirectory(buildDirectory);
 
             var report = BuildPipeline.BuildPlayer(
-                EditorBuildSettings.scenes.Where(scene => scene.enabled).Select(scene => scene.path).ToArray(),
+                GetQaPlayerBuildScenePaths(),
                 buildDirectory + "/QaGameplay.app",
                 BuildTarget.StandaloneOSX,
                 BuildOptions.None);
             if (report.summary.result != BuildResult.Succeeded)
                 throw new InvalidOperationException("QA player build failed: " + report.summary.result);
+        }
+
+        public static string[] GetQaPlayerBuildScenePaths()
+        {
+            var enabledPaths = EditorBuildSettings.scenes.Where(scene => scene.enabled).Select(scene => scene.path).ToArray();
+            if (!enabledPaths.Contains(QaScenePath))
+                throw new InvalidOperationException("QA Gameplay must be an enabled build scene before building the QA player.");
+            return new[] { QaScenePath }.Concat(enabledPaths.Where(path => path != QaScenePath)).ToArray();
         }
 
         private static void ConfigureQaChest()
@@ -90,6 +95,7 @@ namespace Vampire.Editor.QA
                     ? 0f
                     : sourceLoot[index].dropChance / positiveTotal;
 
+            qa.name = "QA Default Chest";
             EditorUtility.SetDirty(qa);
         }
 
@@ -105,6 +111,7 @@ namespace Vampire.Editor.QA
             qa.chestSpawnDelay = source.chestSpawnDelay * (qa.levelTime / source.levelTime);
             qa.chestSpawnAmount = source.chestSpawnAmount;
             qa.chestBlueprint = RequireAsset<ChestBlueprint>(QaChestPath);
+            qa.name = "QA Level 1";
             EditorUtility.SetDirty(qa);
         }
 
@@ -217,12 +224,41 @@ namespace Vampire.Editor.QA
             return asset;
         }
 
-        private static void CopyIfMissing(string sourcePath, string destinationPath)
+        private static void SynchronizeAssetCopy(string sourcePath, string destinationPath)
         {
-            if (AssetDatabase.LoadMainAssetAtPath(destinationPath) != null)
+            var source = AssetDatabase.LoadMainAssetAtPath(sourcePath);
+            var destination = AssetDatabase.LoadMainAssetAtPath(destinationPath);
+            if (source == null)
+                throw new InvalidOperationException("Missing source asset: " + sourcePath + ".");
+            if (destination == null)
+            {
+                if (!AssetDatabase.CopyAsset(sourcePath, destinationPath))
+                    throw new InvalidOperationException("Unable to copy " + sourcePath + " to " + destinationPath + ".");
                 return;
-            if (!AssetDatabase.CopyAsset(sourcePath, destinationPath))
-                throw new InvalidOperationException("Unable to copy " + sourcePath + " to " + destinationPath + ".");
+            }
+
+            EditorUtility.CopySerialized(source, destination);
+            EditorUtility.SetDirty(destination);
+        }
+
+        private static void SynchronizeQaSceneCopy()
+        {
+            if (AssetDatabase.LoadMainAssetAtPath(QaScenePath) == null)
+            {
+                if (!AssetDatabase.CopyAsset(SourceScenePath, QaScenePath))
+                    throw new InvalidOperationException("Unable to copy " + SourceScenePath + " to " + QaScenePath + ".");
+                return;
+            }
+
+            const string temporaryScenePath = "Assets/Scenes/QA/QA Gameplay Source Sync.unity";
+            if (AssetDatabase.LoadMainAssetAtPath(temporaryScenePath) != null)
+                AssetDatabase.DeleteAsset(temporaryScenePath);
+            if (!AssetDatabase.CopyAsset(SourceScenePath, temporaryScenePath))
+                throw new InvalidOperationException("Unable to stage the QA scene source synchronization.");
+            FileUtil.ReplaceFile(temporaryScenePath, QaScenePath);
+            AssetDatabase.ImportAsset(QaScenePath, ImportAssetOptions.ForceUpdate);
+            if (AssetDatabase.LoadMainAssetAtPath(temporaryScenePath) != null)
+                AssetDatabase.DeleteAsset(temporaryScenePath);
         }
 
         private static void EnsureFolder(string parent, string child)

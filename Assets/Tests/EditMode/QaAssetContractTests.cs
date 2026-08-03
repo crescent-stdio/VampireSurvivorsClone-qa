@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using NUnit.Framework;
 using Unity.MLAgents;
 using Unity.MLAgents.Policies;
@@ -55,6 +56,46 @@ namespace Vampire.Tests.EditMode
         }
 
         [Test]
+        public void Qa_generator_repairs_source_derived_assets_and_scene_without_changing_qa_guids()
+        {
+            var levelGuid = AssetDatabase.AssetPathToGUID(QaLevelPath);
+            var sceneGuid = AssetDatabase.AssetPathToGUID(QaScenePath);
+            var source = Load<LevelBlueprint>(SourceLevelPath);
+            var qa = Load<LevelBlueprint>(QaLevelPath);
+            qa.initialExpGemCount = -99;
+            qa.monsters = Array.Empty<LevelBlueprint.MonstersContainer>();
+            EditorUtility.SetDirty(qa);
+
+            var scene = EditorSceneManager.OpenScene(QaScenePath, OpenSceneMode.Additive);
+            try
+            {
+                var sentinel = new GameObject("QA source synchronization sentinel");
+                SceneManager.MoveGameObjectToScene(sentinel, scene);
+                EditorSceneManager.SaveScene(scene);
+            }
+            finally
+            {
+                EditorSceneManager.CloseScene(scene, true);
+            }
+
+            InvokeQaGenerator("Generate");
+
+            Assert.That(AssetDatabase.AssetPathToGUID(QaLevelPath), Is.EqualTo(levelGuid));
+            Assert.That(AssetDatabase.AssetPathToGUID(QaScenePath), Is.EqualTo(sceneGuid));
+            Assert.That(qa.initialExpGemCount, Is.EqualTo(source.initialExpGemCount));
+            Assert.That(qa.monsters, Has.Length.EqualTo(source.monsters.Length));
+            scene = EditorSceneManager.OpenScene(QaScenePath, OpenSceneMode.Additive);
+            try
+            {
+                Assert.That(scene.GetRootGameObjects().Select(root => root.name), Does.Not.Contain("QA source synchronization sentinel"));
+            }
+            finally
+            {
+                EditorSceneManager.CloseScene(scene, true);
+            }
+        }
+
+        [Test]
         public void Qa_chest_normalizes_relative_positive_loot_probabilities()
         {
             var source = Load<ChestBlueprint>(SourceChestPath);
@@ -83,6 +124,28 @@ namespace Vampire.Tests.EditMode
             }
 
             Assert.That(sourceLoot.Sum(loot => loot.dropChance), Is.EqualTo(1.91f).Within(0.0001f), "Known source risk: do not alter the original chest asset.");
+        }
+
+        [Test]
+        public void Qa_asset_references_and_monster_spawn_arrays_are_complete()
+        {
+            var qa = Load<LevelBlueprint>(QaLevelPath);
+            var monsterCount = qa.monsters.Sum(container => container.monsterBlueprints.Length);
+
+            Assert.That(qa.abilityPrefabs, Is.All.Not.Null);
+            Assert.That(qa.monsters, Is.All.Matches<LevelBlueprint.MonstersContainer>(container =>
+                container != null && container.monstersPrefab != null && container.monsterBlueprints.All(blueprint => blueprint != null)));
+            Assert.That(qa.miniBosses, Is.All.Matches<LevelBlueprint.MiniBossContainer>(boss =>
+                boss != null && boss.bossPrefab != null && boss.bossBlueprint != null));
+            Assert.That(qa.finalBoss, Is.Not.Null);
+            Assert.That(qa.finalBoss.bossPrefab, Is.Not.Null);
+            Assert.That(qa.finalBoss.bossBlueprint, Is.Not.Null);
+            Assert.That(qa.chestBlueprint.closedChest, Is.Not.Null);
+            Assert.That(qa.chestBlueprint.openingChest, Is.Not.Null);
+            Assert.That(qa.chestBlueprint.openChest, Is.Not.Null);
+            Assert.That(qa.chestBlueprint.lootTable.lootTable.Where(loot => loot.dropChance > 0f), Is.All.Matches<Loot<GameObject>>(loot => loot.item != null));
+            Assert.That(qa.monsterSpawnTable.spawnChanceKeyframes, Is.All.Matches<MonsterSpawnTable.SpawnChanceKeyframe>(keyframe => keyframe.spawnChances.Length == monsterCount));
+            Assert.That(qa.monsterSpawnTable.hpMultiplierKeyframes, Is.All.Matches<MonsterSpawnTable.HPMultiplierKeyframe>(keyframe => keyframe.healthBuffs.Length == monsterCount));
         }
 
         [Test]
@@ -157,6 +220,17 @@ namespace Vampire.Tests.EditMode
             Assert.That(serializedSettings.FindProperty("m_BuildAddressablesWithPlayerBuild").boolValue, Is.False);
         }
 
+        [Test]
+        public void Qa_player_build_starts_in_qa_gameplay_without_reordering_general_build_settings()
+        {
+            var paths = (string[])GetQaGeneratorType().GetMethod("GetQaPlayerBuildScenePaths", BindingFlags.Public | BindingFlags.Static)
+                .Invoke(null, null);
+
+            Assert.That(paths[0], Is.EqualTo(QaScenePath));
+            Assert.That(paths.Skip(1), Is.EqualTo(new[] { "Assets/Scenes/Game/Main Menu.unity", "Assets/Scenes/Game/Level 1.unity" }));
+            Assert.That(EditorBuildSettings.scenes.Where(scene => scene.enabled).Select(scene => scene.path).First(), Is.EqualTo("Assets/Scenes/Game/Main Menu.unity"));
+        }
+
         private static T Load<T>(string path) where T : UnityEngine.Object
         {
             var asset = AssetDatabase.LoadAssetAtPath<T>(path);
@@ -194,6 +268,20 @@ namespace Vampire.Tests.EditMode
             var entries = new SerializedObject(table).FindProperty("m_TableData");
             for (var index = 0; index < entries.arraySize; index++)
                 yield return entries.GetArrayElementAtIndex(index).FindPropertyRelative("m_Id").longValue;
+        }
+
+        private static void InvokeQaGenerator(string methodName)
+        {
+            GetQaGeneratorType().GetMethod(methodName, BindingFlags.Public | BindingFlags.Static).Invoke(null, null);
+        }
+
+        private static Type GetQaGeneratorType()
+        {
+            var generator = AppDomain.CurrentDomain.GetAssemblies()
+                .Select(assembly => assembly.GetType("Vampire.Editor.QA.QaAssetGenerator"))
+                .FirstOrDefault(type => type != null);
+            Assert.That(generator, Is.Not.Null, "QA asset generator must be available in the Editor assembly.");
+            return generator;
         }
     }
 }
