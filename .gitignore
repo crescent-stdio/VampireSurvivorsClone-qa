@@ -83,3 +83,8 @@ crashlytics-build.properties
 # QA gameplay lane generated outputs
 /QAArtifacts/
 /.venv-qa/
+
+# Understand Anything generated working files
+/.understand-anything/intermediate/
+/.understand-anything/tmp/
+/.understand-anything/.trash-*/
