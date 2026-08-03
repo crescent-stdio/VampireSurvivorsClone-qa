@@ -108,6 +108,7 @@ namespace Vampire
 
         public void GameOver()
         {
+            if (!initialized) return;
             if (!TryTransitionToOutcome(QaEpisodeOutcome.PlayerDied)) return;
 
             Time.timeScale = 0;
@@ -118,6 +119,7 @@ namespace Vampire
 
         public void LevelPassed(Monster finalBossKilled)
         {
+            if (!initialized) return;
             if (!TryTransitionToOutcome(QaEpisodeOutcome.Passed)) return;
 
             Time.timeScale = 0;
@@ -128,7 +130,13 @@ namespace Vampire
 
         public bool TryTransitionToOutcome(QaEpisodeOutcome terminalOutcome)
         {
-            if (terminalOutcome == QaEpisodeOutcome.InProgress || outcome != QaEpisodeOutcome.InProgress)
+            if (terminalOutcome != QaEpisodeOutcome.Passed &&
+                terminalOutcome != QaEpisodeOutcome.PlayerDied &&
+                terminalOutcome != QaEpisodeOutcome.TimedOut &&
+                terminalOutcome != QaEpisodeOutcome.Error)
+                return false;
+
+            if (outcome != QaEpisodeOutcome.InProgress)
                 return false;
 
             outcome = terminalOutcome;

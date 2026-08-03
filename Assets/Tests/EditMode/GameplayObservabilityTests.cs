@@ -60,6 +60,34 @@ namespace Vampire.Tests.EditMode
         }
 
         [Test]
+        public void LevelManager_rejects_undefined_terminal_outcomes_without_changing_state()
+        {
+            var gameObject = new GameObject("Level Manager");
+            var levelManager = gameObject.AddComponent<LevelManager>();
+
+            Assert.That(levelManager.TryTransitionToOutcome((QaEpisodeOutcome)999), Is.False);
+            Assert.That(levelManager.Outcome, Is.EqualTo(QaEpisodeOutcome.InProgress));
+
+            Object.DestroyImmediate(gameObject);
+        }
+
+        [Test]
+        public void LevelManager_ignores_terminal_entrypoints_before_initialization()
+        {
+            var gameObject = new GameObject("Level Manager");
+            var levelManager = gameObject.AddComponent<LevelManager>();
+            Time.timeScale = 0.4f;
+
+            Assert.DoesNotThrow(levelManager.GameOver);
+            Assert.DoesNotThrow(() => levelManager.LevelPassed(null));
+            Assert.That(levelManager.Outcome, Is.EqualTo(QaEpisodeOutcome.InProgress));
+            Assert.That(Time.timeScale, Is.EqualTo(0.4f));
+
+            Time.timeScale = 1f;
+            Object.DestroyImmediate(gameObject);
+        }
+
+        [Test]
         public void EntityManager_exposes_zero_counts_before_initialization()
         {
             var gameObject = new GameObject("Entity Manager");

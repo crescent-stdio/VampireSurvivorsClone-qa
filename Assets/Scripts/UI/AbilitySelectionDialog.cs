@@ -17,9 +17,19 @@ namespace Vampire
         private Character playerCharacter;
         private List<AbilityCard> abilityCards;
         private List<Ability> displayedAbilities;
+        private IReadOnlyList<Ability> displayedAbilitiesReadOnly;
         private bool menuOpen = false;
+        private static readonly IReadOnlyList<Ability> EmptyDisplayedAbilities = new List<Ability>().AsReadOnly();
         public bool MenuOpen { get => menuOpen; }
-        public IReadOnlyList<Ability> DisplayedAbilities { get => (IReadOnlyList<Ability>)displayedAbilities ?? System.Array.Empty<Ability>(); }
+        public IReadOnlyList<Ability> DisplayedAbilities
+        {
+            get
+            {
+                if (displayedAbilities == null) return EmptyDisplayedAbilities;
+                if (displayedAbilitiesReadOnly == null) displayedAbilitiesReadOnly = displayedAbilities.AsReadOnly();
+                return displayedAbilitiesReadOnly;
+            }
+        }
         public bool PauseOnOpen { get; set; } = true;
 
         public void Init(AbilityManager abilityManager, EntityManager entityManager, Character playerCharacter)
@@ -42,6 +52,7 @@ namespace Vampire
 
             // Select abilities/upgrades to display
             displayedAbilities = abilityManager.SelectAbilities();
+            displayedAbilitiesReadOnly = displayedAbilities.AsReadOnly();
             if (displayedAbilities.Count > 0)
             {
                 Populate(displayedAbilities);
@@ -76,8 +87,13 @@ namespace Vampire
 
         public override void Close()
         {
-            abilityManager.ReturnAbilities(displayedAbilities);
+            if (!menuOpen) return;
+
+            List<Ability> abilitiesToReturn = displayedAbilities;
             menuOpen = false;
+            displayedAbilities = null;
+            displayedAbilitiesReadOnly = null;
+            abilityManager.ReturnAbilities(abilitiesToReturn);
             if (PauseOnOpen)
             {
                 Time.timeScale = 1;

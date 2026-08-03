@@ -57,6 +57,61 @@ namespace Vampire.Tests.PlayMode
             yield return null;
         }
 
+        [UnityTest]
+        public IEnumerator Close_returns_displayed_abilities_only_once_and_consumes_them()
+        {
+            var dialog = CreateDialog();
+            var abilityObject = new GameObject("Test Ability");
+            var ability = abilityObject.AddComponent<CountingAbility>();
+            var errors = 0;
+            Application.LogCallback handler = (condition, _, type) =>
+            {
+                if (type == LogType.Error && condition.Contains("Item already exists"))
+                    errors++;
+            };
+            Application.logMessageReceived += handler;
+
+            try
+            {
+                SetPrivateField(dialog, "displayedAbilities", new List<Ability> { ability });
+                SetPrivateField(dialog, "menuOpen", true);
+
+                dialog.Close();
+                dialog.Close();
+
+                Assert.That(dialog.DisplayedAbilities, Is.Empty);
+                Assert.That(errors, Is.Zero);
+            }
+            finally
+            {
+                Application.logMessageReceived -= handler;
+                Object.Destroy(dialog.gameObject);
+                Object.Destroy(abilityObject);
+            }
+
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator DisplayedAbilities_cannot_be_mutated_through_the_read_only_contract()
+        {
+            var dialog = CreateDialog();
+            var abilityObject = new GameObject("Test Ability");
+            var ability = abilityObject.AddComponent<CountingAbility>();
+            SetPrivateField(dialog, "displayedAbilities", new List<Ability> { ability });
+
+            var options = dialog.DisplayedAbilities;
+            var mutableOptions = options as IList<Ability>;
+
+            Assert.That(mutableOptions, Is.Not.Null);
+            Assert.Throws<NotSupportedException>(() => mutableOptions.Add(ability));
+            Assert.That(dialog.DisplayedAbilities, Has.Count.EqualTo(1));
+
+            Object.Destroy(dialog.gameObject);
+            Object.Destroy(abilityObject);
+            yield return null;
+        }
+
         private static TrackingAbilitySelectionDialog CreateDialog()
         {
             var dialogObject = new GameObject("Ability Selection Dialog");
