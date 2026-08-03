@@ -9,7 +9,7 @@ namespace Vampire
     /// Orchestrates one deterministic QA episode around existing gameplay components.
     /// </summary>
     [DefaultExecutionOrder(-1000)]
-    public sealed class QaEpisodeController : MonoBehaviour
+    public sealed class QaEpisodeController : MonoBehaviour, IQaGameplayController
     {
         public const float ControlIntervalSeconds = 0.1f;
         public const int MaxCatchUpSteps = 4;
@@ -52,6 +52,9 @@ namespace Vampire
         public int DuplicateTerminalCount { get; private set; }
         public float PendingControlSeconds => pendingControlSeconds;
         public bool IsLogSubscribed => logSubscribed;
+        public QaEpisodeOutcome CurrentOutcome => TerminalResult == null
+            ? (levelManager == null ? QaEpisodeOutcome.InProgress : levelManager.Outcome)
+            : TerminalResult.Outcome;
 
         private void Awake()
         {
@@ -125,6 +128,17 @@ namespace Vampire
         public void RecordDiscreteEvent(string eventName)
         {
             recorder.RecordDiscreteEvent(eventName);
+        }
+
+        public QaObservation CaptureAgentObservation()
+        {
+            return CaptureObservation();
+        }
+
+        public void ApplyAgentAction(QaAction action)
+        {
+            if (action != null)
+                Apply(action);
         }
 
         private void BeginEpisode()
@@ -206,6 +220,7 @@ namespace Vampire
                 observation.PlayerHealth = playerCharacter.CurrentHealth;
                 observation.PlayerMaxHealth = playerCharacter.MaxHealth;
                 observation.PlayerExperience = playerCharacter.CurrentExperience;
+                observation.PlayerNextExperience = playerCharacter.NextExperience;
                 observation.PlayerLevel = playerCharacter.CurrentLevel;
                 observation.IsPlayerAlive = playerCharacter.IsAlive;
             }

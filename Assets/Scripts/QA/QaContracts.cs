@@ -37,6 +37,7 @@ public sealed class QaObservation
     public float PlayerHealth { get; set; }
     public float PlayerMaxHealth { get; set; }
     public float PlayerExperience { get; set; }
+    public float PlayerNextExperience { get; set; }
     public int PlayerLevel { get; set; }
     public bool IsPlayerAlive { get; set; }
     public Vector2[] NearestEnemyPositions { get; }
