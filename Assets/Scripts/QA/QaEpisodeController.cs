@@ -21,6 +21,7 @@ namespace Vampire
         [SerializeField] private Character playerCharacter;
         [SerializeField] private LevelManager levelManager;
         [SerializeField] private AbilitySelectionDialog abilitySelectionDialog;
+        [SerializeField] private bool disableAbilityPause = true;
         [SerializeField] private EntityManager entityManager;
         [SerializeField] private StatsManager statsManager;
 
@@ -60,6 +61,8 @@ namespace Vampire
 
         private void Awake()
         {
+            if (disableAbilityPause && abilitySelectionDialog != null)
+                abilitySelectionDialog.PauseOnOpen = false;
             BeginEpisode();
         }
 

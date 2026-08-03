@@ -79,3 +79,7 @@ crashlytics-build.properties
 
 # Local Git worktrees
 .worktrees/
+
+# QA gameplay lane generated outputs
+/QAArtifacts/
+/.venv-qa/

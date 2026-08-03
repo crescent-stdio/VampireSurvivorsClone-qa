@@ -8,6 +8,8 @@
 ## About
 A Vampire Survivors inspired mobile game built from scratch in Unity.
 
+QA operators: see [the QA gameplay runbook](docs/qa/README.md).
+
 ### Features
 - 20+ upgradeable weapons and abilities
 - 4 unique enemy types and 2 bosses
