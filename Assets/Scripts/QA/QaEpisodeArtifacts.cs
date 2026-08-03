@@ -74,12 +74,19 @@ namespace Vampire
 
     public sealed class QaArtifactPaths
     {
+        public string EpisodeDirectory { get; }
         public string ActionTracePath { get; }
         public string TelemetryPath { get; }
         public string SummaryPath { get; }
 
         public QaArtifactPaths(string actionTracePath, string telemetryPath, string summaryPath)
+            : this(Path.GetDirectoryName(actionTracePath), actionTracePath, telemetryPath, summaryPath)
         {
+        }
+
+        public QaArtifactPaths(string episodeDirectory, string actionTracePath, string telemetryPath, string summaryPath)
+        {
+            EpisodeDirectory = episodeDirectory;
             ActionTracePath = actionTracePath;
             TelemetryPath = telemetryPath;
             SummaryPath = summaryPath;
@@ -121,10 +128,13 @@ namespace Vampire
 
     public interface IQaArtifactFileSystem
     {
+        bool DirectoryExists(string path);
         void CreateDirectory(string path);
         void WriteAllText(string path, string contents);
         void MoveReplace(string sourcePath, string destinationPath);
         void DeleteFile(string path);
+        void MoveDirectory(string sourcePath, string destinationPath);
+        void DeleteDirectory(string path);
     }
 
     public sealed class QaArtifactWriter : IQaArtifactWriter
@@ -156,52 +166,59 @@ namespace Vampire
 
             try
             {
+                var episodeName = "episode-" + seed.ToString("D8");
+                var finalDirectory = Path.Combine(directory, episodeName);
+                if (fileSystem.DirectoryExists(finalDirectory))
+                    return QaArtifactWriteResult.Failed("Episode artifact directory already exists.");
+
                 fileSystem.CreateDirectory(directory);
-                var prefix = "episode-" + seed.ToString("D8");
-                var actionPath = Path.Combine(directory, prefix + "-actions.jsonl");
-                var telemetryPath = Path.Combine(directory, prefix + "-telemetry.jsonl");
-                var summaryPath = Path.Combine(directory, prefix + "-summary.json");
-                WriteAtomically(actionPath, SerializeLines(trace, entry => new QaArtifactLine
+                var stagingDirectory = Path.Combine(directory, "." + episodeName + "." + Guid.NewGuid().ToString("N") + ".staging");
+                fileSystem.CreateDirectory(stagingDirectory);
+                var published = false;
+                try
                 {
-                    Schema = SchemaVersion, Kind = "action", Seed = seed, Tick = entry.Tick, Sequence = entry.Sequence,
-                    Time = entry.Time, MovementX = entry.MovementX, MovementY = entry.MovementY, AbilityChoice = entry.AbilityChoice
-                }));
-                WriteAtomically(telemetryPath, SerializeLines(telemetry, entry => new QaArtifactLine
+                    var actionPath = Path.Combine(stagingDirectory, "actions.jsonl");
+                    var telemetryPath = Path.Combine(stagingDirectory, "telemetry.jsonl");
+                    var summaryPath = Path.Combine(stagingDirectory, "summary.json");
+                    fileSystem.WriteAllText(actionPath, SerializeLines(trace, entry => new QaArtifactLine
+                    {
+                        Schema = SchemaVersion, Kind = "action", Seed = seed, Tick = entry.Tick, Sequence = entry.Sequence,
+                        Time = entry.Time, MovementX = entry.MovementX, MovementY = entry.MovementY, AbilityChoice = entry.AbilityChoice
+                    }));
+                    fileSystem.WriteAllText(telemetryPath, SerializeLines(telemetry, entry => new QaArtifactLine
+                    {
+                        Schema = SchemaVersion, Kind = "telemetry", Seed = seed, Tick = entry.Tick, Time = entry.Time,
+                        Outcome = result.Outcome, Event = entry.Event
+                    }));
+                    fileSystem.WriteAllText(summaryPath, JsonUtility.ToJson(new QaEpisodeSummary
+                    {
+                        Schema = SchemaVersion,
+                        Seed = result.Seed,
+                        Outcome = result.Outcome,
+                        ElapsedSeconds = result.ElapsedSeconds,
+                        KillCount = result.KillCount,
+                        FinalLevel = result.FinalLevel,
+                        FailureReason = result.FailureReason,
+                        RecordedPositionCount = recordedEpisode.Positions.Count,
+                        DiscreteEventCount = recordedEpisode.DiscreteEvents.Count
+                    }));
+                    fileSystem.MoveDirectory(stagingDirectory, finalDirectory);
+                    published = true;
+                    return QaArtifactWriteResult.Succeeded(new QaArtifactPaths(
+                        finalDirectory,
+                        Path.Combine(finalDirectory, "actions.jsonl"),
+                        Path.Combine(finalDirectory, "telemetry.jsonl"),
+                        Path.Combine(finalDirectory, "summary.json")));
+                }
+                finally
                 {
-                    Schema = SchemaVersion, Kind = "telemetry", Seed = seed, Tick = entry.Tick, Time = entry.Time,
-                    Outcome = result.Outcome, Event = entry.Event
-                }));
-                WriteAtomically(summaryPath, JsonUtility.ToJson(new QaEpisodeSummary
-                {
-                    Schema = SchemaVersion,
-                    Seed = result.Seed,
-                    Outcome = result.Outcome,
-                    ElapsedSeconds = result.ElapsedSeconds,
-                    KillCount = result.KillCount,
-                    FinalLevel = result.FinalLevel,
-                    FailureReason = result.FailureReason,
-                    RecordedPositionCount = recordedEpisode.Positions.Count,
-                    DiscreteEventCount = recordedEpisode.DiscreteEvents.Count
-                }));
-                return QaArtifactWriteResult.Succeeded(new QaArtifactPaths(actionPath, telemetryPath, summaryPath));
+                    if (!published)
+                        fileSystem.DeleteDirectory(stagingDirectory);
+                }
             }
             catch (Exception exception)
             {
                 return QaArtifactWriteResult.Failed(exception.Message);
-            }
-        }
-
-        private void WriteAtomically(string finalPath, string contents)
-        {
-            var temporaryPath = finalPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            try
-            {
-                fileSystem.WriteAllText(temporaryPath, contents);
-                fileSystem.MoveReplace(temporaryPath, finalPath);
-            }
-            finally
-            {
-                fileSystem.DeleteFile(temporaryPath);
             }
         }
 
@@ -250,6 +267,11 @@ namespace Vampire
     {
         private static readonly UTF8Encoding Utf8WithoutBom = new UTF8Encoding(false);
 
+        public bool DirectoryExists(string path)
+        {
+            return Directory.Exists(path);
+        }
+
         public void CreateDirectory(string path)
         {
             Directory.CreateDirectory(path);
@@ -272,6 +294,17 @@ namespace Vampire
         {
             if (File.Exists(path))
                 File.Delete(path);
+        }
+
+        public void MoveDirectory(string sourcePath, string destinationPath)
+        {
+            Directory.Move(sourcePath, destinationPath);
+        }
+
+        public void DeleteDirectory(string path)
+        {
+            if (Directory.Exists(path))
+                Directory.Delete(path, true);
         }
     }
 }

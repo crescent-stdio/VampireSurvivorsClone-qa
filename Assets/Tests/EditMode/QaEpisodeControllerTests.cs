@@ -153,7 +153,7 @@ namespace Vampire.Tests.EditMode
         [Test]
         public void Artifact_writer_emits_valid_json_lines_and_a_summary()
         {
-            var writer = new QaArtifactWriter(ArtifactDirectory, 7);
+            var writer = new QaArtifactWriter(ArtifactDirectory + "/round2-success-" + Guid.NewGuid().ToString("N"), 7);
             var result = new QaEpisodeResult { Seed = 7, Outcome = QaEpisodeOutcome.Passed, ElapsedSeconds = 1.2f };
             var trace = new List<QaActionTraceEntry>
             {
@@ -171,6 +171,8 @@ namespace Vampire.Tests.EditMode
             Assert.That(JsonUtility.FromJson<QaArtifactLine>(File.ReadAllLines(paths.ActionTracePath)[0]).Schema, Is.EqualTo(QaArtifactWriter.SchemaVersion));
             Assert.That(JsonUtility.FromJson<QaArtifactLine>(File.ReadAllLines(paths.TelemetryPath)[0]).Tick, Is.EqualTo(1));
             Assert.That(JsonUtility.FromJson<QaEpisodeSummary>(File.ReadAllText(paths.SummaryPath)).Outcome, Is.EqualTo(QaEpisodeOutcome.Passed));
+            Assert.That(Path.GetFileName(Path.GetDirectoryName(paths.ActionTracePath)), Is.EqualTo("episode-00000007"));
+            Assert.That(Directory.GetFiles(Path.GetDirectoryName(paths.ActionTracePath)), Has.Length.EqualTo(3));
         }
 
         [Test]
@@ -307,6 +309,43 @@ namespace Vampire.Tests.EditMode
             Object.DestroyImmediate(controller.gameObject);
         }
 
+        [TestCase(2)]
+        [TestCase(3)]
+        public void Artifact_writer_does_not_publish_any_final_episode_file_when_a_post_action_write_fails(int failingWrite)
+        {
+            var fileSystem = new StagingArtifactFileSystem { FailOnWrite = failingWrite };
+            var writer = new QaArtifactWriter("tests/round2-telemetry-failure", 22, fileSystem);
+
+            var write = writer.Write(
+                new QaEpisodeResult { Seed = 22, Outcome = QaEpisodeOutcome.Error },
+                new List<QaActionTraceEntry> { new QaActionTraceEntry(1, 1, 0.1f, new QaAction(Vector2.zero)) },
+                new List<QaTelemetryEntry> { new QaTelemetryEntry(1, 0.1f, "telemetry") },
+                new QaRecordedEpisode(QaEpisodeOutcome.Error, new string[0], new Vector2[0]));
+
+            Assert.That(write.Success, Is.False);
+            Assert.That(fileSystem.PublishedFileCount, Is.Zero);
+            Assert.That(fileSystem.MoveDirectoryCalls, Is.Zero);
+            Assert.That(fileSystem.DeleteDirectoryCalls, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void Artifact_writer_rejects_an_existing_episode_directory_before_writing_or_overwriting()
+        {
+            var fileSystem = new StagingArtifactFileSystem { FinalDirectoryAlreadyExists = true };
+            var writer = new QaArtifactWriter("tests/round2-collision", 23, fileSystem);
+
+            var write = writer.Write(
+                new QaEpisodeResult { Seed = 23, Outcome = QaEpisodeOutcome.Error },
+                new List<QaActionTraceEntry>(),
+                new List<QaTelemetryEntry>(),
+                new QaRecordedEpisode(QaEpisodeOutcome.Error, new string[0], new Vector2[0]));
+
+            Assert.That(write.Success, Is.False);
+            Assert.That(fileSystem.CreateDirectoryCalls, Is.Zero);
+            Assert.That(fileSystem.WriteCalls, Is.Zero);
+            Assert.That(fileSystem.PublishedFileCount, Is.Zero);
+        }
+
         private static QaRecordedEpisode RecordedEpisode(QaEpisodeOutcome outcome, string discreteEvent, Vector2 position)
         {
             return new QaRecordedEpisode(outcome, new[] { discreteEvent }, new[] { position });
@@ -335,10 +374,45 @@ namespace Vampire.Tests.EditMode
 
         private sealed class ThrowingArtifactFileSystem : IQaArtifactFileSystem
         {
+            public bool DirectoryExists(string path) { return false; }
             public void CreateDirectory(string path) { throw new IOException("forced"); }
             public void WriteAllText(string path, string contents) { throw new IOException("forced"); }
             public void MoveReplace(string sourcePath, string destinationPath) { throw new IOException("forced"); }
             public void DeleteFile(string path) { }
+            public void MoveDirectory(string sourcePath, string destinationPath) { throw new IOException("forced"); }
+            public void DeleteDirectory(string path) { }
+        }
+
+        private sealed class StagingArtifactFileSystem : IQaArtifactFileSystem
+        {
+            public int FailOnWrite { get; set; }
+            public bool FinalDirectoryAlreadyExists { get; set; }
+            public int CreateDirectoryCalls { get; private set; }
+            public int WriteCalls { get; private set; }
+            public int PublishedFileCount { get; private set; }
+            public int MoveDirectoryCalls { get; private set; }
+            public int DeleteDirectoryCalls { get; private set; }
+
+            public bool DirectoryExists(string path) { return FinalDirectoryAlreadyExists; }
+            public void CreateDirectory(string path) { CreateDirectoryCalls++; }
+            public void WriteAllText(string path, string contents)
+            {
+                WriteCalls++;
+                if (WriteCalls == FailOnWrite) throw new IOException("forced");
+            }
+            public void MoveReplace(string sourcePath, string destinationPath)
+            {
+                if (FinalDirectoryAlreadyExists) throw new IOException("collision");
+                PublishedFileCount++;
+            }
+            public void DeleteFile(string path) { }
+            public void MoveDirectory(string sourcePath, string destinationPath)
+            {
+                if (FinalDirectoryAlreadyExists) throw new IOException("collision");
+                MoveDirectoryCalls++;
+                PublishedFileCount = 3;
+            }
+            public void DeleteDirectory(string path) { DeleteDirectoryCalls++; }
         }
     }
 }
