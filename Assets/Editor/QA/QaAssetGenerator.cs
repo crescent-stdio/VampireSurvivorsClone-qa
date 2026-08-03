@@ -77,6 +77,12 @@ namespace Vampire.Editor.QA
             return new[] { QaScenePath }.Concat(enabledPaths.Where(path => path != QaScenePath)).ToArray();
         }
 
+        public static string GetSourceSceneFingerprint()
+        {
+            var projectRoot = System.IO.Directory.GetParent(Application.dataPath).FullName;
+            return Hash128.Compute(System.IO.File.ReadAllText(System.IO.Path.Combine(projectRoot, SourceScenePath))).ToString();
+        }
+
         private static void ConfigureQaChest()
         {
             var source = RequireAsset<ChestBlueprint>(SourceChestPath);
@@ -135,6 +141,7 @@ namespace Vampire.Editor.QA
 
                 SetObjectReference(controller, "qaCharacter", RequireAsset<CharacterBlueprint>(QaCharacterPath));
                 SetString(controller, "qaSceneName", "QA Gameplay");
+                SetString(controller, "sourceSceneFingerprint", GetSourceSceneFingerprint());
                 SetString(controller, "artifactDirectory", QaArtifactDirectory);
                 SetObjectReference(controller, "playerCharacter", playerCharacter);
                 SetObjectReference(controller, "levelManager", levelManager);
@@ -250,6 +257,9 @@ namespace Vampire.Editor.QA
                 return;
             }
 
+            if (IsQaSceneSynchronized(GetSourceSceneFingerprint()))
+                return;
+
             const string temporaryScenePath = "Assets/Scenes/QA/QA Gameplay Source Sync.unity";
             if (AssetDatabase.LoadMainAssetAtPath(temporaryScenePath) != null)
                 AssetDatabase.DeleteAsset(temporaryScenePath);
@@ -259,6 +269,26 @@ namespace Vampire.Editor.QA
             AssetDatabase.ImportAsset(QaScenePath, ImportAssetOptions.ForceUpdate);
             if (AssetDatabase.LoadMainAssetAtPath(temporaryScenePath) != null)
                 AssetDatabase.DeleteAsset(temporaryScenePath);
+        }
+
+        private static bool IsQaSceneSynchronized(string sourceFingerprint)
+        {
+            var scene = EditorSceneManager.OpenScene(QaScenePath, OpenSceneMode.Additive);
+            try
+            {
+                var controller = scene.GetRootGameObjects()
+                    .SelectMany(root => root.GetComponentsInChildren<QaEpisodeController>(true))
+                    .SingleOrDefault();
+                if (controller == null)
+                    return false;
+
+                var property = new SerializedObject(controller).FindProperty("sourceSceneFingerprint");
+                return property != null && property.stringValue == sourceFingerprint;
+            }
+            finally
+            {
+                EditorSceneManager.CloseScene(scene, true);
+            }
         }
 
         private static void EnsureFolder(string parent, string child)

@@ -17,6 +17,7 @@ namespace Vampire
         [SerializeField] private int episodeSeed = 1;
         [SerializeField] private CharacterBlueprint qaCharacter;
         [SerializeField] private string qaSceneName = "QA Level";
+        [SerializeField] private string sourceSceneFingerprint;
         [SerializeField] private string artifactDirectory = "QAArtifacts";
         [SerializeField] private Character playerCharacter;
         [SerializeField] private LevelManager levelManager;

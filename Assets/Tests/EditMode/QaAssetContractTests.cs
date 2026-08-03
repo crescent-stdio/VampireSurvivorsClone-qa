@@ -73,6 +73,10 @@ namespace Vampire.Tests.EditMode
                 {
                     var sentinel = new GameObject("QA source synchronization sentinel");
                     SceneManager.MoveGameObjectToScene(sentinel, scene);
+                    var controller = FindInScene<QaEpisodeController>(scene);
+                    var serializedController = new SerializedObject(controller);
+                    serializedController.FindProperty("sourceSceneFingerprint").stringValue = "stale";
+                    serializedController.ApplyModifiedPropertiesWithoutUndo();
                     EditorSceneManager.SaveScene(scene);
                 }
                 finally
@@ -90,6 +94,8 @@ namespace Vampire.Tests.EditMode
                 try
                 {
                     Assert.That(scene.GetRootGameObjects().Select(root => root.name), Does.Not.Contain("QA source synchronization sentinel"));
+                    var controller = FindInScene<QaEpisodeController>(scene);
+                    Assert.That(GetString(controller, "sourceSceneFingerprint"), Is.EqualTo(GetQaGeneratorString("GetSourceSceneFingerprint")));
                 }
                 finally
                 {
@@ -285,6 +291,11 @@ namespace Vampire.Tests.EditMode
                 .FirstOrDefault(type => type != null);
             Assert.That(generator, Is.Not.Null, "QA asset generator must be available in the Editor assembly.");
             return generator;
+        }
+
+        private static string GetQaGeneratorString(string methodName)
+        {
+            return (string)GetQaGeneratorType().GetMethod(methodName, BindingFlags.Public | BindingFlags.Static).Invoke(null, null);
         }
     }
 }
