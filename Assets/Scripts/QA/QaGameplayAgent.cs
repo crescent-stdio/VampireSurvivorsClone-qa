@@ -52,8 +52,14 @@ namespace Vampire
             if (terminalHandled)
                 return;
 
-            var action = QaAgentActionMapper.Map(ToArray(actions.ContinuousActions), ToArray(actions.DiscreteActions));
             var gameplayController = RequireController();
+            if (gameplayController.CurrentOutcome != QaEpisodeOutcome.InProgress)
+            {
+                CompleteIfTerminal(gameplayController.CurrentOutcome);
+                return;
+            }
+
+            var action = QaAgentActionMapper.Map(ToArray(actions.ContinuousActions), ToArray(actions.DiscreteActions));
             gameplayController.SubmitExternalAction(action);
 
             var observation = CaptureObservation();

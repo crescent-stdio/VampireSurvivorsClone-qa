@@ -217,7 +217,28 @@ namespace Vampire.Tests.EditMode
             controller.Observation = new QaObservation { PlayerLevel = 1, ElapsedSeconds = 0f };
             agent.OnEpisodeBegin();
             agent.OnActionReceived(new ActionBuffers(new float[2], new[] { 0 }));
-            Assert.That(controller.SubmittedActions, Has.Count.EqualTo(4));
+            Assert.That(controller.SubmittedActions, Has.Count.EqualTo(3));
+            Assert.That(agent.EndEpisodeCalls, Is.EqualTo(1));
+            DestroyAgent(agent);
+        }
+
+        [TestCase(QaEpisodeOutcome.Passed, 10f)]
+        [TestCase(QaEpisodeOutcome.PlayerDied, -2f)]
+        [TestCase(QaEpisodeOutcome.Error, -2f)]
+        public void GameplayAgent_rejects_actions_already_terminal_before_receipt(QaEpisodeOutcome outcome, float expectedReward)
+        {
+            var controller = new RecordingController
+            {
+                Observation = new QaObservation { PlayerLevel = 1 },
+                Outcome = outcome
+            };
+            var agent = CreateAgent(controller);
+
+            agent.OnActionReceived(new ActionBuffers(new[] { 1f, 0f }, new[] { 1 }));
+            agent.OnActionReceived(new ActionBuffers(new[] { 1f, 0f }, new[] { 1 }));
+
+            Assert.That(controller.SubmittedActions, Is.Empty);
+            Assert.That(agent.Rewards, Is.EqualTo(new[] { expectedReward }));
             Assert.That(agent.EndEpisodeCalls, Is.EqualTo(1));
             DestroyAgent(agent);
         }
@@ -259,6 +280,27 @@ namespace Vampire.Tests.EditMode
             Assert.That(controller.LastActionAcknowledgement.Sequence, Is.EqualTo(1));
             Assert.That(controller.LastActionAcknowledgement.Tick, Is.EqualTo(1));
             UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+
+        [Test]
+        public void EpisodeController_rejects_external_actions_after_level_outcome_before_controller_completion()
+        {
+            var levelObject = new GameObject("Terminal Level Manager");
+            var levelManager = levelObject.AddComponent<LevelManager>();
+            Assert.That(levelManager.TryTransitionToOutcome(QaEpisodeOutcome.Passed), Is.True);
+
+            var controllerObject = new GameObject("Terminal External Controller");
+            var controller = controllerObject.AddComponent<QaEpisodeController>();
+            typeof(QaEpisodeController).GetField("levelManager", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(controller, levelManager);
+            controller.ConfigureForTesting(23, null, "QA Level", "QAArtifacts", new FixedPolicy(new QaAction(Vector2.right)), new NoOpReloader());
+            controller.EnableExternalAgentControl();
+
+            Assert.That(controller.SubmitExternalAction(new QaAction(Vector2.left)), Is.False);
+            Assert.That(controller.ActionTrace, Is.Empty);
+            Assert.That(controller.LastActionAcknowledgement.Sequence, Is.Zero);
+            Assert.That(controller.LastActionAcknowledgement.Tick, Is.Zero);
+            UnityEngine.Object.DestroyImmediate(controllerObject);
+            UnityEngine.Object.DestroyImmediate(levelObject);
         }
 
         [Test]

@@ -144,7 +144,7 @@ namespace Vampire
 
         public bool SubmitExternalAction(QaAction action)
         {
-            if (ControlMode != QaControlMode.ExternalAgent || TerminalResult != null || action == null)
+            if (ControlMode != QaControlMode.ExternalAgent || TerminalResult != null || CurrentOutcome != QaEpisodeOutcome.InProgress || action == null)
                 return false;
 
             RecordAppliedAction(action);
