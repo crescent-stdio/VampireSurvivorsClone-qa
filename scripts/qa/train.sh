@@ -3,7 +3,7 @@
 set -eu
 . "$(dirname -- "$0")/common.sh"
 
-QA_PLAYER=${1:-$QA_PROJECT_ROOT/QAArtifacts/player/QaGameplay.app/Contents/MacOS/QaGameplay}
+QA_PLAYER=${1:-$QA_DEFAULT_PLAYER}
 qa_require_python
 qa_require_executable "$QA_PROJECT_ROOT/.venv-qa/bin/mlagents-learn"
 qa_require_executable "$QA_PLAYER"

@@ -20155,7 +20155,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   episodeSeed: 1
-  qaCharacter: {fileID: 11400000, guid: 138b085873865480984b6ebcd8312fae, type: 2}
+  qaCharacter: {fileID: 11400000, guid: 2726200741c0d400eb66fbdc353bcd19, type: 2}
   qaSceneName: QA Gameplay
   sourceSceneFingerprint: 77f36773be250919fbc1fbe6ee734cc4
   artifactDirectory: QAArtifacts

@@ -11,6 +11,7 @@ QA_SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 QA_PROJECT_ROOT=$(CDPATH= cd -- "$QA_SCRIPT_DIR/../.." && pwd)
 QA_UNITY_VERSION=2021.3.21f1
 QA_DEFAULT_UNITY_EDITOR="/Applications/Unity/Hub/Editor/$QA_UNITY_VERSION/Unity.app/Contents/MacOS/Unity"
+QA_DEFAULT_PLAYER="$QA_PROJECT_ROOT/QAArtifacts/player/QaGameplay.app/Contents/MacOS/project_mgd_vampire"
 
 qa_require_unity() {
   QA_UNITY_BIN=${UNITY_EDITOR:-$QA_DEFAULT_UNITY_EDITOR}

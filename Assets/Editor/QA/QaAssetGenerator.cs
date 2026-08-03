@@ -22,7 +22,8 @@ namespace Vampire.Editor.QA
         public const string QaChestPath = "Assets/Blueprints/QA/QA Default Chest.asset";
         public const string SourceScenePath = "Assets/Scenes/Game/Level 1.unity";
         public const string QaScenePath = "Assets/Scenes/QA/QA Gameplay.unity";
-        private const string QaCharacterPath = "Assets/Blueprints/Characters/Main Character Blueprint.asset";
+        private const string SourceCharacterPath = "Assets/Blueprints/Characters/Main Character Blueprint.asset";
+        private const string QaCharacterPath = "Assets/Blueprints/QA/QA Main Character.asset";
         private const string QaArtifactDirectory = "QAArtifacts";
         private const int QaDecisionPeriod = 5;
 
@@ -33,9 +34,11 @@ namespace Vampire.Editor.QA
             EnsureFolder("Assets/Scenes", "QA");
             SynchronizeAssetCopy(SourceLevelPath, QaLevelPath);
             SynchronizeAssetCopy(SourceChestPath, QaChestPath);
+            SynchronizeAssetCopy(SourceCharacterPath, QaCharacterPath);
 
             ConfigureQaChest();
             ConfigureQaLevel();
+            ConfigureQaCharacter();
             SynchronizeQaSceneCopy();
             ConfigureQaScene();
             ConfigureBuildSettings();
@@ -118,6 +121,16 @@ namespace Vampire.Editor.QA
             qa.chestSpawnAmount = source.chestSpawnAmount;
             qa.chestBlueprint = RequireAsset<ChestBlueprint>(QaChestPath);
             qa.name = "QA Level 1";
+            EditorUtility.SetDirty(qa);
+        }
+
+        private static void ConfigureQaCharacter()
+        {
+            var source = RequireAsset<CharacterBlueprint>(SourceCharacterPath);
+            var qa = RequireAsset<CharacterBlueprint>(QaCharacterPath);
+            qa.hp = source.hp * 10f;
+            qa.armor = 100;
+            qa.name = "QA Blue";
             EditorUtility.SetDirty(qa);
         }
 

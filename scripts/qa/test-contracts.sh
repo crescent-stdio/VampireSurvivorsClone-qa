@@ -27,4 +27,8 @@ if UNITY_EDITOR="$QA_TEST_BIN/right-unity" PYTHON_BIN="$QA_TEST_BIN/wrong-python
 fi
 grep -F "Python 3.8.13 is required" "$QA_TEST_ROOT/wrong-python.out" >/dev/null || qa_fail "wrong Python message was not actionable"
 
+grep -F -- "--burst-disable-compilation" "$QA_PROJECT_ROOT/scripts/qa/build-player.sh" >/dev/null || qa_fail "player build must use the Burst 1.6.6 macOS compatibility option"
+grep -F "project_mgd_vampire" "$QA_PROJECT_ROOT/scripts/qa/common.sh" >/dev/null || qa_fail "default player executable must match the built macOS product"
+grep -F 'FailureReason' "$QA_PROJECT_ROOT/scripts/qa/smoke.sh" >/dev/null || qa_fail "smoke failures must require a classification"
+
 printf '%s\n' "QA shell contracts passed."

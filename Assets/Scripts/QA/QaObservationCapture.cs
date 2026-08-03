@@ -29,6 +29,45 @@ namespace Vampire
                 observation.NearestEnemyPositions[index] = monsters[index].Position;
         }
 
+        public static void PopulateNearestTargets(
+            QaObservation observation,
+            Vector2 playerPosition,
+            IEnumerable<Collectable> collectables,
+            IEnumerable<Chest> chests)
+        {
+            observation.HasCollectibleTarget = TryFindNearestPosition(collectables, playerPosition, out var collectiblePosition);
+            observation.CollectiblePosition = collectiblePosition;
+            observation.HasChestTarget = TryFindNearestPosition(chests, playerPosition, out var chestPosition);
+            observation.ChestPosition = chestPosition;
+        }
+
+        private static bool TryFindNearestPosition<T>(IEnumerable<T> candidates, Vector2 origin, out Vector2 nearestPosition)
+            where T : Component
+        {
+            nearestPosition = Vector2.zero;
+            var nearestDistance = float.PositiveInfinity;
+            var found = false;
+            if (candidates == null)
+                return false;
+
+            foreach (var candidate in candidates)
+            {
+                if (candidate == null || !candidate.gameObject.activeInHierarchy)
+                    continue;
+
+                var position = (Vector2)candidate.transform.position;
+                var distance = (position - origin).sqrMagnitude;
+                if (found && distance >= nearestDistance)
+                    continue;
+
+                found = true;
+                nearestDistance = distance;
+                nearestPosition = position;
+            }
+
+            return found;
+        }
+
         private static int CompareMonsters(Monster left, Monster right, Vector2 playerPosition)
         {
             var leftPosition = left.Position;

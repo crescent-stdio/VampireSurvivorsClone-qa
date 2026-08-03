@@ -34,6 +34,7 @@ namespace Vampire
         private IQaSceneReloader sceneReloader;
         private IQaArtifactWriter artifactWriter;
         private IQaProcessExit processExit;
+        private IQaFailureScreenshotCapture failureScreenshotCapture;
         private QaRecordedEpisode expectedReplay;
         private bool replayRequested;
         private string replayLoadFailure;
@@ -47,6 +48,8 @@ namespace Vampire
         private int controlTick;
         private float pendingControlSeconds;
         private float elapsedUnscaledSeconds;
+        private bool smokeRequested;
+        private float originalTimeScale = 1f;
         private static bool invalidSeedWarningLogged;
 
         public IReadOnlyList<QaActionTraceEntry> ActionTrace => actionTrace;
@@ -61,6 +64,7 @@ namespace Vampire
         public float PendingControlSeconds => pendingControlSeconds;
         public bool IsLogSubscribed => logSubscribed;
         public QaControlMode ControlMode { get; private set; } = QaControlMode.Scripted;
+        public bool IsSmokeMode => smokeRequested;
         public QaEpisodeOutcome CurrentOutcome => TerminalResult == null
             ? (levelManager == null ? QaEpisodeOutcome.InProgress : levelManager.Outcome)
             : TerminalResult.Outcome;
@@ -82,6 +86,7 @@ namespace Vampire
         {
             UnsubscribeLogs();
             RestoreCoins();
+            RestoreTimeScale();
         }
 
         public void ConfigureForTesting(
@@ -109,6 +114,8 @@ namespace Vampire
             replayRequested = false;
             replayLoadFailure = null;
             processExit = null;
+            failureScreenshotCapture = null;
+            smokeRequested = false;
             DuplicateTerminalCount = 0;
             actionSequence = 0;
             controlTick = 0;
@@ -135,6 +142,13 @@ namespace Vampire
             expectedReplay = trace.ToRecordedEpisode();
             policy = new QaReplayPolicy(trace.Actions);
             processExit = testProcessExit;
+        }
+
+        public void ConfigureSmokeForTesting(IQaProcessExit testProcessExit, IQaFailureScreenshotCapture testScreenshotCapture)
+        {
+            smokeRequested = true;
+            processExit = testProcessExit;
+            failureScreenshotCapture = testScreenshotCapture;
         }
 
         public void AdvanceForTesting(float unscaledDeltaSeconds, float gameTime, float currentTimeScale)
@@ -186,6 +200,13 @@ namespace Vampire
             episodeSeed = ResolveEpisodeSeed(episodeSeed);
             QaEpisodeBootstrap.Prepare(episodeSeed, qaCharacter);
             SnapshotCoins();
+            var smokeOptions = QaSmokeOptions.Parse(Environment.GetCommandLineArgs());
+            smokeRequested = smokeRequested || smokeOptions.IsRequested;
+            if (smokeOptions.IsRequested)
+            {
+                originalTimeScale = Time.timeScale;
+                Time.timeScale = smokeOptions.TimeScale;
+            }
             replayRequested = QaReplayTrace.IsReplayRequested(Environment.GetCommandLineArgs());
             if (replayRequested && expectedReplay == null)
             {
@@ -202,6 +223,7 @@ namespace Vampire
             policy = policy ?? new ScriptedQaPolicy();
             sceneReloader = sceneReloader ?? new UnityQaSceneReloader();
             processExit = processExit ?? new UnityQaProcessExit();
+            failureScreenshotCapture = failureScreenshotCapture ?? new UnityQaFailureScreenshotCapture();
             Application.logMessageReceived += HandleLogMessage;
             logSubscribed = true;
             episodeStarted = true;
@@ -215,6 +237,11 @@ namespace Vampire
                 return;
 
             elapsedUnscaledSeconds += Mathf.Max(0f, unscaledDeltaSeconds);
+            if (smokeRequested && gameTime >= QaSmokeOptions.MaximumGameTimeSeconds)
+            {
+                Complete(QaEpisodeOutcome.TimedOut, "SmokeDeadline");
+                return;
+            }
             var observation = CaptureObservation();
             var knownModal = abilitySelectionDialog != null && abilitySelectionDialog.MenuOpen;
             var knownTerminal = levelManager != null && levelManager.Outcome != QaEpisodeOutcome.InProgress;
@@ -231,7 +258,10 @@ namespace Vampire
                 return;
             }
 
-            pendingControlSeconds += Mathf.Max(0f, unscaledDeltaSeconds);
+            var controlDeltaSeconds = smokeRequested
+                ? unscaledDeltaSeconds * Mathf.Max(1f, currentTimeScale)
+                : unscaledDeltaSeconds;
+            pendingControlSeconds += Mathf.Max(0f, controlDeltaSeconds);
             var steps = 0;
             while (pendingControlSeconds + 0.000001f >= ControlIntervalSeconds && steps < MaxCatchUpSteps)
             {
@@ -287,7 +317,7 @@ namespace Vampire
             var observation = new QaObservation
             {
                 ElapsedSeconds = elapsedUnscaledSeconds,
-                LevelPhase = QaLevelPhase.Early,
+                LevelPhase = QaLevelPhaseResolver.Resolve(levelManager == null ? elapsedUnscaledSeconds : levelManager.LevelTime),
                 IsAbilitySelectionOpen = abilitySelectionDialog != null && abilitySelectionDialog.MenuOpen,
                 KillCount = statsManager == null ? 0 : statsManager.MonstersKilled,
                 DamageTaken = statsManager == null ? 0f : statsManager.DamageTaken
@@ -308,6 +338,11 @@ namespace Vampire
                 observation,
                 observation.PlayerPosition,
                 entityManager == null ? null : entityManager.LivingMonsters);
+            QaObservationCapture.PopulateNearestTargets(
+                observation,
+                observation.PlayerPosition,
+                entityManager == null ? null : entityManager.MagneticCollectables,
+                entityManager == null ? null : entityManager.chests);
 
             if (abilitySelectionDialog != null)
             {
@@ -354,6 +389,15 @@ namespace Vampire
             UnsubscribeLogs();
             RestoreCoins();
             WriteArtifacts();
+
+            if (smokeRequested)
+            {
+                if (outcome != QaEpisodeOutcome.Passed)
+                    failureScreenshotCapture.Capture("QAArtifacts/screenshots/seed-" + episodeSeed.ToString("D8") + ".png");
+                RestoreTimeScale();
+                processExit.Exit(outcome == QaEpisodeOutcome.Passed ? 0 : 1);
+                return true;
+            }
 
             if (replayRequested)
             {
@@ -421,6 +465,12 @@ namespace Vampire
             PlayerPrefs.Save();
             coinsSnapshotTaken = false;
         }
+
+        private void RestoreTimeScale()
+        {
+            if (smokeRequested)
+                Time.timeScale = originalTimeScale;
+        }
     }
 
     public static class QaEpisodeBootstrap
@@ -440,6 +490,48 @@ namespace Vampire
     public interface IQaProcessExit
     {
         void Exit(int code);
+    }
+
+    public interface IQaFailureScreenshotCapture
+    {
+        void Capture(string relativePath);
+    }
+
+    public sealed class UnityQaFailureScreenshotCapture : IQaFailureScreenshotCapture
+    {
+        public void Capture(string relativePath)
+        {
+            var directory = System.IO.Path.GetDirectoryName(relativePath);
+            if (!string.IsNullOrEmpty(directory))
+                System.IO.Directory.CreateDirectory(directory);
+
+            var camera = Camera.main ?? UnityEngine.Object.FindObjectOfType<Camera>();
+            if (camera == null)
+                throw new InvalidOperationException("The QA scene has no camera for an anomaly screenshot.");
+
+            const int width = 1280;
+            const int height = 720;
+            var renderTexture = new RenderTexture(width, height, 24);
+            var texture = new Texture2D(width, height, TextureFormat.RGB24, false);
+            var previousTarget = camera.targetTexture;
+            var previousActive = RenderTexture.active;
+            try
+            {
+                camera.targetTexture = renderTexture;
+                camera.Render();
+                RenderTexture.active = renderTexture;
+                texture.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+                texture.Apply();
+                System.IO.File.WriteAllBytes(relativePath, texture.EncodeToPNG());
+            }
+            finally
+            {
+                camera.targetTexture = previousTarget;
+                RenderTexture.active = previousActive;
+                UnityEngine.Object.Destroy(renderTexture);
+                UnityEngine.Object.Destroy(texture);
+            }
+        }
     }
 
     public sealed class UnityQaProcessExit : IQaProcessExit

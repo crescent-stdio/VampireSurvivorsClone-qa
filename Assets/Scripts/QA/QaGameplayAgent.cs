@@ -26,7 +26,8 @@ namespace Vampire
             if (gameplayController == null)
                 throw new System.InvalidOperationException("QaGameplayAgent requires a QaEpisodeController.");
 
-            gameplayController.EnableExternalAgentControl();
+            if (!(controller != null && controller.IsSmokeMode))
+                gameplayController.EnableExternalAgentControl();
         }
 
         public void ConfigureControllerForTesting(IQaGameplayController testController)
