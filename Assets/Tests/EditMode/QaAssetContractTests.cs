@@ -58,40 +58,43 @@ namespace Vampire.Tests.EditMode
         [Test]
         public void Qa_generator_repairs_source_derived_assets_and_scene_without_changing_qa_guids()
         {
-            var levelGuid = AssetDatabase.AssetPathToGUID(QaLevelPath);
-            var sceneGuid = AssetDatabase.AssetPathToGUID(QaScenePath);
-            var source = Load<LevelBlueprint>(SourceLevelPath);
-            var qa = Load<LevelBlueprint>(QaLevelPath);
-            qa.initialExpGemCount = -99;
-            qa.monsters = Array.Empty<LevelBlueprint.MonstersContainer>();
-            EditorUtility.SetDirty(qa);
+            using (QaFixtureSnapshot.Capture())
+            {
+                var levelGuid = AssetDatabase.AssetPathToGUID(QaLevelPath);
+                var sceneGuid = AssetDatabase.AssetPathToGUID(QaScenePath);
+                var source = Load<LevelBlueprint>(SourceLevelPath);
+                var qa = Load<LevelBlueprint>(QaLevelPath);
+                qa.initialExpGemCount = -99;
+                qa.monsters = Array.Empty<LevelBlueprint.MonstersContainer>();
+                EditorUtility.SetDirty(qa);
 
-            var scene = EditorSceneManager.OpenScene(QaScenePath, OpenSceneMode.Additive);
-            try
-            {
-                var sentinel = new GameObject("QA source synchronization sentinel");
-                SceneManager.MoveGameObjectToScene(sentinel, scene);
-                EditorSceneManager.SaveScene(scene);
-            }
-            finally
-            {
-                EditorSceneManager.CloseScene(scene, true);
-            }
+                var scene = EditorSceneManager.OpenScene(QaScenePath, OpenSceneMode.Additive);
+                try
+                {
+                    var sentinel = new GameObject("QA source synchronization sentinel");
+                    SceneManager.MoveGameObjectToScene(sentinel, scene);
+                    EditorSceneManager.SaveScene(scene);
+                }
+                finally
+                {
+                    EditorSceneManager.CloseScene(scene, true);
+                }
 
-            InvokeQaGenerator("Generate");
+                InvokeQaGenerator("Generate");
 
-            Assert.That(AssetDatabase.AssetPathToGUID(QaLevelPath), Is.EqualTo(levelGuid));
-            Assert.That(AssetDatabase.AssetPathToGUID(QaScenePath), Is.EqualTo(sceneGuid));
-            Assert.That(qa.initialExpGemCount, Is.EqualTo(source.initialExpGemCount));
-            Assert.That(qa.monsters, Has.Length.EqualTo(source.monsters.Length));
-            scene = EditorSceneManager.OpenScene(QaScenePath, OpenSceneMode.Additive);
-            try
-            {
-                Assert.That(scene.GetRootGameObjects().Select(root => root.name), Does.Not.Contain("QA source synchronization sentinel"));
-            }
-            finally
-            {
-                EditorSceneManager.CloseScene(scene, true);
+                Assert.That(AssetDatabase.AssetPathToGUID(QaLevelPath), Is.EqualTo(levelGuid));
+                Assert.That(AssetDatabase.AssetPathToGUID(QaScenePath), Is.EqualTo(sceneGuid));
+                Assert.That(qa.initialExpGemCount, Is.EqualTo(source.initialExpGemCount));
+                Assert.That(qa.monsters, Has.Length.EqualTo(source.monsters.Length));
+                scene = EditorSceneManager.OpenScene(QaScenePath, OpenSceneMode.Additive);
+                try
+                {
+                    Assert.That(scene.GetRootGameObjects().Select(root => root.name), Does.Not.Contain("QA source synchronization sentinel"));
+                }
+                finally
+                {
+                    EditorSceneManager.CloseScene(scene, true);
+                }
             }
         }
 
