@@ -115,4 +115,44 @@ if [ "${QA_TEST_SKIP_WATCHDOG:-0}" != 1 ]; then
   fi
 fi
 
+QA_EVALUATE_CONTRACT_ROOT="$QA_PROJECT_ROOT/QAArtifacts/evaluate-process-contract"
+QA_EVALUATE_CONTRACT_BIN="$QA_EVALUATE_CONTRACT_ROOT/bin"
+mkdir -p "$QA_EVALUATE_CONTRACT_BIN"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'if [ "${1:-}" = lock ]; then exit 0; fi' \
+  'printf "%s\n" "$$" >"$QA_EVALUATE_CONTRACT_ROOT/uv.pid"' \
+  'trap "exit 0" TERM INT' \
+  'sh -c '\''trap "exit 0" TERM INT; while :; do sleep 1; done'\'' &' \
+  'child=$!' \
+  'printf "%s\n" "$child" >"$QA_EVALUATE_CONTRACT_ROOT/trainer.pid"' \
+  'wait "$child"' >"$QA_EVALUATE_CONTRACT_BIN/uv"
+printf '%s\n' '#!/bin/sh' 'while :; do sleep 1; done' >"$QA_EVALUATE_CONTRACT_BIN/player"
+chmod +x "$QA_EVALUATE_CONTRACT_BIN/uv" "$QA_EVALUATE_CONTRACT_BIN/player"
+export QA_EVALUATE_CONTRACT_ROOT
+UV_BIN="$QA_EVALUATE_CONTRACT_BIN/uv" "$QA_PROJECT_ROOT/scripts/qa/evaluate.sh" "$QA_EVALUATE_CONTRACT_BIN/player" >"$QA_EVALUATE_CONTRACT_ROOT/evaluate.out" 2>&1 &
+QA_EVALUATE_PID=$!
+QA_EVALUATE_READY=0
+for _ in 1 2 3 4 5; do
+  if [ -f "$QA_EVALUATE_CONTRACT_ROOT/uv.pid" ] && [ -f "$QA_EVALUATE_CONTRACT_ROOT/trainer.pid" ]; then
+    QA_EVALUATE_READY=1
+    break
+  fi
+  sleep 1
+done
+[ "$QA_EVALUATE_READY" = 1 ] || qa_fail "evaluate process contract did not start the uv trainer"
+kill -TERM "$QA_EVALUATE_PID"
+wait "$QA_EVALUATE_PID" 2>/dev/null || true
+QA_EVALUATE_UV_PID=$(sed -n '1p' "$QA_EVALUATE_CONTRACT_ROOT/uv.pid")
+QA_EVALUATE_TRAINER_PID=$(sed -n '1p' "$QA_EVALUATE_CONTRACT_ROOT/trainer.pid")
+for _ in 1 2 3 4 5; do
+  if ! kill -0 "$QA_EVALUATE_UV_PID" 2>/dev/null && ! kill -0 "$QA_EVALUATE_TRAINER_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+if kill -0 "$QA_EVALUATE_UV_PID" 2>/dev/null || kill -0 "$QA_EVALUATE_TRAINER_PID" 2>/dev/null; then
+  qa_fail "evaluate cleanup left a uv or trainer process alive"
+fi
+
 printf '%s\n' "QA shell contracts passed."
