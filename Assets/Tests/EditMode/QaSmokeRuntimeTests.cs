@@ -24,6 +24,20 @@ namespace Vampire.Tests.EditMode
         }
 
         [Test]
+        public void Llm_options_require_explicit_mode_and_only_accept_normal_time_scale()
+        {
+            var options = QaSmokeOptions.Parse(new[] { "player", "-qaMode=llm", "-qaTimeScale=1" });
+
+            Assert.That(options.IsLlmRequested, Is.True);
+            Assert.That(options.IsRequested, Is.False);
+            Assert.That(options.TimeScale, Is.EqualTo(1f));
+            Assert.That(options.IsValid, Is.True);
+            var unsupported = QaSmokeOptions.Parse(new[] { "player", "-qaMode=llm", "-qaTimeScale=4" });
+            Assert.That(unsupported.IsValid, Is.False);
+            Assert.That(unsupported.FailureReason, Is.EqualTo("UnsupportedLlmTimeScale"));
+        }
+
+        [Test]
         public void Qa_level_phase_resolver_marks_the_miniboss_and_final_boss_boundaries()
         {
             Assert.That(QaLevelPhaseResolver.Resolve(0f), Is.EqualTo(QaLevelPhase.Early));
@@ -132,6 +146,41 @@ namespace Vampire.Tests.EditMode
             Object.DestroyImmediate(controller.gameObject);
         }
 
+        [Test]
+        public void Llm_mode_uses_external_control_and_classifies_its_single_episode_deadline()
+        {
+            var controller = CreateController(7005);
+            var processExit = new RecordingProcessExit();
+            var screenshots = new RecordingScreenshotCapture();
+            controller.ConfigureLlmForTesting(processExit, screenshots);
+            controller.EnableExternalAgentControl();
+
+            controller.AdvanceForTesting(0.1f, QaSmokeOptions.MaximumGameTimeSeconds, 1f);
+
+            Assert.That(controller.IsLlmMode, Is.True);
+            Assert.That(controller.ControlMode, Is.EqualTo(QaControlMode.ExternalAgent));
+            Assert.That(controller.TerminalResult.Outcome, Is.EqualTo(QaEpisodeOutcome.TimedOut));
+            Assert.That(controller.TerminalResult.FailureReason, Is.EqualTo("LlmDeadline"));
+            Assert.That(processExit.ExitCodes, Is.EqualTo(new[] { 1 }));
+            Assert.That(screenshots.Paths, Has.Count.EqualTo(1));
+            Object.DestroyImmediate(controller.gameObject);
+        }
+
+        [Test]
+        public void Llm_mode_writes_episode_artifacts_before_exiting()
+        {
+            var controller = CreateController(7006);
+            var processExit = new OrderingProcessExit(controller);
+            controller.SetArtifactWriterForTesting(new SuccessfulArtifactWriter());
+            controller.ConfigureLlmForTesting(processExit, new RecordingScreenshotCapture());
+
+            Assert.That(controller.CompleteForTesting(QaEpisodeOutcome.Passed, "passed"), Is.True);
+
+            Assert.That(processExit.ArtifactsWerePublishedAtExit, Is.True);
+            Assert.That(processExit.ExitCodes, Is.EqualTo(new[] { 0 }));
+            Object.DestroyImmediate(controller.gameObject);
+        }
+
         private static QaEpisodeController CreateController(int seed)
         {
             var gameObject = new GameObject("Smoke controller");
@@ -144,6 +193,37 @@ namespace Vampire.Tests.EditMode
         {
             public List<int> ExitCodes { get; } = new List<int>();
             public void Exit(int code) { ExitCodes.Add(code); }
+        }
+
+        private sealed class OrderingProcessExit : IQaProcessExit
+        {
+            private readonly QaEpisodeController controller;
+
+            public OrderingProcessExit(QaEpisodeController controller)
+            {
+                this.controller = controller;
+            }
+
+            public List<int> ExitCodes { get; } = new List<int>();
+            public bool ArtifactsWerePublishedAtExit { get; private set; }
+
+            public void Exit(int code)
+            {
+                ArtifactsWerePublishedAtExit = controller.LastArtifactWrite != null && controller.LastArtifactWrite.Success;
+                ExitCodes.Add(code);
+            }
+        }
+
+        private sealed class SuccessfulArtifactWriter : IQaArtifactWriter
+        {
+            public QaArtifactWriteResult Write(
+                QaEpisodeResult result,
+                IReadOnlyList<QaActionTraceEntry> trace,
+                IReadOnlyList<QaTelemetryEntry> telemetry,
+                QaRecordedEpisode recordedEpisode)
+            {
+                return QaArtifactWriteResult.Succeeded(new QaArtifactPaths("episode", "actions", "telemetry", "summary"));
+            }
         }
 
         private sealed class RecordingScreenshotCapture : IQaFailureScreenshotCapture
