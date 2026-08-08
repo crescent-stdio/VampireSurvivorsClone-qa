@@ -33,6 +33,19 @@ if UNITY_EDITOR="$QA_TEST_BIN/right-unity" UV_BIN="$QA_TEST_BIN/stale-uv" "$QA_P
 fi
 grep -F "uv.lock is missing or out of date" "$QA_TEST_ROOT/stale-lock.out" >/dev/null || qa_fail "stale lock message was not actionable"
 
+printf '%s\n' \
+  '#!/bin/sh' \
+  'if [ "${1:-}" = lock ]; then exit 0; fi' \
+  '[ "${1:-}" = run ] && [ "${2:-}" = --locked ] || exit 64' \
+  'shift 2' \
+  '[ "${1:-}" = python ] || exit 64' \
+  'shift' \
+  'exec "$QA_PROJECT_ROOT/.venv/bin/python" "$@"' >"$QA_TEST_BIN/uv-run"
+chmod +x "$QA_TEST_BIN/uv-run"
+export QA_PROJECT_ROOT
+UV_BIN="$QA_TEST_BIN/uv-run" "$QA_PROJECT_ROOT/scripts/qa/run-llm-agent.sh" --help >"$QA_TEST_ROOT/llm-help.out" 2>&1 || qa_fail "LLM runner help must work without an API key or player build"
+grep -F -- "--seed" "$QA_TEST_ROOT/llm-help.out" >/dev/null || qa_fail "LLM runner help must document the required seed"
+
 grep -F -- "--burst-disable-compilation" "$QA_PROJECT_ROOT/scripts/qa/build-player.sh" >/dev/null || qa_fail "player build must use the Burst 1.6.6 macOS compatibility option"
 grep -F "project_mgd_vampire" "$QA_PROJECT_ROOT/scripts/qa/common.sh" >/dev/null || qa_fail "default player executable must match the built macOS product"
 grep -F 'FailureReason' "$QA_PROJECT_ROOT/scripts/qa/smoke.sh" >/dev/null || qa_fail "smoke failures must require a classification"
