@@ -3,9 +3,22 @@
 set -eu
 . "$(dirname -- "$0")/common.sh"
 
-QA_PLAYER=${1:-$QA_DEFAULT_PLAYER}
+QA_PLAYER=${1:-$QA_DEFAULT_PLAYER_BUNDLE}
+QA_EVALUATE_SEED=${QA_EVALUATE_SEED:-1234}
+QA_PPO_CONFIG=${QA_PPO_CONFIG:-config/qa-ppo.yaml}
+QA_PPO_RUN_ID=${QA_PPO_RUN_ID:-qa-ppo}
+QA_PPO_RESULTS_DIR=${QA_PPO_RESULTS_DIR:-$QA_PROJECT_ROOT/QAArtifacts/checkpoints}
 qa_require_uv
-qa_require_executable "$QA_PLAYER"
+qa_configure_torch_device
+qa_resolve_mlagents_player "$QA_PLAYER"
+case "$QA_EVALUATE_SEED" in
+  ''|*[!0-9]*) qa_fail_config "QA_EVALUATE_SEED must be a positive integer." ;;
+esac
+[ "$QA_EVALUATE_SEED" -gt 0 ] 2>/dev/null || qa_fail_config "QA_EVALUATE_SEED must be a positive integer."
+case "$QA_PPO_CONFIG" in
+  /*) qa_require_file "$QA_PPO_CONFIG" ;;
+  *) qa_require_file "$QA_PROJECT_ROOT/$QA_PPO_CONFIG" ;;
+esac
 mkdir -p "$QA_PROJECT_ROOT/QAArtifacts/logs"
 QA_TRAINER_PID=
 QA_PLAYER_PID=
@@ -28,11 +41,11 @@ qa_cleanup_evaluation() {
 trap qa_cleanup_evaluation 0 1 2 15
 cd "$QA_PROJECT_ROOT"
 (
-  exec "$QA_UV_BIN" run --locked --extra trainer mlagents-learn config/qa-ppo.yaml --run-id=qa-ppo --resume --inference --seed=1234 \
-    --results-dir="$QA_PROJECT_ROOT/QAArtifacts/checkpoints"
+  exec "$QA_UV_BIN" run --locked --extra trainer mlagents-learn "$QA_PPO_CONFIG" --run-id="$QA_PPO_RUN_ID" --resume --inference \
+    --seed="$QA_EVALUATE_SEED" --torch-device="$QA_TORCH_DEVICE" --results-dir="$QA_PPO_RESULTS_DIR"
 ) >"$QA_PROJECT_ROOT/QAArtifacts/logs/evaluate-trainer.log" 2>&1 &
 QA_TRAINER_PID=$!
-"$QA_PLAYER" -batchmode -nographics -qaSeed=1234 -qaMode=evaluate \
+"$QA_MLAGENTS_PLAYER_EXECUTABLE" -batchmode -nographics -qaSeed="$QA_EVALUATE_SEED" -qaMode=evaluate -qaTimeScale=1 \
   -logFile "$QA_PROJECT_ROOT/QAArtifacts/logs/evaluate.log" &
 QA_PLAYER_PID=$!
 QA_PLAYER_STATUS=0

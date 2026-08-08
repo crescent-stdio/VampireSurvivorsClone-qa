@@ -38,6 +38,21 @@ namespace Vampire.Tests.EditMode
         }
 
         [Test]
+        public void Ppo_evaluation_options_require_explicit_mode_and_only_accept_normal_time_scale()
+        {
+            var options = QaSmokeOptions.Parse(new[] { "player", "-qaMode=evaluate", "-qaTimeScale=1" });
+
+            Assert.That(options.IsEvaluationRequested, Is.True);
+            Assert.That(options.IsRequested, Is.False);
+            Assert.That(options.IsLlmRequested, Is.False);
+            Assert.That(options.TimeScale, Is.EqualTo(1f));
+            Assert.That(options.IsValid, Is.True);
+            var unsupported = QaSmokeOptions.Parse(new[] { "player", "-qaMode=evaluate", "-qaTimeScale=4" });
+            Assert.That(unsupported.IsValid, Is.False);
+            Assert.That(unsupported.FailureReason, Is.EqualTo("UnsupportedEvaluationTimeScale"));
+        }
+
+        [Test]
         public void Qa_level_phase_resolver_marks_the_miniboss_and_final_boss_boundaries()
         {
             Assert.That(QaLevelPhaseResolver.Resolve(0f), Is.EqualTo(QaLevelPhase.Early));
@@ -178,6 +193,28 @@ namespace Vampire.Tests.EditMode
 
             Assert.That(processExit.ArtifactsWerePublishedAtExit, Is.True);
             Assert.That(processExit.ExitCodes, Is.EqualTo(new[] { 0 }));
+            Object.DestroyImmediate(controller.gameObject);
+        }
+
+        [Test]
+        public void Ppo_evaluation_mode_uses_external_control_and_exits_after_publishing_artifacts()
+        {
+            var controller = CreateController(7007);
+            var processExit = new OrderingProcessExit(controller);
+            var screenshots = new RecordingScreenshotCapture();
+            controller.SetArtifactWriterForTesting(new SuccessfulArtifactWriter());
+            controller.ConfigureEvaluationForTesting(processExit, screenshots);
+            controller.EnableExternalAgentControl();
+
+            controller.AdvanceForTesting(0.1f, QaSmokeOptions.MaximumGameTimeSeconds, 1f);
+
+            Assert.That(controller.IsEvaluationMode, Is.True);
+            Assert.That(controller.ControlMode, Is.EqualTo(QaControlMode.ExternalAgent));
+            Assert.That(controller.TerminalResult.Outcome, Is.EqualTo(QaEpisodeOutcome.TimedOut));
+            Assert.That(controller.TerminalResult.FailureReason, Is.EqualTo("EvaluationDeadline"));
+            Assert.That(processExit.ArtifactsWerePublishedAtExit, Is.True);
+            Assert.That(processExit.ExitCodes, Is.EqualTo(new[] { 1 }));
+            Assert.That(screenshots.Paths, Has.Count.EqualTo(1));
             Object.DestroyImmediate(controller.gameObject);
         }
 

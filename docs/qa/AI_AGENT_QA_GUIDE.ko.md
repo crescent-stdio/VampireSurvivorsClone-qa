@@ -16,13 +16,14 @@ smoke는 CI와 로컬 회귀 검사의 기준선이다. PPO는 보상에 따른 
 
 ```mermaid
 flowchart LR
-    Unity["Unity QA Gameplay\n36차원 관측"] -->|"ML-Agents LLAPI"| Runner["Python runner\n10 Hz step loop"]
-    Runner --> Scheduler["호출 스케줄러\n최초·2초·phase 변경"]
-    Scheduler --> Worker["백그라운드 정책 worker"]
-    Worker -->|"Responses API\n구조화 출력"| OpenAI["OpenAI 모델"]
+    Unity["Unity QA Gameplay\n36차원 관측"] -->|"ML-Agents LLAPI"| Runner["Python"]
+    Runner -->|"학습·추론"| PPO["PyTorch PPO\n신경망 정책"]
+    Runner --> Scheduler["LLM 호출 스케줄러"]
+    Scheduler --> Worker["비동기 정책 worker"]
+    Worker -->|"Responses API"| OpenAI["OpenAI 모델"]
     OpenAI --> Worker
-    Worker -->|"캐시된 이동 갱신"| Runner
-    Runner -->|"연속 2 + 이산 1"| Unity
+    PPO -->|"연속 2 + 이산 1"| Unity
+    Worker -->|"캐시된 이동"| Unity
     Unity --> Artifacts["episode 산출물"]
     Runner --> Artifacts
 ```
@@ -34,12 +35,14 @@ Unity의 `env.step()`은 메인 스레드를 기다리게 한다. OpenAI 요청�
 ## 사전 준비
 
 - macOS 개발 머신
-- Unity `2021.3.21f1`
+- Unity `6000.0.80f1`
 - [uv](https://docs.astral.sh/uv/) `0.12.x`
-- Unity ML-Agents Release 20과 저장소에 고정된 Python 패키지
+- Unity ML-Agents Release 23과 저장소에 고정된 Python 패키지
 - LLM 경로에만 필요한 `OPENAI_API_KEY`
 
-Python은 `.python-version`의 `3.10.8`로 고정된다. `mlagents-envs==0.30.0`의 호환 범위 때문에 더 높은 Python으로 임의 변경하지 않는다. lock에는 macOS arm64 wheel 호환을 위한 `numpy==1.21.6`, 생성 protobuf 코드 호환을 위한 `protobuf<3.20`, Release 20 trainer import를 위한 `setuptools<81`과 `six`가 반영되어 있다.
+Python은 `.python-version`의 `3.10.12`로 고정된다. 일반적인 PyTorch 제약이 아니라 `mlagents==1.1.0`과 `mlagents-envs==1.1.0`이 선언한 Python 상한이 `3.10.12`이기 때문이다. trainer extra는 이 ML-Agents 버전이 지원하는 최신 PyTorch `2.8.0`을 사용한다. 이후 PyTorch만 단독으로 올리면 ML-Agents의 모델 export와 trainer 호환성을 다시 검증해야 한다.
+
+lock에는 ML-Agents 생성 코드 호환을 위한 `numpy>=1.23.5,<1.24`, `protobuf<3.21` 제약이 있다. ML-Agents 1.1.0이 제한한 `grpcio 1.48.2`에는 macOS arm64 wheel이 없으므로, 같은 1.x API를 유지하면서 CPython 3.10 universal2 wheel을 제공하는 `grpcio 1.64.1`로 override한다.
 
 API 키는 셸 환경 변수로만 전달한다. 파일, 명령 인자, 커밋, 산출물에 키를 넣지 않는다.
 
@@ -77,6 +80,8 @@ smoke는 기본 10개 seed를 `-qaMode=smoke`, 최대 4배속으로 실행한다
 
 ## PPO 학습과 평가
 
+PPO 에이전트는 OpenAI 같은 원격 LLM을 호출하지 않는다. 36개 숫자 관측을 작은 PyTorch 신경망에 입력하고, 이동 2개와 능력 선택 확률을 출력한다. 학습 중에는 Unity가 반환한 보상으로 네트워크 가중치를 반복 갱신하고, 완료 후에는 PyTorch checkpoint(`.pt`)와 Unity 추론용 ONNX 모델(`.onnx`)을 만든다. 따라서 API 비용과 네트워크 비결정성은 없지만, 유효한 정책을 얻으려면 충분한 학습 시간과 보상 설계 검증이 필요하다.
+
 환경과 플레이어를 준비한 뒤 다음 명령을 사용한다.
 
 ```sh
@@ -84,7 +89,34 @@ scripts/qa/train.sh
 scripts/qa/evaluate.sh
 ```
 
-두 스크립트는 `uv run --locked --extra trainer mlagents-learn`을 사용한다. 학습 설정은 `config/qa-ppo.yaml`이며 behavior 이름은 `QaGameplay`다. 평가는 trainer와 플레이어에 고정 seed `1234`를 사용한다. `evaluate.sh`가 종료되면 uv wrapper와 trainer 자식 프로세스도 함께 정리된다.
+두 스크립트는 `uv run --locked --extra trainer mlagents-learn`을 사용한다. 학습 설정은 `config/qa-ppo.yaml`이며 behavior 이름은 `QaGameplay`다. 평가는 기본 seed `1234`를 trainer와 플레이어에 동일하게 적용하며 `QA_EVALUATE_SEED`로 바꿀 수 있다. `evaluate.sh`가 종료되면 uv wrapper와 trainer 자식 프로세스도 함께 정리된다.
+
+기본 장치는 재현성과 호환성을 위한 CPU다. Apple Silicon의 MPS가 현재 PyTorch 환경에서 사용 가능할 때만 명시적으로 선택한다. 사용할 수 없는 MPS를 요청하면 실행 전에 종료 코드 2로 실패한다.
+
+```sh
+QA_TORCH_DEVICE=mps scripts/qa/train.sh
+QA_EVALUATE_SEED=4321 QA_TORCH_DEVICE=cpu scripts/qa/evaluate.sh
+```
+
+학습 설정, run ID, 결과 위치는 환경 변수로 분리할 수 있다.
+
+```sh
+QA_PPO_CONFIG=config/qa-ppo.yaml \
+QA_PPO_RUN_ID=qa-ppo-experiment \
+QA_PPO_RESULTS_DIR=QAArtifacts/checkpoints \
+scripts/qa/train.sh
+```
+
+설치와 Unity–PyTorch 통신만 빠르게 검사할 때는 `config/qa-ppo-smoke.yaml`을 사용한다. 이 설정은 256 step 통합 테스트용이며 생성 모델을 QA 점수에 사용하면 안 된다.
+
+```sh
+QA_PPO_CONFIG=config/qa-ppo-smoke.yaml \
+QA_PPO_RUN_ID=qa-pytorch-smoke \
+QA_PPO_RESULTS_DIR=QAArtifacts/checkpoints-smoke \
+scripts/qa/train.sh
+```
+
+Release 23의 Python 환경 실행기는 macOS에서 `--env`에 내부 실행 파일이 아닌 `QaGameplay.app` 번들을 요구한다. 스크립트가 trainer에는 번들을, 직접 실행하는 평가 프로세스에는 번들 내부 Mach-O를 자동으로 전달한다.
 
 직접 진입점을 확인하려면 다음을 실행한다.
 
@@ -207,7 +239,9 @@ replay는 저장된 seed를 먼저 적용하고 행동, discrete event, terminal
 ## 문제 해결
 
 - `uv.lock is missing or out of date`: `uv lock --check`로 확인하고 의존성을 의도적으로 바꾼 경우에만 `uv lock`을 실행한다.
-- Python 버전 오류: `uv python install 3.10.8` 후 `uv sync --locked --extra trainer`를 다시 실행한다.
+- Python 버전 오류: `uv python install 3.10.12` 후 `uv sync --locked --extra trainer`를 다시 실행한다.
+- `MPS is not available`: `QA_TORCH_DEVICE=cpu`로 실행한다. PyTorch가 MPS를 보고하는 머신에서만 MPS를 사용한다.
+- `Provided filename does not match any environments`: `mlagents-learn --env`에는 번들 내부 실행 파일이 아니라 `QaGameplay.app`을 전달한다. 저장소 스크립트는 이를 자동 처리한다.
 - `Episode ... already exists`: 기존 산출물을 덮어쓰지 말고 새 seed를 선택한다.
 - summary가 0개 또는 여러 개: Unity 로그와 `QAArtifacts/llm-failures/`를 확인한다. runner는 정확히 하나만 허용한다.
 - OpenAI timeout/429/5xx: 자동 재시도 뒤에도 실패하면 종료 코드 2다. 호출 상한을 늘려 증상을 숨기지 말고 API 상태와 네트워크를 확인한다.
