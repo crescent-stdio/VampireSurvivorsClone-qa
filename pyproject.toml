@@ -23,3 +23,4 @@ constraint-dependencies = ["protobuf<3.20", "setuptools<81"]
 
 [tool.pytest.ini_options]
 testpaths = ["qa_llm_agent/tests"]
+pythonpath = ["."]
