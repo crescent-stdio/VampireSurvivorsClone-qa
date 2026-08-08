@@ -88,3 +88,7 @@ crashlytics-build.properties
 /.understand-anything/intermediate/
 /.understand-anything/tmp/
 /.understand-anything/.trash-*/
+
+# Superpowers working documents
+/.superpowers/
+/docs/superpowers/
