@@ -133,6 +133,50 @@ if [ "${QA_TEST_SKIP_WATCHDOG:-0}" != 1 ]; then
   fi
 fi
 
+QA_TRAIN_CONTRACT_ROOT="$QA_PROJECT_ROOT/QAArtifacts/train-config-contract"
+QA_TRAIN_CONTRACT_BIN="$QA_TRAIN_CONTRACT_ROOT/bin"
+mkdir -p "$QA_TRAIN_CONTRACT_BIN"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'if [ "${1:-}" = lock ]; then exit 0; fi' \
+  'if [ "${5:-}" = python ]; then' \
+  '  [ "${QA_TEST_MPS_AVAILABLE:-0}" = 1 ]' \
+  '  exit' \
+  'fi' \
+  'printf "%s\n" "$@" >"$QA_TRAIN_CONTRACT_ROOT/arguments"' \
+  'exit 0' >"$QA_TRAIN_CONTRACT_BIN/uv"
+printf '%s\n' '#!/bin/sh' 'exit 0' >"$QA_TRAIN_CONTRACT_BIN/player"
+chmod +x "$QA_TRAIN_CONTRACT_BIN/uv" "$QA_TRAIN_CONTRACT_BIN/player"
+export QA_TRAIN_CONTRACT_ROOT
+printf '%s\n' 'behaviors: {}' >"$QA_TRAIN_CONTRACT_ROOT/override.yaml"
+
+UV_BIN="$QA_TRAIN_CONTRACT_BIN/uv" \
+  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_BIN/player"
+grep -Fx -- '--torch-device=cpu' "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must default to the CPU torch device"
+
+QA_TORCH_DEVICE=mps QA_TEST_MPS_AVAILABLE=1 \
+  QA_PPO_CONFIG="$QA_TRAIN_CONTRACT_ROOT/override.yaml" \
+  QA_PPO_RUN_ID=qa-contract \
+  QA_PPO_RESULTS_DIR=QAArtifacts/contract-checkpoints \
+  UV_BIN="$QA_TRAIN_CONTRACT_BIN/uv" \
+  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_BIN/player"
+grep -Fx -- '--torch-device=mps' "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must forward an available MPS torch device"
+grep -Fx -- "$QA_TRAIN_CONTRACT_ROOT/override.yaml" "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must allow a QA_PPO_CONFIG override"
+grep -Fx -- '--run-id=qa-contract' "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must allow a QA_PPO_RUN_ID override"
+grep -Fx -- '--results-dir=QAArtifacts/contract-checkpoints' "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must allow a QA_PPO_RESULTS_DIR override"
+
+if QA_TORCH_DEVICE=cuda UV_BIN="$QA_TRAIN_CONTRACT_BIN/uv" \
+  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_BIN/player" >"$QA_TRAIN_CONTRACT_ROOT/invalid-device.out" 2>&1; then
+  qa_fail "an unsupported torch device must fail before training"
+fi
+grep -F 'QA_TORCH_DEVICE must be cpu or mps' "$QA_TRAIN_CONTRACT_ROOT/invalid-device.out" >/dev/null || qa_fail "unsupported torch device failure must be actionable"
+
+if QA_TORCH_DEVICE=mps QA_TEST_MPS_AVAILABLE=0 UV_BIN="$QA_TRAIN_CONTRACT_BIN/uv" \
+  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_BIN/player" >"$QA_TRAIN_CONTRACT_ROOT/unavailable-mps.out" 2>&1; then
+  qa_fail "unavailable MPS must fail before training"
+fi
+grep -F 'MPS is not available' "$QA_TRAIN_CONTRACT_ROOT/unavailable-mps.out" >/dev/null || qa_fail "unavailable MPS failure must be actionable"
+
 QA_EVALUATE_CONTRACT_ROOT="$QA_PROJECT_ROOT/QAArtifacts/evaluate-process-contract"
 QA_EVALUATE_CONTRACT_BIN="$QA_EVALUATE_CONTRACT_ROOT/bin"
 mkdir -p "$QA_EVALUATE_CONTRACT_BIN"

@@ -38,6 +38,19 @@ qa_require_uv() {
   "$QA_UV_BIN" lock --check --project "$QA_PROJECT_ROOT" >/dev/null 2>&1 || qa_fail_config "uv.lock is missing or out of date. Run 'uv lock' and commit the result."
 }
 
+qa_configure_torch_device() {
+  QA_TORCH_DEVICE=${QA_TORCH_DEVICE:-cpu}
+  case "$QA_TORCH_DEVICE" in
+    cpu) ;;
+    mps)
+      "$QA_UV_BIN" run --locked --extra trainer python -c \
+        'import sys, torch; sys.exit(0 if torch.backends.mps.is_available() else 1)' \
+        >/dev/null 2>&1 || qa_fail_config "MPS is not available in the selected PyTorch environment. Use QA_TORCH_DEVICE=cpu."
+      ;;
+    *) qa_fail_config "QA_TORCH_DEVICE must be cpu or mps; received '$QA_TORCH_DEVICE'." ;;
+  esac
+}
+
 qa_require_file() {
   [ -f "$1" ] || qa_fail "Required file does not exist: $1"
 }
