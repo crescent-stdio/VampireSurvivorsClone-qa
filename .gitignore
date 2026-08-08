@@ -82,7 +82,11 @@ crashlytics-build.properties
 
 # QA gameplay lane generated outputs
 /QAArtifacts/
+/.venv/
 /.venv-qa/
+/.pytest_cache/
+__pycache__/
+*.py[cod]
 
 # Understand Anything generated working files
 /.understand-anything/intermediate/

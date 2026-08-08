@@ -51,6 +51,7 @@ namespace Vampire
         private int consecutiveBacklogFrames;
         private float elapsedUnscaledSeconds;
         private bool smokeRequested;
+        private bool llmRequested;
         private float originalTimeScale = 1f;
         private bool terminalNotificationInProgress;
         private bool terminalAcknowledged;
@@ -72,6 +73,7 @@ namespace Vampire
         public bool IsLogSubscribed => logSubscribed;
         public QaControlMode ControlMode { get; private set; } = QaControlMode.Scripted;
         public bool IsSmokeMode => smokeRequested;
+        public bool IsLlmMode => llmRequested;
         public QaEpisodeOutcome CurrentOutcome => TerminalResult == null
             ? (levelManager == null ? QaEpisodeOutcome.InProgress : levelManager.Outcome)
             : TerminalResult.Outcome;
@@ -125,6 +127,7 @@ namespace Vampire
             processExit = null;
             failureScreenshotCapture = null;
             smokeRequested = false;
+            llmRequested = false;
             terminalNotificationInProgress = false;
             terminalAcknowledged = false;
             DuplicateTerminalCount = 0;
@@ -161,6 +164,13 @@ namespace Vampire
         public void ConfigureSmokeForTesting(IQaProcessExit testProcessExit, IQaFailureScreenshotCapture testScreenshotCapture)
         {
             smokeRequested = true;
+            processExit = testProcessExit;
+            failureScreenshotCapture = testScreenshotCapture;
+        }
+
+        public void ConfigureLlmForTesting(IQaProcessExit testProcessExit, IQaFailureScreenshotCapture testScreenshotCapture)
+        {
+            llmRequested = true;
             processExit = testProcessExit;
             failureScreenshotCapture = testScreenshotCapture;
         }
@@ -223,7 +233,8 @@ namespace Vampire
             var arguments = Environment.GetCommandLineArgs();
             var smokeOptions = QaSmokeOptions.Parse(Environment.GetCommandLineArgs());
             smokeRequested = smokeRequested || smokeOptions.IsRequested;
-            if (smokeOptions.IsRequested)
+            llmRequested = llmRequested || smokeOptions.IsLlmRequested;
+            if (smokeOptions.IsRequested || smokeOptions.IsLlmRequested)
             {
                 originalTimeScale = Time.timeScale;
                 Time.timeScale = smokeOptions.TimeScale;
@@ -257,7 +268,7 @@ namespace Vampire
             QaRandomDecisionRecorder.DecisionRecorded += RecordDiscreteEvent;
             randomDecisionSubscribed = true;
             episodeStarted = true;
-            if (smokeRequested && !smokeOptions.IsValid)
+            if ((smokeRequested || llmRequested) && !smokeOptions.IsValid)
                 Complete(QaEpisodeOutcome.Error, smokeOptions.FailureReason);
             else if (!string.IsNullOrEmpty(replayLoadFailure))
                 Complete(QaEpisodeOutcome.Error, replayLoadFailure);
@@ -272,6 +283,11 @@ namespace Vampire
             if (smokeRequested && gameTime >= QaSmokeOptions.MaximumGameTimeSeconds)
             {
                 Complete(QaEpisodeOutcome.TimedOut, "SmokeDeadline");
+                return;
+            }
+            if (llmRequested && gameTime >= QaSmokeOptions.MaximumGameTimeSeconds)
+            {
+                Complete(QaEpisodeOutcome.TimedOut, "LlmDeadline");
                 return;
             }
             var observation = CaptureObservation();
@@ -441,7 +457,7 @@ namespace Vampire
             RestoreCoins();
             WriteArtifacts();
 
-            if (smokeRequested)
+            if (smokeRequested || llmRequested)
             {
                 if (outcome != QaEpisodeOutcome.Passed)
                     failureScreenshotCapture.Capture("QAArtifacts/screenshots/seed-" + episodeSeed.ToString("D8") + ".png");
@@ -531,7 +547,7 @@ namespace Vampire
 
         private void RestoreTimeScale()
         {
-            if (smokeRequested)
+            if (smokeRequested || llmRequested)
                 Time.timeScale = originalTimeScale;
         }
     }

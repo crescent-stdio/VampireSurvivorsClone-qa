@@ -9,8 +9,8 @@ mkdir -p "$QA_TEST_BIN"
 
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "2020.3.0f1"' >"$QA_TEST_BIN/wrong-unity"
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "2021.3.21f1"' >"$QA_TEST_BIN/right-unity"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "3.11.0"' >"$QA_TEST_BIN/wrong-python"
-chmod +x "$QA_TEST_BIN/wrong-unity" "$QA_TEST_BIN/right-unity" "$QA_TEST_BIN/wrong-python"
+printf '%s\n' '#!/bin/sh' 'exit 1' >"$QA_TEST_BIN/stale-uv"
+chmod +x "$QA_TEST_BIN/wrong-unity" "$QA_TEST_BIN/right-unity" "$QA_TEST_BIN/stale-uv"
 
 if UNITY_EDITOR="$QA_TEST_BIN/missing-unity" "$QA_PROJECT_ROOT/scripts/qa/build-addressables.sh" >"$QA_TEST_ROOT/missing-unity.out" 2>&1; then
   qa_fail "missing Unity contract unexpectedly succeeded"
@@ -22,10 +22,29 @@ if UNITY_EDITOR="$QA_TEST_BIN/wrong-unity" "$QA_PROJECT_ROOT/scripts/qa/build-ad
 fi
 grep -F "Unity 2021.3.21f1 is required" "$QA_TEST_ROOT/wrong-unity.out" >/dev/null || qa_fail "wrong Unity message was not actionable"
 
-if UNITY_EDITOR="$QA_TEST_BIN/right-unity" PYTHON_BIN="$QA_TEST_BIN/wrong-python" "$QA_PROJECT_ROOT/scripts/qa/setup.sh" >"$QA_TEST_ROOT/wrong-python.out" 2>&1; then
-  qa_fail "wrong Python contract unexpectedly succeeded"
+if UNITY_EDITOR="$QA_TEST_BIN/right-unity" UV_BIN="$QA_TEST_BIN/missing-uv" "$QA_PROJECT_ROOT/scripts/qa/setup.sh" >"$QA_TEST_ROOT/missing-uv.out" 2>&1; then
+  qa_fail "missing uv contract unexpectedly succeeded"
 fi
-grep -F "Python 3.8.13 is required" "$QA_TEST_ROOT/wrong-python.out" >/dev/null || qa_fail "wrong Python message was not actionable"
+grep -F "uv was not found" "$QA_TEST_ROOT/missing-uv.out" >/dev/null || qa_fail "missing uv message was not actionable"
+grep -F "qa config:" "$QA_TEST_ROOT/missing-uv.out" >/dev/null || qa_fail "missing uv must be classified as a configuration failure"
+
+if UNITY_EDITOR="$QA_TEST_BIN/right-unity" UV_BIN="$QA_TEST_BIN/stale-uv" "$QA_PROJECT_ROOT/scripts/qa/setup.sh" >"$QA_TEST_ROOT/stale-lock.out" 2>&1; then
+  qa_fail "stale uv lock contract unexpectedly succeeded"
+fi
+grep -F "uv.lock is missing or out of date" "$QA_TEST_ROOT/stale-lock.out" >/dev/null || qa_fail "stale lock message was not actionable"
+
+printf '%s\n' \
+  '#!/bin/sh' \
+  'if [ "${1:-}" = lock ]; then exit 0; fi' \
+  '[ "${1:-}" = run ] && [ "${2:-}" = --locked ] || exit 64' \
+  'shift 2' \
+  '[ "${1:-}" = python ] || exit 64' \
+  'shift' \
+  'exec "$QA_PROJECT_ROOT/.venv/bin/python" "$@"' >"$QA_TEST_BIN/uv-run"
+chmod +x "$QA_TEST_BIN/uv-run"
+export QA_PROJECT_ROOT
+UV_BIN="$QA_TEST_BIN/uv-run" "$QA_PROJECT_ROOT/scripts/qa/run-llm-agent.sh" --help >"$QA_TEST_ROOT/llm-help.out" 2>&1 || qa_fail "LLM runner help must work without an API key or player build"
+grep -F -- "--seed" "$QA_TEST_ROOT/llm-help.out" >/dev/null || qa_fail "LLM runner help must document the required seed"
 
 grep -F -- "--burst-disable-compilation" "$QA_PROJECT_ROOT/scripts/qa/build-player.sh" >/dev/null || qa_fail "player build must use the Burst 1.6.6 macOS compatibility option"
 grep -F "project_mgd_vampire" "$QA_PROJECT_ROOT/scripts/qa/common.sh" >/dev/null || qa_fail "default player executable must match the built macOS product"
@@ -107,6 +126,46 @@ if [ "${QA_TEST_SKIP_WATCHDOG:-0}" != 1 ]; then
   if kill -0 "$QA_HANGING_PID" 2>/dev/null; then
     qa_fail "watchdog left the hanging player process alive"
   fi
+fi
+
+QA_EVALUATE_CONTRACT_ROOT="$QA_PROJECT_ROOT/QAArtifacts/evaluate-process-contract"
+QA_EVALUATE_CONTRACT_BIN="$QA_EVALUATE_CONTRACT_ROOT/bin"
+mkdir -p "$QA_EVALUATE_CONTRACT_BIN"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'if [ "${1:-}" = lock ]; then exit 0; fi' \
+  'printf "%s\n" "$$" >"$QA_EVALUATE_CONTRACT_ROOT/uv.pid"' \
+  'trap "exit 0" TERM INT' \
+  'sh -c '\''trap "exit 0" TERM INT; while :; do sleep 1; done'\'' &' \
+  'child=$!' \
+  'printf "%s\n" "$child" >"$QA_EVALUATE_CONTRACT_ROOT/trainer.pid"' \
+  'wait "$child"' >"$QA_EVALUATE_CONTRACT_BIN/uv"
+printf '%s\n' '#!/bin/sh' 'while :; do sleep 1; done' >"$QA_EVALUATE_CONTRACT_BIN/player"
+chmod +x "$QA_EVALUATE_CONTRACT_BIN/uv" "$QA_EVALUATE_CONTRACT_BIN/player"
+export QA_EVALUATE_CONTRACT_ROOT
+UV_BIN="$QA_EVALUATE_CONTRACT_BIN/uv" "$QA_PROJECT_ROOT/scripts/qa/evaluate.sh" "$QA_EVALUATE_CONTRACT_BIN/player" >"$QA_EVALUATE_CONTRACT_ROOT/evaluate.out" 2>&1 &
+QA_EVALUATE_PID=$!
+QA_EVALUATE_READY=0
+for _ in 1 2 3 4 5; do
+  if [ -f "$QA_EVALUATE_CONTRACT_ROOT/uv.pid" ] && [ -f "$QA_EVALUATE_CONTRACT_ROOT/trainer.pid" ]; then
+    QA_EVALUATE_READY=1
+    break
+  fi
+  sleep 1
+done
+[ "$QA_EVALUATE_READY" = 1 ] || qa_fail "evaluate process contract did not start the uv trainer"
+kill -TERM "$QA_EVALUATE_PID"
+wait "$QA_EVALUATE_PID" 2>/dev/null || true
+QA_EVALUATE_UV_PID=$(sed -n '1p' "$QA_EVALUATE_CONTRACT_ROOT/uv.pid")
+QA_EVALUATE_TRAINER_PID=$(sed -n '1p' "$QA_EVALUATE_CONTRACT_ROOT/trainer.pid")
+for _ in 1 2 3 4 5; do
+  if ! kill -0 "$QA_EVALUATE_UV_PID" 2>/dev/null && ! kill -0 "$QA_EVALUATE_TRAINER_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+if kill -0 "$QA_EVALUATE_UV_PID" 2>/dev/null || kill -0 "$QA_EVALUATE_TRAINER_PID" 2>/dev/null; then
+  qa_fail "evaluate cleanup left a uv or trainer process alive"
 fi
 
 printf '%s\n' "QA shell contracts passed."
