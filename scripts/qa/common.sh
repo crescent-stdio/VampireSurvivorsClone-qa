@@ -7,6 +7,11 @@ qa_fail() {
   exit 1
 }
 
+qa_fail_config() {
+  printf '%s\n' "qa config: $*" >&2
+  exit 2
+}
+
 QA_SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 QA_PROJECT_ROOT=$(CDPATH= cd -- "$QA_SCRIPT_DIR/../.." && pwd)
 QA_UNITY_VERSION=2021.3.21f1
@@ -23,15 +28,14 @@ qa_require_unity() {
   esac
 }
 
-qa_require_python() {
-  if [ -n "${PYTHON_BIN:-}" ]; then
-    QA_PYTHON_BIN=$PYTHON_BIN
+qa_require_uv() {
+  if [ -n "${UV_BIN:-}" ]; then
+    QA_UV_BIN=$UV_BIN
   else
-    QA_PYTHON_BIN=$(command -v python3 || true)
+    QA_UV_BIN=$(command -v uv || true)
   fi
-  [ -n "${QA_PYTHON_BIN:-}" ] && [ -x "$QA_PYTHON_BIN" ] || qa_fail "Python 3.8.13 was not found. Set PYTHON_BIN to an exact Python 3.8.13 executable."
-  QA_PYTHON_ACTUAL_VERSION=$("$QA_PYTHON_BIN" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || true)
-  [ "$QA_PYTHON_ACTUAL_VERSION" = "3.8.13" ] || qa_fail "Python 3.8.13 is required; selected interpreter reports '$QA_PYTHON_ACTUAL_VERSION'."
+  [ -n "${QA_UV_BIN:-}" ] && [ -x "$QA_UV_BIN" ] || qa_fail_config "uv was not found. Install uv 0.12 and ensure it is available on PATH."
+  "$QA_UV_BIN" lock --check --project "$QA_PROJECT_ROOT" >/dev/null 2>&1 || qa_fail_config "uv.lock is missing or out of date. Run 'uv lock' and commit the result."
 }
 
 qa_require_file() {
