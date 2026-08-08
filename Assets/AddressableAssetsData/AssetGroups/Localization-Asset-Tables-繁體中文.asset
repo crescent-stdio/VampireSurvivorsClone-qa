@@ -13,8 +13,6 @@ MonoBehaviour:
   m_Name: "Localization-Asset-Tables-\u7E41\u9AD4\u4E2D\u6587"
   m_EditorClassIdentifier: 
   m_GroupName: "Localization-Asset-Tables-\u7E41\u9AD4\u4E2D\u6587"
-  m_Data:
-    m_SerializedData: []
   m_GUID: 26d8c0f90d33540bfab370f0a757dba8
   m_SerializeEntries:
   - m_GUID: 8b98997a21ef44edea2736fd92a49e16
@@ -23,6 +21,7 @@ MonoBehaviour:
     m_SerializedLabels:
     - Locale-zh-Hant
     - Preload
+    FlaggedDuringContentUpdateRestriction: 0
   m_ReadOnly: 1
   m_Settings: {fileID: 11400000, guid: 7e3d66dc8cb9f42809017db168ce4406, type: 2}
   m_SchemaSet:
