@@ -34,9 +34,10 @@ class Steps:
 
 
 class FakeEnvironment:
-    def __init__(self, artifact_root: Path, seed: int, **kwargs):
+    def __init__(self, artifact_root: Path, seed: int, outcome: int = 1, **kwargs):
         self.artifact_root = artifact_root
         self.seed = seed
+        self.outcome = outcome
         self.kwargs = kwargs
         self.behavior_specs = {"QaGameplay?team=0": object()}
         self.actions = []
@@ -55,7 +56,7 @@ class FakeEnvironment:
         episode = self.artifact_root / f"episode-{self.seed:08d}-fake"
         episode.mkdir(parents=True)
         (episode / "summary.json").write_text(
-            json.dumps({"Seed": self.seed, "Outcome": 1, "FailureReason": ""}),
+            json.dumps({"Seed": self.seed, "Outcome": self.outcome, "FailureReason": ""}),
             encoding="utf-8",
         )
         raise UnityCommunicatorStoppedException("normal player shutdown")
@@ -91,6 +92,26 @@ def test_runner_treats_communicator_stop_as_normal_when_one_summary_exists(tmp_p
         "-qaTimeScale=1",
     ]
     assert environments[0].closed is True
+    assert (result.summary_path.parent / "llm-decisions.jsonl").is_file()
+    assert (result.summary_path.parent / "llm-run.json").is_file()
+
+
+def test_runner_returns_one_for_a_classified_unity_failure(tmp_path: Path) -> None:
+    player = tmp_path / "QaGameplay.app"
+    player.mkdir()
+    artifact_root = tmp_path / "QAArtifacts"
+
+    result = run_episode(
+        RunnerConfig(seed=9302, player=player, artifact_root=artifact_root),
+        driver=AsyncPolicyDriver(ImmediatePolicy()),
+        scheduler=DecisionScheduler(),
+        environment_factory=lambda **kwargs: FakeEnvironment(
+            artifact_root=artifact_root, outcome=4, **kwargs
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert (result.summary_path.parent / "llm-run.json").is_file()
 
 
 def test_runner_refuses_an_existing_seed_before_starting_unity(tmp_path: Path) -> None:

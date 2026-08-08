@@ -7,6 +7,7 @@ import sys
 
 from openai import OpenAI
 
+from qa_llm_agent.artifacts import write_failure_artifact
 from qa_llm_agent.async_driver import AsyncPolicyDriver
 from qa_llm_agent.policy import OpenAiPolicy
 from qa_llm_agent.runner import RunnerConfig, run_episode
@@ -39,11 +40,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         result = run_episode(
-            RunnerConfig(seed=args.seed, player=args.player),
+            RunnerConfig(seed=args.seed, player=args.player, model=args.model),
             driver=AsyncPolicyDriver(policy),
             scheduler=scheduler,
         )
     except Exception as error:
+        write_failure_artifact(
+            Path("QAArtifacts"),
+            seed=args.seed,
+            model=args.model,
+            error=error,
+            secrets=(os.environ.get("OPENAI_API_KEY", ""),),
+        )
         print(f"qa llm: {error}", file=sys.stderr)
         return 2
     return result.exit_code

@@ -6,7 +6,7 @@ from typing import Protocol
 
 from qa_llm_agent.actions import PolicyAction, UnityAction, to_unity_action
 from qa_llm_agent.observation import QaObservation
-from qa_llm_agent.policy import PolicyResult
+from qa_llm_agent.policy import PolicyResult, TokenUsage
 from qa_llm_agent.scheduler import Trigger
 
 
@@ -22,8 +22,16 @@ class AsyncPolicyError(RuntimeError):
 
 @dataclass(frozen=True)
 class DecisionRecord:
-    result: PolicyResult
+    source: str
+    trigger: str
+    observation: QaObservation
+    action: UnityAction
+    requested_tick: int
     applied_tick: int | None = None
+    response_id: str = ""
+    latency_seconds: float = 0.0
+    usage: TokenUsage | None = None
+    attempt_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -41,6 +49,7 @@ class AsyncPolicyDriver:
         self._cached_action = PolicyAction(movement_x=0.0, movement_y=0.0, intent="initial no-op")
         self._records: list[DecisionRecord] = []
         self._unapplied_record: int | None = None
+        self._local_safety_ticks: set[int] = set()
         self._error: Exception | None = None
         self._stopping = False
         self._worker = threading.Thread(target=self._run, name="qa-openai-policy", daemon=True)
@@ -62,7 +71,20 @@ class AsyncPolicyDriver:
                 index = self._unapplied_record
                 self._records[index] = replace(self._records[index], applied_tick=applied_tick)
                 self._unapplied_record = None
-        return to_unity_action(action, observation)
+            mapped = to_unity_action(action, observation)
+            if mapped.source == "local_safety" and applied_tick not in self._local_safety_ticks:
+                self._records.append(
+                    DecisionRecord(
+                        source="local_safety",
+                        trigger="ability_dialog",
+                        observation=observation,
+                        action=mapped,
+                        requested_tick=applied_tick,
+                        applied_tick=applied_tick,
+                    )
+                )
+                self._local_safety_ticks.add(applied_tick)
+        return mapped
 
     def decisions(self) -> tuple[DecisionRecord, ...]:
         with self._condition:
@@ -97,5 +119,21 @@ class AsyncPolicyDriver:
                 continue
             with self._condition:
                 self._cached_action = result.action
-                self._records.append(DecisionRecord(result=result))
+                movement_only_observation = replace(
+                    request.observation,
+                    is_ability_selection_open=False,
+                )
+                self._records.append(
+                    DecisionRecord(
+                        source="openai",
+                        trigger=result.trigger.value,
+                        observation=request.observation,
+                        action=to_unity_action(result.action, movement_only_observation),
+                        requested_tick=result.requested_tick,
+                        response_id=result.response_id,
+                        latency_seconds=result.latency_seconds,
+                        usage=result.usage,
+                        attempt_count=result.attempt_count,
+                    )
+                )
                 self._unapplied_record = len(self._records) - 1

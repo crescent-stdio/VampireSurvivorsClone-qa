@@ -13,6 +13,7 @@ from mlagents_envs.environment import UnityEnvironment
 from mlagents_envs.exception import UnityCommunicatorStoppedException
 
 from qa_llm_agent.async_driver import AsyncPolicyDriver
+from qa_llm_agent.artifacts import write_episode_artifacts
 from qa_llm_agent.observation import decode_observation
 from qa_llm_agent.scheduler import DecisionScheduler
 
@@ -35,6 +36,7 @@ class RunnerConfig:
     player: Path
     artifact_root: Path = Path("QAArtifacts")
     watchdog_seconds: float = 900.0
+    model: str = "gpt-5.6-terra"
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,17 @@ def run_episode(
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RunnerInfrastructureError(f"Unable to read episode summary: {error}") from error
+    try:
+        write_episode_artifacts(
+            summary_path.parent,
+            seed=config.seed,
+            model=config.model,
+            records=driver.decisions(),
+            api_attempts=scheduler.attempts,
+            summary=summary,
+        )
+    except OSError as error:
+        raise RunnerInfrastructureError(f"Unable to write LLM episode artifacts: {error}") from error
     return RunResult(
         exit_code=0 if summary.get("Outcome") in (1, "Passed") else 1,
         summary_path=summary_path,

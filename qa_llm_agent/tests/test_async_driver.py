@@ -49,6 +49,9 @@ def test_driver_returns_cached_action_without_waiting_for_the_worker() -> None:
     assert action.continuous == (0.0, 0.0)
     policy.release.set()
     assert wait_until(lambda: driver.action_for(observation(), 3).continuous == (1.0, 0.0))
+    assert driver.decisions()[0].requested_tick == 1
+    assert driver.decisions()[0].applied_tick == 3
+    assert driver.decisions()[0].source == "openai"
     driver.close()
 
 
@@ -64,6 +67,24 @@ def test_driver_coalesces_busy_requests_to_the_latest_observation() -> None:
     assert wait_until(lambda: len(policy.elapsed_requests) == 2)
 
     assert policy.elapsed_requests == [0.0, 2.0]
+    driver.close()
+
+
+def test_driver_records_local_ability_selection_as_a_separate_immediate_decision() -> None:
+    policy = BlockingPolicy()
+    driver = AsyncPolicyDriver(policy)
+    values = [0.0] * 36
+    values[28] = 1.0
+    values[35] = 1.0
+
+    action = driver.action_for(decode_observation(values), applied_tick=7)
+
+    assert action.discrete == (2,)
+    record = driver.decisions()[0]
+    assert record.source == "local_safety"
+    assert record.requested_tick == 7
+    assert record.applied_tick == 7
+    assert record.action.ability_choice == 1
     driver.close()
 
 
