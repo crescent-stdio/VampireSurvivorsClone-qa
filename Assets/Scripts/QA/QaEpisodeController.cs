@@ -52,6 +52,7 @@ namespace Vampire
         private float elapsedUnscaledSeconds;
         private bool smokeRequested;
         private bool llmRequested;
+        private bool evaluationRequested;
         private float originalTimeScale = 1f;
         private bool terminalNotificationInProgress;
         private bool terminalAcknowledged;
@@ -74,6 +75,7 @@ namespace Vampire
         public QaControlMode ControlMode { get; private set; } = QaControlMode.Scripted;
         public bool IsSmokeMode => smokeRequested;
         public bool IsLlmMode => llmRequested;
+        public bool IsEvaluationMode => evaluationRequested;
         public QaEpisodeOutcome CurrentOutcome => TerminalResult == null
             ? (levelManager == null ? QaEpisodeOutcome.InProgress : levelManager.Outcome)
             : TerminalResult.Outcome;
@@ -128,6 +130,7 @@ namespace Vampire
             failureScreenshotCapture = null;
             smokeRequested = false;
             llmRequested = false;
+            evaluationRequested = false;
             terminalNotificationInProgress = false;
             terminalAcknowledged = false;
             DuplicateTerminalCount = 0;
@@ -171,6 +174,13 @@ namespace Vampire
         public void ConfigureLlmForTesting(IQaProcessExit testProcessExit, IQaFailureScreenshotCapture testScreenshotCapture)
         {
             llmRequested = true;
+            processExit = testProcessExit;
+            failureScreenshotCapture = testScreenshotCapture;
+        }
+
+        public void ConfigureEvaluationForTesting(IQaProcessExit testProcessExit, IQaFailureScreenshotCapture testScreenshotCapture)
+        {
+            evaluationRequested = true;
             processExit = testProcessExit;
             failureScreenshotCapture = testScreenshotCapture;
         }
@@ -234,7 +244,8 @@ namespace Vampire
             var smokeOptions = QaSmokeOptions.Parse(Environment.GetCommandLineArgs());
             smokeRequested = smokeRequested || smokeOptions.IsRequested;
             llmRequested = llmRequested || smokeOptions.IsLlmRequested;
-            if (smokeOptions.IsRequested || smokeOptions.IsLlmRequested)
+            evaluationRequested = evaluationRequested || smokeOptions.IsEvaluationRequested;
+            if (smokeOptions.IsRequested || smokeOptions.IsLlmRequested || smokeOptions.IsEvaluationRequested)
             {
                 originalTimeScale = Time.timeScale;
                 Time.timeScale = smokeOptions.TimeScale;
@@ -268,7 +279,7 @@ namespace Vampire
             QaRandomDecisionRecorder.DecisionRecorded += RecordDiscreteEvent;
             randomDecisionSubscribed = true;
             episodeStarted = true;
-            if ((smokeRequested || llmRequested) && !smokeOptions.IsValid)
+            if ((smokeRequested || llmRequested || evaluationRequested) && !smokeOptions.IsValid)
                 Complete(QaEpisodeOutcome.Error, smokeOptions.FailureReason);
             else if (!string.IsNullOrEmpty(replayLoadFailure))
                 Complete(QaEpisodeOutcome.Error, replayLoadFailure);
@@ -288,6 +299,11 @@ namespace Vampire
             if (llmRequested && gameTime >= QaSmokeOptions.MaximumGameTimeSeconds)
             {
                 Complete(QaEpisodeOutcome.TimedOut, "LlmDeadline");
+                return;
+            }
+            if (evaluationRequested && gameTime >= QaSmokeOptions.MaximumGameTimeSeconds)
+            {
+                Complete(QaEpisodeOutcome.TimedOut, "EvaluationDeadline");
                 return;
             }
             var observation = CaptureObservation();
@@ -457,7 +473,7 @@ namespace Vampire
             RestoreCoins();
             WriteArtifacts();
 
-            if (smokeRequested || llmRequested)
+            if (smokeRequested || llmRequested || evaluationRequested)
             {
                 if (outcome != QaEpisodeOutcome.Passed)
                     failureScreenshotCapture.Capture("QAArtifacts/screenshots/seed-" + episodeSeed.ToString("D8") + ".png");
@@ -547,7 +563,7 @@ namespace Vampire
 
         private void RestoreTimeScale()
         {
-            if (smokeRequested || llmRequested)
+            if (smokeRequested || llmRequested || evaluationRequested)
                 Time.timeScale = originalTimeScale;
         }
     }

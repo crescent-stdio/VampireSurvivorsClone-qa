@@ -180,16 +180,23 @@ grep -F 'MPS is not available' "$QA_TRAIN_CONTRACT_ROOT/unavailable-mps.out" >/d
 QA_EVALUATE_CONTRACT_ROOT="$QA_PROJECT_ROOT/QAArtifacts/evaluate-process-contract"
 QA_EVALUATE_CONTRACT_BIN="$QA_EVALUATE_CONTRACT_ROOT/bin"
 mkdir -p "$QA_EVALUATE_CONTRACT_BIN"
+rm -f "$QA_EVALUATE_CONTRACT_ROOT/uv.pid" "$QA_EVALUATE_CONTRACT_ROOT/trainer.pid" \
+  "$QA_EVALUATE_CONTRACT_ROOT/trainer-arguments" "$QA_EVALUATE_CONTRACT_ROOT/player-arguments"
 printf '%s\n' \
   '#!/bin/sh' \
   'if [ "${1:-}" = lock ]; then exit 0; fi' \
+  'printf "%s\n" "$@" >"$QA_EVALUATE_CONTRACT_ROOT/trainer-arguments"' \
   'printf "%s\n" "$$" >"$QA_EVALUATE_CONTRACT_ROOT/uv.pid"' \
-  'trap "exit 0" TERM INT' \
   'sh -c '\''trap "exit 0" TERM INT; while :; do sleep 1; done'\'' &' \
   'child=$!' \
+  'cleanup() { kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 0; }' \
+  'trap cleanup TERM INT' \
   'printf "%s\n" "$child" >"$QA_EVALUATE_CONTRACT_ROOT/trainer.pid"' \
   'wait "$child"' >"$QA_EVALUATE_CONTRACT_BIN/uv"
-printf '%s\n' '#!/bin/sh' 'while :; do sleep 1; done' >"$QA_EVALUATE_CONTRACT_BIN/player"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "%s\n" "$@" >"$QA_EVALUATE_CONTRACT_ROOT/player-arguments"' \
+  'while :; do sleep 1; done' >"$QA_EVALUATE_CONTRACT_BIN/player"
 chmod +x "$QA_EVALUATE_CONTRACT_BIN/uv" "$QA_EVALUATE_CONTRACT_BIN/player"
 export QA_EVALUATE_CONTRACT_ROOT
 UV_BIN="$QA_EVALUATE_CONTRACT_BIN/uv" "$QA_PROJECT_ROOT/scripts/qa/evaluate.sh" "$QA_EVALUATE_CONTRACT_BIN/player" >"$QA_EVALUATE_CONTRACT_ROOT/evaluate.out" 2>&1 &
@@ -203,6 +210,11 @@ for _ in 1 2 3 4 5; do
   sleep 1
 done
 [ "$QA_EVALUATE_READY" = 1 ] || qa_fail "evaluate process contract did not start the uv trainer"
+grep -Fx -- '--torch-device=cpu' "$QA_EVALUATE_CONTRACT_ROOT/trainer-arguments" >/dev/null || qa_fail "evaluation must default to the CPU torch device"
+grep -Fx -- '--seed=1234' "$QA_EVALUATE_CONTRACT_ROOT/trainer-arguments" >/dev/null || qa_fail "evaluation must pass its seed to the trainer"
+grep -Fx -- '-qaSeed=1234' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must pass the same seed to Unity"
+grep -Fx -- '-qaMode=evaluate' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must request Unity single-episode mode"
+grep -Fx -- '-qaTimeScale=1' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must run at normal game speed"
 kill -TERM "$QA_EVALUATE_PID"
 wait "$QA_EVALUATE_PID" 2>/dev/null || true
 QA_EVALUATE_UV_PID=$(sed -n '1p' "$QA_EVALUATE_CONTRACT_ROOT/uv.pid")
@@ -216,5 +228,11 @@ done
 if kill -0 "$QA_EVALUATE_UV_PID" 2>/dev/null || kill -0 "$QA_EVALUATE_TRAINER_PID" 2>/dev/null; then
   qa_fail "evaluate cleanup left a uv or trainer process alive"
 fi
+
+if QA_EVALUATE_SEED=invalid UV_BIN="$QA_EVALUATE_CONTRACT_BIN/uv" \
+  "$QA_PROJECT_ROOT/scripts/qa/evaluate.sh" "$QA_EVALUATE_CONTRACT_BIN/player" >"$QA_EVALUATE_CONTRACT_ROOT/invalid-seed.out" 2>&1; then
+  qa_fail "an invalid evaluation seed must fail before launch"
+fi
+grep -F 'QA_EVALUATE_SEED must be a positive integer' "$QA_EVALUATE_CONTRACT_ROOT/invalid-seed.out" >/dev/null || qa_fail "invalid evaluation seed failure must be actionable"
 
 printf '%s\n' "QA shell contracts passed."

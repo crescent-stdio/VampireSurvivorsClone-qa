@@ -9,16 +9,18 @@ namespace Vampire
         public const float MaximumSupportedTimeScale = 4f;
         private const float DefaultTimeScale = 1f;
 
-        private QaSmokeOptions(bool isRequested, bool isLlmRequested, float timeScale, string failureReason)
+        private QaSmokeOptions(bool isRequested, bool isLlmRequested, bool isEvaluationRequested, float timeScale, string failureReason)
         {
             IsRequested = isRequested;
             IsLlmRequested = isLlmRequested;
+            IsEvaluationRequested = isEvaluationRequested;
             TimeScale = timeScale;
             FailureReason = failureReason;
         }
 
         public bool IsRequested { get; }
         public bool IsLlmRequested { get; }
+        public bool IsEvaluationRequested { get; }
         public float TimeScale { get; }
         public string FailureReason { get; }
         public bool IsValid => string.IsNullOrEmpty(FailureReason);
@@ -27,10 +29,11 @@ namespace Vampire
         {
             var requested = false;
             var llmRequested = false;
+            var evaluationRequested = false;
             var timeScale = DefaultTimeScale;
             var failureReason = string.Empty;
             if (arguments == null)
-                return new QaSmokeOptions(false, false, timeScale, failureReason);
+                return new QaSmokeOptions(false, false, false, timeScale, failureReason);
 
             foreach (var argument in arguments)
             {
@@ -43,6 +46,12 @@ namespace Vampire
                 if (string.Equals(argument, "-qaMode=llm", StringComparison.Ordinal))
                 {
                     llmRequested = true;
+                    continue;
+                }
+
+                if (string.Equals(argument, "-qaMode=evaluate", StringComparison.Ordinal))
+                {
+                    evaluationRequested = true;
                     continue;
                 }
 
@@ -67,7 +76,13 @@ namespace Vampire
                 failureReason = "UnsupportedLlmTimeScale";
             }
 
-            return new QaSmokeOptions(requested, llmRequested, timeScale, failureReason);
+            else if (evaluationRequested && (failureReason.Length > 0 || Math.Abs(timeScale - DefaultTimeScale) > float.Epsilon))
+            {
+                timeScale = DefaultTimeScale;
+                failureReason = "UnsupportedEvaluationTimeScale";
+            }
+
+            return new QaSmokeOptions(requested, llmRequested, evaluationRequested, timeScale, failureReason);
         }
     }
 
