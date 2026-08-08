@@ -3,14 +3,14 @@
 set -eu
 . "$(dirname -- "$0")/common.sh"
 
-QA_PLAYER=${1:-$QA_DEFAULT_PLAYER}
+QA_PLAYER=${1:-$QA_DEFAULT_PLAYER_BUNDLE}
 QA_EVALUATE_SEED=${QA_EVALUATE_SEED:-1234}
 QA_PPO_CONFIG=${QA_PPO_CONFIG:-config/qa-ppo.yaml}
 QA_PPO_RUN_ID=${QA_PPO_RUN_ID:-qa-ppo}
 QA_PPO_RESULTS_DIR=${QA_PPO_RESULTS_DIR:-$QA_PROJECT_ROOT/QAArtifacts/checkpoints}
 qa_require_uv
 qa_configure_torch_device
-qa_require_executable "$QA_PLAYER"
+qa_resolve_mlagents_player "$QA_PLAYER"
 case "$QA_EVALUATE_SEED" in
   ''|*[!0-9]*) qa_fail_config "QA_EVALUATE_SEED must be a positive integer." ;;
 esac
@@ -45,7 +45,7 @@ cd "$QA_PROJECT_ROOT"
     --seed="$QA_EVALUATE_SEED" --torch-device="$QA_TORCH_DEVICE" --results-dir="$QA_PPO_RESULTS_DIR"
 ) >"$QA_PROJECT_ROOT/QAArtifacts/logs/evaluate-trainer.log" 2>&1 &
 QA_TRAINER_PID=$!
-"$QA_PLAYER" -batchmode -nographics -qaSeed="$QA_EVALUATE_SEED" -qaMode=evaluate -qaTimeScale=1 \
+"$QA_MLAGENTS_PLAYER_EXECUTABLE" -batchmode -nographics -qaSeed="$QA_EVALUATE_SEED" -qaMode=evaluate -qaTimeScale=1 \
   -logFile "$QA_PROJECT_ROOT/QAArtifacts/logs/evaluate.log" &
 QA_PLAYER_PID=$!
 QA_PLAYER_STATUS=0

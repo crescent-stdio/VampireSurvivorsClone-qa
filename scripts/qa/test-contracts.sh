@@ -145,34 +145,36 @@ printf '%s\n' \
   'fi' \
   'printf "%s\n" "$@" >"$QA_TRAIN_CONTRACT_ROOT/arguments"' \
   'exit 0' >"$QA_TRAIN_CONTRACT_BIN/uv"
-printf '%s\n' '#!/bin/sh' 'exit 0' >"$QA_TRAIN_CONTRACT_BIN/player"
-chmod +x "$QA_TRAIN_CONTRACT_BIN/uv" "$QA_TRAIN_CONTRACT_BIN/player"
+mkdir -p "$QA_TRAIN_CONTRACT_ROOT/QaGameplay.app/Contents/MacOS"
+printf '%s\n' '#!/bin/sh' 'exit 0' >"$QA_TRAIN_CONTRACT_ROOT/QaGameplay.app/Contents/MacOS/project_mgd_vampire"
+chmod +x "$QA_TRAIN_CONTRACT_BIN/uv" "$QA_TRAIN_CONTRACT_ROOT/QaGameplay.app/Contents/MacOS/project_mgd_vampire"
 export QA_TRAIN_CONTRACT_ROOT
 printf '%s\n' 'behaviors: {}' >"$QA_TRAIN_CONTRACT_ROOT/override.yaml"
 
 UV_BIN="$QA_TRAIN_CONTRACT_BIN/uv" \
-  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_BIN/player"
+  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_ROOT/QaGameplay.app"
 grep -Fx -- '--torch-device=cpu' "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must default to the CPU torch device"
+grep -Fx -- "--env=$QA_TRAIN_CONTRACT_ROOT/QaGameplay.app" "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "ML-Agents training must receive the macOS app bundle"
 
 QA_TORCH_DEVICE=mps QA_TEST_MPS_AVAILABLE=1 \
   QA_PPO_CONFIG="$QA_TRAIN_CONTRACT_ROOT/override.yaml" \
   QA_PPO_RUN_ID=qa-contract \
   QA_PPO_RESULTS_DIR=QAArtifacts/contract-checkpoints \
   UV_BIN="$QA_TRAIN_CONTRACT_BIN/uv" \
-  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_BIN/player"
+  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_ROOT/QaGameplay.app"
 grep -Fx -- '--torch-device=mps' "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must forward an available MPS torch device"
 grep -Fx -- "$QA_TRAIN_CONTRACT_ROOT/override.yaml" "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must allow a QA_PPO_CONFIG override"
 grep -Fx -- '--run-id=qa-contract' "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must allow a QA_PPO_RUN_ID override"
 grep -Fx -- '--results-dir=QAArtifacts/contract-checkpoints' "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must allow a QA_PPO_RESULTS_DIR override"
 
 if QA_TORCH_DEVICE=cuda UV_BIN="$QA_TRAIN_CONTRACT_BIN/uv" \
-  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_BIN/player" >"$QA_TRAIN_CONTRACT_ROOT/invalid-device.out" 2>&1; then
+  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_ROOT/QaGameplay.app" >"$QA_TRAIN_CONTRACT_ROOT/invalid-device.out" 2>&1; then
   qa_fail "an unsupported torch device must fail before training"
 fi
 grep -F 'QA_TORCH_DEVICE must be cpu or mps' "$QA_TRAIN_CONTRACT_ROOT/invalid-device.out" >/dev/null || qa_fail "unsupported torch device failure must be actionable"
 
 if QA_TORCH_DEVICE=mps QA_TEST_MPS_AVAILABLE=0 UV_BIN="$QA_TRAIN_CONTRACT_BIN/uv" \
-  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_BIN/player" >"$QA_TRAIN_CONTRACT_ROOT/unavailable-mps.out" 2>&1; then
+  "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_ROOT/QaGameplay.app" >"$QA_TRAIN_CONTRACT_ROOT/unavailable-mps.out" 2>&1; then
   qa_fail "unavailable MPS must fail before training"
 fi
 grep -F 'MPS is not available' "$QA_TRAIN_CONTRACT_ROOT/unavailable-mps.out" >/dev/null || qa_fail "unavailable MPS failure must be actionable"
@@ -193,13 +195,14 @@ printf '%s\n' \
   'trap cleanup TERM INT' \
   'printf "%s\n" "$child" >"$QA_EVALUATE_CONTRACT_ROOT/trainer.pid"' \
   'wait "$child"' >"$QA_EVALUATE_CONTRACT_BIN/uv"
+mkdir -p "$QA_EVALUATE_CONTRACT_ROOT/QaGameplay.app/Contents/MacOS"
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$@" >"$QA_EVALUATE_CONTRACT_ROOT/player-arguments"' \
-  'while :; do sleep 1; done' >"$QA_EVALUATE_CONTRACT_BIN/player"
-chmod +x "$QA_EVALUATE_CONTRACT_BIN/uv" "$QA_EVALUATE_CONTRACT_BIN/player"
+  'while :; do sleep 1; done' >"$QA_EVALUATE_CONTRACT_ROOT/QaGameplay.app/Contents/MacOS/project_mgd_vampire"
+chmod +x "$QA_EVALUATE_CONTRACT_BIN/uv" "$QA_EVALUATE_CONTRACT_ROOT/QaGameplay.app/Contents/MacOS/project_mgd_vampire"
 export QA_EVALUATE_CONTRACT_ROOT
-UV_BIN="$QA_EVALUATE_CONTRACT_BIN/uv" "$QA_PROJECT_ROOT/scripts/qa/evaluate.sh" "$QA_EVALUATE_CONTRACT_BIN/player" >"$QA_EVALUATE_CONTRACT_ROOT/evaluate.out" 2>&1 &
+UV_BIN="$QA_EVALUATE_CONTRACT_BIN/uv" "$QA_PROJECT_ROOT/scripts/qa/evaluate.sh" "$QA_EVALUATE_CONTRACT_ROOT/QaGameplay.app" >"$QA_EVALUATE_CONTRACT_ROOT/evaluate.out" 2>&1 &
 QA_EVALUATE_PID=$!
 QA_EVALUATE_READY=0
 for _ in 1 2 3 4 5; do
@@ -230,7 +233,7 @@ if kill -0 "$QA_EVALUATE_UV_PID" 2>/dev/null || kill -0 "$QA_EVALUATE_TRAINER_PI
 fi
 
 if QA_EVALUATE_SEED=invalid UV_BIN="$QA_EVALUATE_CONTRACT_BIN/uv" \
-  "$QA_PROJECT_ROOT/scripts/qa/evaluate.sh" "$QA_EVALUATE_CONTRACT_BIN/player" >"$QA_EVALUATE_CONTRACT_ROOT/invalid-seed.out" 2>&1; then
+  "$QA_PROJECT_ROOT/scripts/qa/evaluate.sh" "$QA_EVALUATE_CONTRACT_ROOT/QaGameplay.app" >"$QA_EVALUATE_CONTRACT_ROOT/invalid-seed.out" 2>&1; then
   qa_fail "an invalid evaluation seed must fail before launch"
 fi
 grep -F 'QA_EVALUATE_SEED must be a positive integer' "$QA_EVALUATE_CONTRACT_ROOT/invalid-seed.out" >/dev/null || qa_fail "invalid evaluation seed failure must be actionable"

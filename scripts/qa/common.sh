@@ -16,7 +16,8 @@ QA_SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 QA_PROJECT_ROOT=$(CDPATH= cd -- "$QA_SCRIPT_DIR/../.." && pwd)
 QA_UNITY_VERSION=6000.0.80f1
 QA_DEFAULT_UNITY_EDITOR="/Applications/Unity/Hub/Editor/$QA_UNITY_VERSION/Unity.app/Contents/MacOS/Unity"
-QA_DEFAULT_PLAYER="$QA_PROJECT_ROOT/QAArtifacts/player/QaGameplay.app/Contents/MacOS/project_mgd_vampire"
+QA_DEFAULT_PLAYER_BUNDLE="$QA_PROJECT_ROOT/QAArtifacts/player/QaGameplay.app"
+QA_DEFAULT_PLAYER="$QA_DEFAULT_PLAYER_BUNDLE/Contents/MacOS/project_mgd_vampire"
 
 qa_require_unity() {
   QA_UNITY_BIN=${UNITY_EDITOR:-$QA_DEFAULT_UNITY_EDITOR}
@@ -57,6 +58,22 @@ qa_require_file() {
 
 qa_require_executable() {
   [ -x "$1" ] || qa_fail "Required executable does not exist: $1"
+}
+
+qa_resolve_mlagents_player() {
+  case "$1" in
+    *.app)
+      QA_MLAGENTS_PLAYER_BUNDLE=$1
+      QA_MLAGENTS_PLAYER_EXECUTABLE=$1/Contents/MacOS/project_mgd_vampire
+      ;;
+    *)
+      qa_require_executable "$1"
+      QA_MLAGENTS_PLAYER_EXECUTABLE=$1
+      QA_MLAGENTS_PLAYER_BUNDLE=$(CDPATH= cd -- "$(dirname -- "$1")/../.." && pwd)
+      ;;
+  esac
+  [ -d "$QA_MLAGENTS_PLAYER_BUNDLE" ] || qa_fail "Required Unity app bundle does not exist: $QA_MLAGENTS_PLAYER_BUNDLE"
+  qa_require_executable "$QA_MLAGENTS_PLAYER_EXECUTABLE"
 }
 
 qa_run_unity() {
