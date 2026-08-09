@@ -159,6 +159,34 @@ namespace Vampire.Tests.EditMode
         }
 
         [Test]
+        public void Training_mode_reaches_a_terminal_so_ppo_sees_episode_boundaries()
+        {
+            // Without a deadline a training episode never ends: the agent has no step cap,
+            // the QA character effectively cannot die, and a pass needs the final boss dead.
+            var controller = CreateController(7010);
+
+            Assert.That(controller.IsTrainingMode, Is.True);
+
+            controller.AdvanceForTesting(0.1f, QaSmokeOptions.MaximumGameTimeSeconds, 1f);
+
+            Assert.That(controller.TerminalResult, Is.Not.Null);
+            Assert.That(controller.TerminalResult.Outcome, Is.EqualTo(QaEpisodeOutcome.TimedOut));
+            Assert.That(controller.TerminalResult.FailureReason, Is.EqualTo("TrainingDeadline"));
+            Object.DestroyImmediate(controller.gameObject);
+        }
+
+        [Test]
+        public void Training_mode_keeps_running_before_the_deadline()
+        {
+            var controller = CreateController(7011);
+
+            controller.AdvanceForTesting(0.1f, QaSmokeOptions.MaximumGameTimeSeconds - 0.1f, 1f);
+
+            Assert.That(controller.TerminalResult, Is.Null);
+            Object.DestroyImmediate(controller.gameObject);
+        }
+
+        [Test]
         public void Smoke_mode_classifies_the_episode_deadline_as_a_timeout()
         {
             var controller = CreateController(7003);

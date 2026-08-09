@@ -64,6 +64,19 @@ namespace Vampire
         /// <summary>Preset resolved from <c>-qaPreset=</c>, or null when running outside a preset.</summary>
         public QaPresetBlueprint ActivePreset => activePreset;
 
+        /// <summary>
+        /// True while an ML-Agents trainer drives the episode with no <c>-qaMode</c> flag.
+        /// </summary>
+        /// <remarks>
+        /// Training needs a deadline of its own. The agent carries no step cap, the QA
+        /// character survives long enough that death is not a practical terminal, and a
+        /// pass requires killing the boss that spawns once the level duration elapses.
+        /// Without this an untrained policy never reaches a terminal at all, so PPO sees
+        /// neither the pass reward nor the failure reward and bootstraps forever.
+        /// Replay is excluded: it is bounded by the recorded action trace.
+        /// </remarks>
+        public bool IsTrainingMode => !smokeRequested && !llmRequested && !evaluationRequested && !replayRequested;
+
         /// <summary>Game-time deadline for this episode.</summary>
         public float DeadlineSeconds =>
             activePreset == null ? QaSmokeOptions.MaximumGameTimeSeconds : activePreset.DeadlineSeconds;
@@ -361,6 +374,11 @@ namespace Vampire
             if (evaluationRequested && gameTime >= DeadlineSeconds)
             {
                 Complete(QaEpisodeOutcome.TimedOut, "EvaluationDeadline");
+                return;
+            }
+            if (IsTrainingMode && gameTime >= DeadlineSeconds)
+            {
+                Complete(QaEpisodeOutcome.TimedOut, "TrainingDeadline");
                 return;
             }
             var observation = CaptureObservation();
