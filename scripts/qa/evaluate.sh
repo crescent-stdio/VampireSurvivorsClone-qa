@@ -6,6 +6,10 @@ set -eu
 QA_PLAYER=${1:-$QA_DEFAULT_PLAYER_BUNDLE}
 QA_EVALUATE_SEED=${QA_EVALUATE_SEED:-1234}
 QA_PRESET=${QA_PRESET:-eval}
+# mlagents_envs.UnityEnvironment.DEFAULT_EDITOR_PORT, which mlagents-learn listens on
+# when it is not given --env.
+QA_EVALUATE_PORT=${QA_EVALUATE_PORT:-5004}
+QA_EVALUATE_TRAINER_GRACE_SECONDS=${QA_EVALUATE_TRAINER_GRACE_SECONDS:-3}
 QA_PPO_CONFIG=${QA_PPO_CONFIG:-config/qa-ppo.yaml}
 QA_PPO_RUN_ID=${QA_PPO_RUN_ID:-qa-ppo}
 QA_PPO_RESULTS_DIR=${QA_PPO_RESULTS_DIR:-$QA_PROJECT_ROOT/QAArtifacts/checkpoints}
@@ -46,7 +50,24 @@ cd "$QA_PROJECT_ROOT"
     --seed="$QA_EVALUATE_SEED" --torch-device="$QA_TORCH_DEVICE" --results-dir="$QA_PPO_RESULTS_DIR"
 ) >"$QA_PROJECT_ROOT/QAArtifacts/logs/evaluate-trainer.log" 2>&1 &
 QA_TRAINER_PID=$!
-"$QA_MLAGENTS_PLAYER_EXECUTABLE" -batchmode -nographics -qaPreset="$QA_PRESET" -qaSeed="$QA_EVALUATE_SEED" -qaMode=evaluate -qaTimeScale=1 \
+
+# --resume aborts when the run id has no prior data, and the trainer's output goes to a
+# log file while this script returns the player's status. Without this check a missing
+# checkpoint produced a green run that had actually measured the scripted fallback.
+QA_TRAINER_GRACE_ELAPSED=0
+while [ "$QA_TRAINER_GRACE_ELAPSED" -lt "$QA_EVALUATE_TRAINER_GRACE_SECONDS" ]; do
+  kill -0 "$QA_TRAINER_PID" 2>/dev/null ||
+    qa_fail "The evaluation trainer exited before the player started: $(tail -n 1 "$QA_PROJECT_ROOT/QAArtifacts/logs/evaluate-trainer.log" 2>/dev/null)"
+  sleep 1
+  QA_TRAINER_GRACE_ELAPSED=$((QA_TRAINER_GRACE_ELAPSED + 1))
+done
+
+# A standalone player only opens a communicator when --mlagents-port is present:
+# Academy.ReadPortFromArgs returns -1 in a non-editor build otherwise, BehaviorType.Default
+# then finds no communicator and no model, and silently falls back to the heuristic policy.
+# Launched without --env, mlagents-learn listens on the default editor port.
+"$QA_MLAGENTS_PLAYER_EXECUTABLE" -batchmode -nographics --mlagents-port "$QA_EVALUATE_PORT" \
+  -qaPreset="$QA_PRESET" -qaSeed="$QA_EVALUATE_SEED" -qaMode=evaluate -qaTimeScale=1 \
   -logFile "$QA_PROJECT_ROOT/QAArtifacts/logs/evaluate.log" &
 QA_PLAYER_PID=$!
 QA_PLAYER_STATUS=0

@@ -206,8 +206,11 @@ export QA_EVALUATE_CONTRACT_ROOT
 UV_BIN="$QA_EVALUATE_CONTRACT_BIN/uv" "$QA_PROJECT_ROOT/scripts/qa/evaluate.sh" "$QA_EVALUATE_CONTRACT_ROOT/QaGameplay.app" >"$QA_EVALUATE_CONTRACT_ROOT/evaluate.out" 2>&1 &
 QA_EVALUATE_PID=$!
 QA_EVALUATE_READY=0
-for _ in 1 2 3 4 5; do
-  if [ -f "$QA_EVALUATE_CONTRACT_ROOT/uv.pid" ] && [ -f "$QA_EVALUATE_CONTRACT_ROOT/trainer.pid" ]; then
+# The player starts only after evaluate.sh has confirmed the trainer survived its grace
+# period, so wait for the player arguments too rather than just the trainer pid files.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if [ -f "$QA_EVALUATE_CONTRACT_ROOT/uv.pid" ] && [ -f "$QA_EVALUATE_CONTRACT_ROOT/trainer.pid" ] &&
+    [ -f "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" ]; then
     QA_EVALUATE_READY=1
     break
   fi
@@ -220,6 +223,8 @@ grep -Fx -- '-qaSeed=1234' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/n
 grep -Fx -- '-qaMode=evaluate' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must request Unity single-episode mode"
 grep -Fx -- '-qaTimeScale=1' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must run at normal game speed"
 grep -Fx -- '-qaPreset=eval' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must select the eval preset so it matches the training environment"
+grep -Fx -- '--mlagents-port' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must give the player a port or it silently runs the scripted policy"
+grep -Fx -- '5004' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must use the trainer's default editor port"
 kill -TERM "$QA_EVALUATE_PID"
 wait "$QA_EVALUATE_PID" 2>/dev/null || true
 QA_EVALUATE_UV_PID=$(sed -n '1p' "$QA_EVALUATE_CONTRACT_ROOT/uv.pid")
@@ -239,5 +244,25 @@ if QA_EVALUATE_SEED=invalid UV_BIN="$QA_EVALUATE_CONTRACT_BIN/uv" \
   qa_fail "an invalid evaluation seed must fail before launch"
 fi
 grep -F 'QA_EVALUATE_SEED must be a positive integer' "$QA_EVALUATE_CONTRACT_ROOT/invalid-seed.out" >/dev/null || qa_fail "invalid evaluation seed failure must be actionable"
+
+# A trainer that dies immediately, which is what --resume does when the run id has no
+# prior data, must fail the run. It used to be invisible: the trainer wrote to a log file
+# and evaluate.sh returned the player's status, so the scripted fallback reported success.
+QA_EVALUATE_DEAD_TRAINER_BIN="$QA_EVALUATE_CONTRACT_ROOT/dead-trainer-bin"
+mkdir -p "$QA_EVALUATE_DEAD_TRAINER_BIN"
+rm -f "$QA_EVALUATE_CONTRACT_ROOT/player-arguments"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'if [ "${1:-}" = lock ]; then exit 0; fi' \
+  'printf "%s\n" "Previous data from this run ID was not found." >&2' \
+  'exit 1' >"$QA_EVALUATE_DEAD_TRAINER_BIN/uv"
+chmod +x "$QA_EVALUATE_DEAD_TRAINER_BIN/uv"
+if UV_BIN="$QA_EVALUATE_DEAD_TRAINER_BIN/uv" \
+  "$QA_PROJECT_ROOT/scripts/qa/evaluate.sh" "$QA_EVALUATE_CONTRACT_ROOT/QaGameplay.app" \
+  >"$QA_EVALUATE_CONTRACT_ROOT/dead-trainer.out" 2>&1; then
+  qa_fail "evaluation must fail when the trainer dies instead of measuring the scripted fallback"
+fi
+[ ! -f "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" ] || qa_fail "evaluation must not launch the player once the trainer is gone"
+grep -F 'trainer exited before the player started' "$QA_EVALUATE_CONTRACT_ROOT/dead-trainer.out" >/dev/null || qa_fail "a dead evaluation trainer must be reported"
 
 printf '%s\n' "QA shell contracts passed."
