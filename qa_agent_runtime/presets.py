@@ -18,7 +18,9 @@ SCHEMA = "qa-presets/v1"
 DEFAULT_PRESET = "smoke"
 FINGERPRINT_LENGTH = 16
 
-DEFAULT_PRESET_PATH = Path(__file__).resolve().parent.parent / "config" / "qa-presets.json"
+DEFAULT_PRESET_PATH = (
+    Path(__file__).resolve().parent.parent / "config" / "qa-presets.json"
+)
 
 
 class PresetError(RuntimeError):
@@ -97,10 +99,14 @@ class QaPreset:
                 "armor": self.character.armor,
             },
             "episode": {"deadlineSeconds": self.episode.deadline_seconds},
-            "observation": {"elapsedSecondsScale": self.observation.elapsed_seconds_scale},
+            "observation": {
+                "elapsedSecondsScale": self.observation.elapsed_seconds_scale
+            },
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:FINGERPRINT_LENGTH]
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[
+            :FINGERPRINT_LENGTH
+        ]
 
 
 def load_presets(path: Path | None = None) -> dict[str, QaPreset]:
@@ -117,15 +123,28 @@ def load_presets(path: Path | None = None) -> dict[str, QaPreset]:
         raise PresetError("Preset definitions must be a JSON object.")
     schema = document.get("schema")
     if schema != SCHEMA:
-        raise PresetError(f"Unsupported preset schema: {schema!r}; expected {SCHEMA!r}.")
+        raise PresetError(
+            f"Unsupported preset schema: {schema!r}; expected {SCHEMA!r}."
+        )
 
     definitions = document.get("presets")
-    if not isinstance(definitions, dict) or not definitions:
-        raise PresetError("Preset definitions must contain a non-empty 'presets' object.")
+    if not isinstance(definitions, list) or not definitions:
+        raise PresetError(
+            "Preset definitions must contain a non-empty 'presets' array."
+        )
 
-    presets = {name: _build_preset(name, body) for name, body in definitions.items()}
+    presets: dict[str, QaPreset] = {}
+    for body in definitions:
+        if not isinstance(body, dict):
+            raise PresetError("Every entry in 'presets' must be an object.")
+        preset = _build_preset(body.get("name"), body)
+        if preset.name in presets:
+            raise PresetError(f"Preset {preset.name!r} is defined more than once.")
+        presets[preset.name] = preset
     if DEFAULT_PRESET not in presets:
-        raise PresetError(f"Preset definitions must include the default preset {DEFAULT_PRESET!r}.")
+        raise PresetError(
+            f"Preset definitions must include the default preset {DEFAULT_PRESET!r}."
+        )
     return presets
 
 
@@ -134,15 +153,15 @@ def load_preset(name: str = DEFAULT_PRESET, path: Path | None = None) -> QaPrese
     presets = load_presets(path)
     if name not in presets:
         available = ", ".join(sorted(presets))
-        raise PresetError(f"Unknown preset {name!r}; available presets are {available}.")
+        raise PresetError(
+            f"Unknown preset {name!r}; available presets are {available}."
+        )
     return presets[name]
 
 
-def _build_preset(name: str, body: object) -> QaPreset:
+def _build_preset(name: object, body: dict[str, object]) -> QaPreset:
     if not isinstance(name, str) or not name:
-        raise PresetError("Preset names must be non-empty strings.")
-    if not isinstance(body, dict):
-        raise PresetError(f"Preset {name!r} must be an object.")
+        raise PresetError("Every preset must declare a non-empty 'name'.")
 
     level = _section(name, body, "level")
     character = _section(name, body, "character")
@@ -177,7 +196,9 @@ def _build_preset(name: str, body: object) -> QaPreset:
         description=_optional_text(name, body, "description"),
         level=LevelSettings(duration_seconds=duration, miniboss_spawn_seconds=miniboss),
         character=CharacterSettings(
-            health_multiplier=_positive_float(name, character, "character", "healthMultiplier"),
+            health_multiplier=_positive_float(
+                name, character, "character", "healthMultiplier"
+            ),
             armor=_non_negative_int(name, character, "character", "armor"),
         ),
         episode=EpisodeSettings(
@@ -192,7 +213,9 @@ def _build_preset(name: str, body: object) -> QaPreset:
         ),
         run=RunSettings(
             seeds=_seeds(name, run),
-            wall_clock_timeout_seconds=_positive_int(name, run, "run", "wallClockTimeoutSeconds"),
+            wall_clock_timeout_seconds=_positive_int(
+                name, run, "run", "wallClockTimeoutSeconds"
+            ),
         ),
     )
 
@@ -218,10 +241,14 @@ def _number(preset: str, section: dict[str, object], group: str, key: str) -> fl
     return float(value)
 
 
-def _positive_float(preset: str, section: dict[str, object], group: str, key: str) -> float:
+def _positive_float(
+    preset: str, section: dict[str, object], group: str, key: str
+) -> float:
     value = _number(preset, section, group, key)
     if value <= 0:
-        raise PresetError(f"Preset {preset!r} field {group}.{key} must be positive; got {value}.")
+        raise PresetError(
+            f"Preset {preset!r} field {group}.{key} must be positive; got {value}."
+        )
     return value
 
 
@@ -235,11 +262,15 @@ def _integer(preset: str, section: dict[str, object], group: str, key: str) -> i
 def _positive_int(preset: str, section: dict[str, object], group: str, key: str) -> int:
     value = _integer(preset, section, group, key)
     if value <= 0:
-        raise PresetError(f"Preset {preset!r} field {group}.{key} must be positive; got {value}.")
+        raise PresetError(
+            f"Preset {preset!r} field {group}.{key} must be positive; got {value}."
+        )
     return value
 
 
-def _non_negative_int(preset: str, section: dict[str, object], group: str, key: str) -> int:
+def _non_negative_int(
+    preset: str, section: dict[str, object], group: str, key: str
+) -> int:
     value = _integer(preset, section, group, key)
     if value < 0:
         raise PresetError(
@@ -251,11 +282,15 @@ def _non_negative_int(preset: str, section: dict[str, object], group: str, key: 
 def _seeds(preset: str, section: dict[str, object]) -> tuple[int, ...]:
     value = section.get("seeds")
     if not isinstance(value, list) or not value:
-        raise PresetError(f"Preset {preset!r} field run.seeds must be a non-empty array.")
+        raise PresetError(
+            f"Preset {preset!r} field run.seeds must be a non-empty array."
+        )
     seeds: list[int] = []
     for entry in value:
         if isinstance(entry, bool) or not isinstance(entry, int) or entry <= 0:
-            raise PresetError(f"Preset {preset!r} field run.seeds must contain positive integers.")
+            raise PresetError(
+                f"Preset {preset!r} field run.seeds must contain positive integers."
+            )
         seeds.append(entry)
     if len(set(seeds)) != len(seeds):
         raise PresetError(f"Preset {preset!r} field run.seeds must not repeat a seed.")
@@ -270,7 +305,9 @@ _KEYS = {
     "episode.deadlineSeconds": lambda preset: preset.episode.deadline_seconds,
     "episode.timeScale": lambda preset: preset.episode.time_scale,
     "episode.maximumTimeScale": lambda preset: preset.episode.maximum_time_scale,
-    "observation.elapsedSecondsScale": lambda preset: preset.observation.elapsed_seconds_scale,
+    "observation.elapsedSecondsScale": lambda preset: (
+        preset.observation.elapsed_seconds_scale
+    ),
     "run.seeds": lambda preset: preset.run.seeds,
     "run.wallClockTimeoutSeconds": lambda preset: preset.run.wall_clock_timeout_seconds,
     "fingerprint": lambda preset: preset.fingerprint,

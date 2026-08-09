@@ -1,7 +1,8 @@
 {
   "schema": "qa-presets/v1",
-  "presets": {
-    "smoke": {
+  "presets": [
+    {
+      "name": "smoke",
       "description": "Rule-based regression baseline. Durable character guarantees deterministic final-boss phase reach.",
       "level": {
         "durationSeconds": 90.0,
@@ -24,7 +25,8 @@
         "wallClockTimeoutSeconds": 60
       }
     },
-    "train": {
+    {
+      "name": "train",
       "description": "PPO training. Source durability makes death reachable so the failure reward can fire.",
       "level": {
         "durationSeconds": 90.0,
@@ -47,7 +49,8 @@
         "wallClockTimeoutSeconds": 60
       }
     },
-    "eval": {
+    {
+      "name": "eval",
       "description": "Deterministic single-episode inference. Shares the train fingerprint so trained policies transfer.",
       "level": {
         "durationSeconds": 90.0,
@@ -70,5 +73,5 @@
         "wallClockTimeoutSeconds": 60
       }
     }
-  }
+  ]
 }
