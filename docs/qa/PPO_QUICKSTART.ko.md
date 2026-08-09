@@ -32,22 +32,17 @@ QA 환경 설정은 `config/qa-presets.json` 한 곳에 모여 있다. Unity 자
 | 관측 elapsed 스케일 | 600 | 600 | 600 |
 | seed 집합 | 8201–8210 | 42 | 9101–9110 |
 
-`-qaPreset=<name>`으로 선택하며 생략하면 `smoke`다. 따라서 `smoke.sh`, LLM 경로, replay는 인자를 추가하지 않아도 기존과 동일하게 동작한다.
-
-세 프리셋의 차이는 두 가지뿐이다.
-
-- **캐릭터 내구도**: `smoke`의 hp 1000 / armor 100은 규칙 기반 에피소드가 최종 보스 phase까지 결정적으로 도달하게 하려는 설정이다. `Character.cs`가 `armor >= damage`인 피격을 데미지 1로 고정하므로 죽으려면 1,000회를 맞아야 한다. 학습에는 정반대로 작용해서 실패 보상 `-2`가 사실상 발생하지 않으므로, `train`과 `eval`은 원본 내구도를 쓴다.
-- **time scale**: 고정 timestep이므로 벽시계 시간만 바뀌고 궤적은 바뀌지 않는다.
+`-qaPreset=<name>`으로 선택하며 생략하면 `smoke`다. 따라서 `smoke.sh`, LLM 경로, replay는 인자를 추가하지 않아도 기존과 동일하게 동작한다. 세 프리셋은 캐릭터 내구도와 time scale만 다르다. **학습에는 `smoke`를 쓰지 않는다** — 내구 캐릭터는 사실상 죽지 않아 실패 보상 `-2`가 발생하지 않는다.
 
 ### 환경 지문
 
-각 프리셋은 **환경 지문**을 갖는다. level 타이밍, 캐릭터 내구도, deadline, 관측 스케일에서 계산하며 time scale과 seed는 제외한다.
+각 프리셋은 level 타이밍, 캐릭터 내구도, deadline, 관측 스케일에서 계산한 **환경 지문**을 갖는다.
 
 ```sh
 uv run --locked python -m qa_agent_runtime.presets --preset train --key fingerprint
 ```
 
-`train`과 `eval`은 지문이 같으므로 학습한 정책을 그대로 평가할 수 있다. `smoke` 자산으로 만든 checkpoint를 평가에 넣으면 거부된다. 관측 계약(`36 / 2 / (5,)`)은 세 프리셋이 공유하므로 지문 없이는 이 오탑재를 막을 수 없다.
+`train`과 `eval`은 지문이 같으므로 학습한 정책을 그대로 평가할 수 있다. **`smoke` 자산으로 만든 checkpoint를 평가에 넣으면 거부된다.** 관측 계약(`36 / 2 / (5,)`)은 세 프리셋이 공유하므로 지문 없이는 이 오탑재를 막을 수 없다.
 
 ## 0단계 — 전체 흐름
 
@@ -121,7 +116,7 @@ uv run --locked --extra trainer python -c "import torch, mlagents_envs; print(to
 
 두 번째 명령의 기대 출력은 `2.8.0`이다.
 
-lock에는 ML-Agents 생성 코드 호환을 위한 `numpy>=1.23.5,<1.24`, `protobuf<3.21` 제약이 있다. ML-Agents 1.1.0이 요구하는 `grpcio 1.48.2`에는 macOS arm64 wheel이 없으므로, 같은 1.x API를 유지하면서 CPython 3.10 universal2 wheel을 제공하는 `grpcio 1.64.1`로 override한다. 이 제약을 임의로 완화하면 LLAPI 통신이 깨진다.
+lock의 `numpy`, `protobuf`, `grpcio` 제약을 임의로 완화하면 LLAPI 통신이 깨진다.
 
 ## 3단계 — Unity player 빌드
 
@@ -137,7 +132,7 @@ scripts/qa/build-player.sh
 scripts/qa/build-addressables.sh
 ```
 
-Addressables는 player 빌드에 자동으로 포함되지 않는다. 소스 설정 `m_BuildAddressablesWithPlayerBuild`가 의도적으로 비활성 상태이며 스크립트가 이를 변경하지 않는다. 또한 로컬 QA player는 Burst 컴파일을 끈다. Burst 1.6.6에 포함된 macOS 링커가 현재 macOS 실행 처리와 호환되지 않기 때문이며, 패키지 버전이나 프로젝트 설정을 바꾸지는 않는다.
+Addressables는 player 빌드에 자동으로 포함되지 않으므로 반드시 이 순서를 거친다. 로컬 QA player는 Burst 컴파일을 끄고 빌드한다.
 
 빌드 결과:
 
@@ -148,7 +143,7 @@ Addressables는 player 빌드에 자동으로 포함되지 않는다. 소스 설
 | Addressables 로그 | `QAArtifacts/logs/addressables.log` |
 | player 빌드 로그 | `QAArtifacts/logs/player-build.log` |
 
-이 두 경로의 구분이 이후 단계에서 반복해서 등장한다. ML-Agents Release 23의 Python 실행기는 `--env`에 `.app` **번들** 을 요구하고, 플레이어를 직접 프로세스로 띄울 때는 번들 **내부 Mach-O** 가 필요하다. `common.sh`의 `qa_resolve_mlagents_player`가 어느 쪽을 받아도 둘 다 계산해 주므로 사용자는 보통 번들 경로만 신경 쓰면 된다.
+`--env`에는 `.app` 번들을, 플레이어를 직접 띄울 때는 번들 내부 실행 파일을 쓴다. 저장소 스크립트가 자동으로 구분하므로 보통은 번들 경로만 신경 쓰면 된다.
 
 검증:
 
@@ -170,26 +165,17 @@ player 빌드는 한 번만 하면 되고 이후 계속 재사용한다. 다시 
 | `scripts/qa/test-contracts.sh` | `evaluate-sweep.sh` |
 | `scripts/qa/setup.sh`, `generate-assets.sh` | `replay.sh`, `run-llm-agent.sh` |
 
-왼쪽은 **코드가 계약을 지키는지**를 검증한다 — 프리셋 지문이 Python과 C#에서 일치하는지, 학습 모드에 deadline이 걸리는지, 스크립트가 올바른 인자를 넘기는지. CI 회귀 검사에는 이것으로 충분하다.
-
-오른쪽은 **게임이 실제로 그렇게 동작하는지**를 검증한다. 예를 들어 `evaluate.sh`가 `--mlagents-port`를 전달한다는 사실은 계약 테스트가 확인하지만, 그 포트로 player가 trainer에 실제로 연결되는지는 빌드해서 실행해야 알 수 있다.
+왼쪽은 코드가 계약을 지키는지만 검증한다. 게임이 실제로 그렇게 동작하는지는 빌드해서 실행해야 알 수 있다.
 
 ### 에디터에서 학습만 돌리는 경우
 
-Unity 에디터 Play 모드로 학습을 돌리는 것은 ML-Agents 표준 경로로 가능하다. `Academy.ReadPortFromArgs`는 에디터에서 `MLAgentsSettings.ConnectTrainer`(기본 `true`)와 `EditorPort`(기본 `5004`)를 사용하므로, `--env` 없이 trainer를 띄우고 에디터에서 Play를 누르면 연결된다.
+`--env` 없이 trainer를 띄우고 에디터에서 Play를 누르면 연결된다.
 
 ```sh
 uv run --locked --extra trainer mlagents-learn config/qa-ppo.yaml --run-id=editor-check
 ```
 
-다만 **이 경로에는 QA 레인의 계약이 적용되지 않는다.** `-qaMode`, `-qaPreset`, `-qaSeed`는 `Environment.GetCommandLineArgs()`에서 읽는데 에디터에서는 그것이 Unity 에디터 자체의 실행 인자다. 결과적으로:
-
-- 프리셋이 기본값 `smoke`로 잡혀 학습에 부적합한 내구 캐릭터를 쓴다
-- `-qaMode`가 없어 학습 모드로 동작하므로 평가 모드로 만들 수 없다
-- seed를 지정할 수 없어 재현성이 없다
-- episode 산출물의 `Preset`/`PresetFingerprint`가 의도한 값과 다르다
-
-따라서 에디터 실행은 "학습 루프가 도는지" 정도의 확인용이며, QA 점수 산출이나 모델 평가에는 쓰지 않는다.
+다만 에디터에서는 `-qaMode`, `-qaPreset`, `-qaSeed`가 적용되지 않는다. 프리셋이 `smoke`로 잡히고 seed 지정과 평가 모드가 불가능하므로, **학습 루프가 도는지 확인하는 용도이며 QA 점수 산출이나 모델 평가에는 쓰지 않는다.**
 
 ## 4단계 — 경로 A: ML-Agents PPO 연결
 
@@ -242,7 +228,7 @@ uv run --locked --extra trainer mlagents-learn config/qa-ppo.yaml \
   --env-args -qaPreset=train
 ```
 
-`evaluate.sh`는 trainer를 `--resume --inference`로 백그라운드에 띄운 뒤 player를 `-qaMode=evaluate`로 직접 실행하고, player 종료 코드를 그대로 반환한다. 스크립트가 종료되면 trap이 uv wrapper와 trainer 자식 프로세스 트리를 함께 정리한다.
+`evaluate.sh`는 trainer를 `--resume --inference`로 백그라운드에 띄운 뒤 player를 `-qaMode=evaluate`로 직접 실행하고, player 종료 코드를 그대로 반환한다.
 
 ### 4-3. 환경 변수
 
@@ -260,7 +246,7 @@ uv run --locked --extra trainer mlagents-learn config/qa-ppo.yaml \
 
 `config/qa-ppo.yaml`의 behavior 키는 `QaGameplay`로 유지해야 한다. Unity 씬의 `BehaviorParameters`에 설정된 이름과 일치해야 trainer가 agent를 인식한다.
 
-기본 장치는 재현성과 호환성을 위한 CPU다. Apple Silicon의 MPS는 현재 PyTorch 환경에서 사용 가능하다고 보고될 때만 명시적으로 선택한다. 사용할 수 없는 MPS를 요청하면 학습 시작 전에 종료 코드 2로 실패한다.
+기본 장치는 CPU다. MPS는 PyTorch가 사용 가능하다고 보고할 때만 선택할 수 있고, 아니면 학습 시작 전에 종료 코드 2로 실패한다.
 
 ```sh
 QA_TORCH_DEVICE=mps scripts/qa/train.sh
@@ -323,7 +309,7 @@ scripts/qa/evaluate-pytorch.sh \
 | `--hidden-units` | 128 |
 | `--num-layers` | 2 |
 
-옵션 전체 목록은 다음으로 확인한다. 이 도움말은 옵션 이름만 출력하고 기본값은 표시하지 않으므로, 기본값은 위 표나 `qa_pytorch_ppo/cli.py`를 참조한다.
+옵션 전체 목록은 다음으로 확인한다. 도움말은 기본값을 표시하지 않으므로 기본값은 위 표를 본다.
 
 ```sh
 uv run --locked --extra trainer python -m qa_pytorch_ppo.cli train --help
@@ -433,7 +419,7 @@ ML-Agents 평가가 읽는 것은 `.onnx`가 **아니라** `checkpoint.pt`다. `
 scripts/qa/evaluate-sweep.sh
 ```
 
-`eval` 프리셋의 seed 10개를 돌리고 outcome 분포, `phase:3` 도달률, 주요 지표의 평균과 표준편차를 출력한다. 결과는 `QAArtifacts/evaluate-sweep.json`에도 기록된다. 분류된 gameplay 실패는 데이터로 취급해 계속 진행하지만, 에피소드가 아예 생성되지 않으면 중단한다 — 빠진 에피소드를 평균에 넣으면 모델을 측정하는 게 아니라 과소평가하게 된다. 지문이 다른 에피소드가 섞이면 평균 대신 거부한다.
+`eval` 프리셋의 seed 10개를 돌리고 outcome 분포, `phase:3` 도달률, 주요 지표의 평균과 표준편차를 `QAArtifacts/evaluate-sweep.json`에 기록한다. 에피소드가 생성되지 않거나 지문이 다른 에피소드가 섞이면 평균을 내지 않고 중단한다.
 
 ### replay는 정책을 재실행하지 않는다
 
