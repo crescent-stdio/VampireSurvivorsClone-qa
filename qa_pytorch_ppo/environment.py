@@ -14,6 +14,7 @@ from mlagents_envs.side_channel.engine_configuration_channel import (
     EngineConfigurationChannel,
 )
 
+from qa_agent_runtime.player import PlayerError, validate_player
 from qa_agent_runtime.presets import QaPreset, format_value, load_preset
 
 OBSERVATION_SIZE = 36
@@ -65,10 +66,10 @@ class UnityQaEnvironment:
         preset: QaPreset | None = None,
         environment_factory: Callable[..., object] = UnityEnvironment,
     ) -> None:
-        if not player.is_dir() or player.suffix != ".app":
-            raise EnvironmentContractError(
-                f"Unity player bundle does not exist: {player}"
-            )
+        try:
+            validate_player(player)
+        except PlayerError as error:
+            raise EnvironmentContractError(str(error)) from error
         if seed <= 0:
             raise EnvironmentContractError("Seed must be a positive integer.")
 

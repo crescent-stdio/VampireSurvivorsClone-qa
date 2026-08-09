@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from qa_agent_runtime.artifacts import EpisodeArtifactError, load_unique_episode_summary
+from qa_agent_runtime.player import artifact_root, default_player
 from qa_agent_runtime.presets import PresetError, load_preset
 from qa_pytorch_ppo.checkpoint import (
     CheckpointError,
@@ -28,7 +29,7 @@ from qa_pytorch_ppo.policy import ActorCritic
 from qa_pytorch_ppo.ppo import PpoConfig, evaluate, train
 
 
-DEFAULT_PLAYER = Path("QAArtifacts/player/QaGameplay.app")
+DEFAULT_PLAYER = default_player()
 DEFAULT_OUTPUT_DIR = Path("QAArtifacts/pytorch-ppo")
 DEFAULT_CHECKPOINT = DEFAULT_OUTPUT_DIR / "checkpoint-final.pt"
 
@@ -170,8 +171,8 @@ def _train_command(args, device: torch.device, environment_factory: Callable[...
 def _evaluate_command(args, device: torch.device, environment_factory: Callable[..., object]) -> int:
     if args.seed <= 0:
         raise ValueError("Seed must be a positive integer.")
-    artifact_root = args.artifact_root or args.player.parent / "QAArtifacts"
-    if any(artifact_root.glob(f"episode-{args.seed:08d}-*")):
+    evaluation_artifact_root = args.artifact_root or artifact_root(args.player)
+    if any(evaluation_artifact_root.glob(f"episode-{args.seed:08d}-*")):
         raise EpisodeArtifactError(f"An episode for seed {args.seed} already exists.")
     evaluation_preset = load_preset(EVALUATION_PRESET)
     loaded = load_actor_critic_checkpoint(
@@ -190,7 +191,7 @@ def _evaluate_command(args, device: torch.device, environment_factory: Callable[
         result = None
 
     try:
-        summary = load_unique_episode_summary(artifact_root, args.seed)
+        summary = load_unique_episode_summary(evaluation_artifact_root, args.seed)
     except EpisodeArtifactError:
         if evaluation_error is not None:
             raise evaluation_error

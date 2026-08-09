@@ -12,6 +12,7 @@ from mlagents_envs.environment import UnityEnvironment
 from mlagents_envs.exception import UnityCommunicatorStoppedException
 
 from qa_agent_runtime.artifacts import EpisodeArtifactError, load_unique_episode_summary
+from qa_agent_runtime.player import PlayerError, validate_player
 from qa_llm_agent.async_driver import AsyncPolicyDriver
 from qa_llm_agent.artifacts import write_episode_artifacts
 from qa_llm_agent.observation import decode_observation
@@ -90,7 +91,9 @@ def run_episode(
             summary=summary,
         )
     except OSError as error:
-        raise RunnerInfrastructureError(f"Unable to write LLM episode artifacts: {error}") from error
+        raise RunnerInfrastructureError(
+            f"Unable to write LLM episode artifacts: {error}"
+        ) from error
     return RunResult(
         exit_code=0 if summary.get("Outcome") in (1, "Passed") else 1,
         summary_path=summary_path,
@@ -98,11 +101,15 @@ def run_episode(
     )
 
 
-def _drive_environment(environment, driver: AsyncPolicyDriver, scheduler: DecisionScheduler) -> None:
+def _drive_environment(
+    environment, driver: AsyncPolicyDriver, scheduler: DecisionScheduler
+) -> None:
     environment.reset()
     behavior_names = list(environment.behavior_specs)
     if len(behavior_names) != 1:
-        raise RunnerInfrastructureError("The QA player must expose exactly one ML-Agents behavior.")
+        raise RunnerInfrastructureError(
+            "The QA player must expose exactly one ML-Agents behavior."
+        )
     behavior_name = behavior_names[0]
     tick = 0
     try:
@@ -114,14 +121,18 @@ def _drive_environment(environment, driver: AsyncPolicyDriver, scheduler: Decisi
                 environment.step()
                 continue
             if len(decision_steps) != 1:
-                raise RunnerInfrastructureError("The LLM runner supports exactly one QA agent.")
+                raise RunnerInfrastructureError(
+                    "The LLM runner supports exactly one QA agent."
+                )
 
             tick += 1
             observation = decode_observation(decision_steps.obs[0][0])
             trigger = scheduler.next_trigger(observation)
             if trigger is not None:
                 if not scheduler.can_attempt:
-                    raise RunnerInfrastructureError("OpenAI attempt budget is exhausted.")
+                    raise RunnerInfrastructureError(
+                        "OpenAI attempt budget is exhausted."
+                    )
                 driver.submit(observation, trigger, requested_tick=tick)
             action = driver.action_for(observation, applied_tick=tick)
             environment.set_actions(
@@ -139,13 +150,17 @@ def _drive_environment(environment, driver: AsyncPolicyDriver, scheduler: Decisi
 def _validate_config(config: RunnerConfig) -> None:
     if config.seed <= 0:
         raise RunnerConfigurationError("Seed must be a positive integer.")
-    if not config.player.is_dir() or config.player.suffix != ".app":
-        raise RunnerConfigurationError(f"Unity player bundle does not exist: {config.player}")
+    try:
+        validate_player(config.player)
+    except PlayerError as error:
+        raise RunnerConfigurationError(str(error)) from error
     if config.watchdog_seconds <= 0:
         raise RunnerConfigurationError("Watchdog duration must be positive.")
     existing = list(config.artifact_root.glob(f"episode-{config.seed:08d}-*"))
     if existing:
-        raise RunnerConfigurationError(f"An episode for seed {config.seed} already exists.")
+        raise RunnerConfigurationError(
+            f"An episode for seed {config.seed} already exists."
+        )
 
 
 @contextmanager
@@ -156,7 +171,9 @@ def _watchdog(seconds: float) -> Iterator[None]:
     previous_handler = signal.getsignal(signal.SIGALRM)
 
     def expire(_signal_number, _frame):
-        raise WatchdogExpired(f"LLM episode exceeded the {seconds:g}s wall-clock watchdog.")
+        raise WatchdogExpired(
+            f"LLM episode exceeded the {seconds:g}s wall-clock watchdog."
+        )
 
     signal.signal(signal.SIGALRM, expire)
     signal.setitimer(signal.ITIMER_REAL, seconds)

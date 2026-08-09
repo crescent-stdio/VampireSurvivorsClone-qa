@@ -7,6 +7,7 @@ import sys
 
 from openai import OpenAI
 
+from qa_agent_runtime.player import default_player
 from qa_llm_agent.artifacts import write_failure_artifact
 from qa_llm_agent.async_driver import AsyncPolicyDriver
 from qa_llm_agent.policy import OpenAiPolicy
@@ -15,13 +16,13 @@ from qa_llm_agent.scheduler import DecisionScheduler
 
 
 DEFAULT_MODEL = "gpt-5.6-terra"
-DEFAULT_PLAYER = Path("QAArtifacts/player/QaGameplay.app")
+DEFAULT_PLAYER = default_player()
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one Unity QA episode with an OpenAI movement policy.")
     parser.add_argument("--seed", type=int, required=True, help="Positive unused Unity QA seed.")
-    parser.add_argument("--player", type=Path, default=DEFAULT_PLAYER, help="Path to QaGameplay.app.")
+    parser.add_argument("--player", type=Path, default=DEFAULT_PLAYER, help="Path to the built QA player.")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenAI model ID.")
     return parser
 
