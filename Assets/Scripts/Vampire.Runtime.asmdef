@@ -6,7 +6,8 @@
     "Unity.Localization",
     "Unity.ResourceManager",
     "Unity.TextMeshPro",
-    "Unity.ML-Agents"
+    "Unity.ML-Agents",
+    "Unity.InferenceEngine"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],

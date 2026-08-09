@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Unity.MLAgents;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -59,7 +60,35 @@ namespace Vampire
         private bool terminalAcknowledged;
         private bool randomDecisionSubscribed;
         private QaPresetBlueprint activePreset;
+        private bool inferenceSourceChecked;
+        private bool? inferenceSourceOverride;
         private static bool invalidSeedWarningLogged;
+
+        /// <summary>
+        /// Report whether a trained policy can actually drive this episode.
+        /// </summary>
+        /// <remarks>
+        /// BehaviorType.Default degrades quietly: with no communicator and no assigned
+        /// model it returns a HeuristicPolicy, so an evaluation with a broken trainer
+        /// connection measures ScriptedQaPolicy and reports it as the model's result.
+        /// Evaluation wants InferenceOnly's failure mode instead.
+        /// </remarks>
+        public bool HasInferenceSource()
+        {
+            if (inferenceSourceOverride.HasValue)
+                return inferenceSourceOverride.Value;
+
+            var behavior = GetComponent<Unity.MLAgents.Policies.BehaviorParameters>();
+            if (behavior != null && behavior.Model != null)
+                return true;
+            return Academy.IsInitialized && Academy.Instance.IsCommunicatorOn;
+        }
+
+        public void ConfigureInferenceSourceForTesting(bool? available)
+        {
+            inferenceSourceOverride = available;
+            inferenceSourceChecked = false;
+        }
 
         /// <summary>Preset resolved from <c>-qaPreset=</c>, or null when running outside a preset.</summary>
         public QaPresetBlueprint ActivePreset => activePreset;
@@ -210,6 +239,10 @@ namespace Vampire
             evaluationRequested = true;
             processExit = testProcessExit;
             failureScreenshotCapture = testScreenshotCapture;
+            // Tests stand in for a connected trainer unless they say otherwise; there is no
+            // Academy in edit mode. ConfigureInferenceSourceForTesting(false) opts out.
+            inferenceSourceOverride = inferenceSourceOverride ?? true;
+            inferenceSourceChecked = false;
         }
 
         public void AdvanceForTesting(float unscaledDeltaSeconds, float gameTime, float currentTimeScale)
@@ -380,6 +413,15 @@ namespace Vampire
             {
                 Complete(QaEpisodeOutcome.TimedOut, "TrainingDeadline");
                 return;
+            }
+            if (evaluationRequested && !inferenceSourceChecked)
+            {
+                inferenceSourceChecked = true;
+                if (!HasInferenceSource())
+                {
+                    Complete(QaEpisodeOutcome.Error, "NoInferenceSource");
+                    return;
+                }
             }
             var observation = CaptureObservation();
             var knownModal = abilitySelectionDialog != null && abilitySelectionDialog.MenuOpen;

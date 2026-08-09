@@ -159,6 +159,37 @@ namespace Vampire.Tests.EditMode
         }
 
         [Test]
+        public void Evaluation_fails_instead_of_measuring_the_scripted_fallback()
+        {
+            // BehaviorType.Default returns a HeuristicPolicy when there is no communicator
+            // and no assigned model, so a broken trainer connection used to look like a
+            // passing model run.
+            var controller = CreateController(7012);
+            controller.ConfigureInferenceSourceForTesting(false);
+            controller.ConfigureEvaluationForTesting(new RecordingProcessExit(), new RecordingScreenshotCapture());
+
+            controller.AdvanceForTesting(0.1f, 0.1f, 1f);
+
+            Assert.That(controller.TerminalResult, Is.Not.Null);
+            Assert.That(controller.TerminalResult.Outcome, Is.EqualTo(QaEpisodeOutcome.Error));
+            Assert.That(controller.TerminalResult.FailureReason, Is.EqualTo("NoInferenceSource"));
+            Object.DestroyImmediate(controller.gameObject);
+        }
+
+        [Test]
+        public void Evaluation_proceeds_when_an_inference_source_is_available()
+        {
+            var controller = CreateController(7013);
+            controller.ConfigureInferenceSourceForTesting(true);
+            controller.ConfigureEvaluationForTesting(new RecordingProcessExit(), new RecordingScreenshotCapture());
+
+            controller.AdvanceForTesting(0.1f, 0.1f, 1f);
+
+            Assert.That(controller.TerminalResult, Is.Null);
+            Object.DestroyImmediate(controller.gameObject);
+        }
+
+        [Test]
         public void Training_mode_reaches_a_terminal_so_ppo_sees_episode_boundaries()
         {
             // Without a deadline a training episode never ends: the agent has no step cap,
