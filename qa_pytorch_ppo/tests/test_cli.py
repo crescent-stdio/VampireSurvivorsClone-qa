@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from qa_pytorch_ppo import checkpoint, cli
+from qa_agent_runtime.presets import load_preset
 from qa_pytorch_ppo.environment import EnvironmentSpec, HybridAction, StepResult
 from qa_pytorch_ppo.policy import ActorCritic
 
@@ -13,7 +14,15 @@ from qa_pytorch_ppo.policy import ActorCritic
 class CliEnvironment:
     spec = EnvironmentSpec()
 
-    def __init__(self, *, artifact_root: Path | None = None, outcome: int = 1, **kwargs):
+    def __init__(
+        self,
+        *,
+        artifact_root: Path | None = None,
+        outcome: int = 1,
+        preset_name: str = "train",
+        **kwargs,
+    ):
+        self.preset = load_preset(preset_name)
         self.artifact_root = artifact_root
         self.outcome = outcome
         self.seed = kwargs["seed"]
@@ -90,6 +99,7 @@ def test_evaluate_cli_returns_the_unity_summary_outcome(
         checkpoint_path,
         policy=model,
         environment_spec=EnvironmentSpec(),
+        preset=load_preset("eval"),
         seed=42,
         global_step=4,
         overwrite=False,
@@ -136,6 +146,7 @@ def test_evaluate_cli_defaults_to_the_player_launch_artifact_root(tmp_path: Path
         checkpoint_path,
         policy=model,
         environment_spec=EnvironmentSpec(),
+        preset=load_preset("eval"),
         seed=42,
         global_step=4,
         overwrite=False,

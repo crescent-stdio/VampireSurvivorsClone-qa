@@ -10,11 +10,13 @@ from uuid import uuid4
 
 import torch
 
+from qa_agent_runtime.presets import QaPreset
 from qa_pytorch_ppo.environment import EnvironmentSpec
 from qa_pytorch_ppo.policy import ActorCritic
 
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+SUPPORTED_FORMAT_VERSIONS = (FORMAT_VERSION,)
 
 
 class CheckpointError(RuntimeError):
@@ -27,6 +29,8 @@ class LoadedCheckpoint:
     environment_spec: EnvironmentSpec
     seed: int
     global_step: int
+    preset: str
+    preset_fingerprint: str
 
 
 def save_checkpoint(
@@ -34,6 +38,7 @@ def save_checkpoint(
     *,
     policy: ActorCritic,
     environment_spec: EnvironmentSpec,
+    preset: QaPreset,
     seed: int,
     global_step: int,
     overwrite: bool,
@@ -50,6 +55,8 @@ def save_checkpoint(
             "continuous_size": environment_spec.continuous_size,
             "discrete_branches": list(environment_spec.discrete_branches),
         },
+        "preset": preset.name,
+        "preset_fingerprint": preset.fingerprint,
         "model_config": policy.model_config(),
         "model_state_dict": policy.state_dict(),
         "seed": int(seed),
@@ -66,15 +73,30 @@ def save_checkpoint(
     return path
 
 
-def load_actor_critic_checkpoint(path: Path, *, device: torch.device) -> LoadedCheckpoint:
-    """Load and validate a checkpoint using PyTorch's weights-only mode."""
+def load_actor_critic_checkpoint(
+    path: Path,
+    *,
+    device: torch.device,
+    preset: QaPreset | None = None,
+) -> LoadedCheckpoint:
+    """Load and validate a checkpoint using PyTorch's weights-only mode.
+
+    When ``preset`` is given, the checkpoint's environment fingerprint must match it.
+    ``EnvironmentSpec`` alone cannot catch a mismatch: every preset shares the same 36/2/(5,)
+    contract, so a policy trained against the durable smoke character would otherwise load
+    silently and be judged against an environment it never saw.
+    """
     try:
         payload = torch.load(path, map_location=device, weights_only=True)
     except (OSError, RuntimeError, ValueError, EOFError, pickle.UnpicklingError) as error:
         raise CheckpointError(f"Unable to load checkpoint: {error}") from error
-    if not isinstance(payload, dict) or payload.get("format_version") != FORMAT_VERSION:
+    if not isinstance(payload, dict) or payload.get("format_version") not in SUPPORTED_FORMAT_VERSIONS:
         version = payload.get("format_version") if isinstance(payload, dict) else None
-        raise CheckpointError(f"Unsupported checkpoint format: {version}")
+        raise CheckpointError(
+            f"Unsupported checkpoint format: {version}. Version 1 checkpoints predate preset "
+            "recording and cannot be matched to an environment; retrain to produce version "
+            f"{FORMAT_VERSION}."
+        )
     try:
         spec_payload = payload["environment_spec"]
         model_config = dict(payload["model_config"])
@@ -86,6 +108,14 @@ def load_actor_critic_checkpoint(path: Path, *, device: torch.device) -> LoadedC
         )
         if environment_spec != EnvironmentSpec():
             raise CheckpointError(f"Checkpoint environment contract is incompatible: {environment_spec}")
+        checkpoint_preset = str(payload["preset"])
+        checkpoint_fingerprint = str(payload["preset_fingerprint"])
+        if preset is not None and checkpoint_fingerprint != preset.fingerprint:
+            raise CheckpointError(
+                f"Checkpoint was trained under preset {checkpoint_preset!r} "
+                f"(fingerprint {checkpoint_fingerprint}), which does not match preset "
+                f"{preset.name!r} (fingerprint {preset.fingerprint})."
+            )
         policy = ActorCritic(**model_config).to(device)
         policy.load_state_dict(payload["model_state_dict"])
         policy.eval()
@@ -94,6 +124,8 @@ def load_actor_critic_checkpoint(path: Path, *, device: torch.device) -> LoadedC
             environment_spec=environment_spec,
             seed=int(payload["seed"]),
             global_step=int(payload["global_step"]),
+            preset=checkpoint_preset,
+            preset_fingerprint=checkpoint_fingerprint,
         )
     except CheckpointError:
         raise

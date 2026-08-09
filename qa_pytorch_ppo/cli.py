@@ -12,12 +12,14 @@ import numpy as np
 import torch
 
 from qa_agent_runtime.artifacts import EpisodeArtifactError, load_unique_episode_summary
+from qa_agent_runtime.presets import PresetError, load_preset
 from qa_pytorch_ppo.checkpoint import (
     CheckpointError,
     load_actor_critic_checkpoint,
     save_checkpoint,
 )
 from qa_pytorch_ppo.environment import (
+    EVALUATION_PRESET,
     EnvironmentContractError,
     EnvironmentInfrastructureError,
     UnityQaEnvironment,
@@ -82,6 +84,7 @@ def main(
         EnvironmentContractError,
         EnvironmentInfrastructureError,
         EpisodeArtifactError,
+        PresetError,
         OSError,
         ValueError,
     ) as error:
@@ -132,6 +135,7 @@ def _train_command(args, device: torch.device, environment_factory: Callable[...
                 args.output_dir / f"checkpoint-step-{global_step:09d}.pt",
                 policy=current_policy,
                 environment_spec=environment.spec,
+                preset=environment.preset,
                 seed=args.seed,
                 global_step=global_step,
                 overwrite=args.overwrite,
@@ -148,6 +152,7 @@ def _train_command(args, device: torch.device, environment_factory: Callable[...
             args.output_dir / "checkpoint-final.pt",
             policy=policy,
             environment_spec=environment.spec,
+            preset=environment.preset,
             seed=args.seed,
             global_step=result.global_step,
             overwrite=args.overwrite,
@@ -168,7 +173,10 @@ def _evaluate_command(args, device: torch.device, environment_factory: Callable[
     artifact_root = args.artifact_root or args.player.parent / "QAArtifacts"
     if any(artifact_root.glob(f"episode-{args.seed:08d}-*")):
         raise EpisodeArtifactError(f"An episode for seed {args.seed} already exists.")
-    loaded = load_actor_critic_checkpoint(args.checkpoint, device=device)
+    evaluation_preset = load_preset(EVALUATION_PRESET)
+    loaded = load_actor_critic_checkpoint(
+        args.checkpoint, device=device, preset=evaluation_preset
+    )
     evaluation_error = None
     try:
         with environment_factory(
