@@ -42,6 +42,8 @@ scripts/qa/build-player.sh
 scripts/qa/smoke.sh
 scripts/qa/train.sh
 scripts/qa/evaluate.sh
+scripts/qa/train-pytorch.sh
+scripts/qa/evaluate-pytorch.sh
 OPENAI_API_KEY=... scripts/qa/run-llm-agent.sh --seed 9301
 scripts/qa/replay.sh QAArtifacts/traces/example.json
 ```
@@ -49,6 +51,43 @@ scripts/qa/replay.sh QAArtifacts/traces/example.json
 `smoke.sh` runs exactly ten default scripted seeds at the supported `4x` Unity time scale, exits after one terminal result per player process, and requires at least one recorded final-boss phase. Values above `4x` are rejected explicitly because the controller performs at most four 10 Hz logical ticks per frame. A transient loading-frame backlog may drain over the next frames; a backlog remaining for eight consecutive frames is classified as `ControlBacklogExceeded`, preventing silent long-term drift without unbounded frame work. A smoke episode is classified as `TimedOut` after 150 seconds of game time. A provider-neutral POSIX watchdog also terminates a non-responsive player after 60 seconds of wall-clock time by default; override `QA_SMOKE_WALL_TIMEOUT_SECONDS` only for slower hosts. A crash, watchdog timeout, missing unique summary, or incomplete failure artifacts is an infrastructure failure and makes the smoke command exit non-zero. Classified gameplay failures retain the seed, action trace, summary, Unity log, and anomaly screenshot under `QAArtifacts`.
 
 `evaluate.sh` defaults to seed `1234`; set `QA_EVALUATE_SEED` to another positive integer. It starts `mlagents-learn` with `uv run --locked --extra trainer`, `--resume`, and `--inference`, then launches Unity in the single-episode `evaluate` mode. Replay accepts a project-relative trace or an explicit absolute file and validates it before launching the player. Pass an episode `summary.json` produced in `QAArtifacts`: it contains the seed, recorded actions, events, and positions. Replay loads that seed before `Random.InitState`, feeds recorded actions through the normal policy path, compares terminal output using `QaReplayComparator`, and exits with code 0 for a match or 1 for a mismatch. Legacy direct replay traces without a `Seed` are rejected with an actionable compatibility message; use a current summary artifact. Training invokes `mlagents-learn config/qa-ppo.yaml`; the behavior name in that file must remain `QaGameplay`. Release 23 receives the macOS `.app` bundle as `--env`; the scripts resolve the internal executable only when launching the player directly.
+
+### Standalone PyTorch PPO example
+
+The standalone example makes the Unity environment adapter, policy model, and PPO update loop independently replaceable. It does not call `mlagents-learn` and does not change the existing ML-Agents workflow:
+
+```sh
+scripts/qa/train-pytorch.sh
+scripts/qa/evaluate-pytorch.sh \
+  --checkpoint QAArtifacts/pytorch-ppo/checkpoint-final.pt \
+  --seed 1234
+```
+
+Training defaults to seed `42`, 500,000 environment steps, 2,048-step rollouts, 256-sample minibatches, and three PPO epochs. Use CLI options such as `--total-steps`, `--rollout-steps`, `--minibatch-size`, `--update-epochs`, `--checkpoint-interval`, and `--output-dir` to run smaller experiments. Both scripts accept an optional `.app` bundle as their first non-option argument and otherwise use `QAArtifacts/player/QaGameplay.app`. CPU is the default; `QA_TORCH_DEVICE=mps` is accepted only when PyTorch reports MPS as available.
+
+Periodic checkpoints are named `checkpoint-step-NNNNNNNNN.pt`; the final checkpoint is `checkpoint-final.pt`. Existing checkpoint names are protected unless `--overwrite` is supplied, and overwrite mode replaces only exact checkpoint files without removing their directory or unrelated content. Evaluation requires an unused positive seed and returns 0 for `Passed`, 1 for a classified gameplay failure, and 2 for configuration, communication, or artifact errors.
+On macOS, Unity writes relative episode artifacts beside the `.app` bundle, so evaluation defaults to `<player-parent>/QAArtifacts`; use `--artifact-root` only when the player launch directory is customized.
+
+Team policies subclass the public `PpoPolicy` contract while reusing the environment and training loop:
+
+```python
+from pathlib import Path
+
+import torch
+
+from qa_pytorch_ppo import PpoConfig, UnityQaEnvironment, train
+from team_policy import TeamPolicy
+
+policy = TeamPolicy(observation_size=36, continuous_size=2, discrete_branches=(5,))
+with UnityQaEnvironment(
+    player=Path("QAArtifacts/player/QaGameplay.app"),
+    seed=42,
+    evaluation=False,
+) as environment:
+    train(environment, policy, PpoConfig(), device=torch.device("cpu"))
+```
+
+`TeamPolicy` must implement `act`, `evaluate_actions`, and `value`. The built-in checkpoint loader reconstructs the example `ActorCritic`; a custom model should pair the reusable training loop with its own versioned checkpoint loader. Standalone `.pt` checkpoints are Python LLAPI artifacts. They are not ML-Agents ONNX files and cannot be assigned to Unity `BehaviorParameters`.
 
 Addressables must be built explicitly before creating or training against a player. The source Addressables setting `m_BuildAddressablesWithPlayerBuild` remains disabled by design and is not changed automatically. The local QA player disables Burst compilation because Burst 1.6.6's bundled macOS linker is incompatible with current macOS execution handling; this does not change package versions or project settings.
 
@@ -59,7 +98,7 @@ Generated outputs are intentionally ignored under `QAArtifacts/`:
 - `logs/`: Unity, training, evaluation, and replay logs.
 - `TestResults/`: Unity NUnit XML reports.
 - `player/`: local Addressables-backed player build.
-- `traces/`, `screenshots/`, `checkpoints/`, and `models/`: replay and training products.
+- `traces/`, `screenshots/`, `checkpoints/`, `models/`, and `pytorch-ppo/`: replay and training products.
 - `episode-*` and `llm-failures/`: Unity episode data, buffered LLM decisions, and pre-terminal LLM infrastructure failures.
 
 ## Known source risks

@@ -32,13 +32,15 @@ Unity의 `env.step()`은 메인 스레드를 기다리게 한다. OpenAI 요청�
 
 능력 선택은 모델 응답을 기다리지 않는다. 능력창이 열리면 Python이 4개 유효성 플래그 중 첫 번째 `true` 슬롯을 즉시 선택하고 `source=local_safety`로 기록한다. 열린 능력창에 유효 슬롯이 하나도 없으면 하니스 계약 위반으로 종료 코드 2를 반환한다.
 
-## 사전 준비
+## 사전 준비 및 검증 환경
 
-- macOS 개발 머신
+- 현재 검증된 환경: macOS 개발 머신
 - Unity `6000.0.80f1`
 - [uv](https://docs.astral.sh/uv/) `0.12.x`
 - Unity ML-Agents Release 23과 저장소에 고정된 Python 패키지
 - LLM 경로에만 필요한 `OPENAI_API_KEY`
+
+순수 PyTorch PPO 코드는 특정 운영체제에 종속되지 않는다. 다만 현재 제공되는 Unity player 빌드와 학습·평가 스크립트는 macOS의 `.app` 번들 및 Mach-O 실행 경로를 기준으로 검증되었다. Linux와 Windows에서는 해당 플랫폼의 Unity player 경로에 맞게 환경 어댑터와 셸 래퍼를 조정해야 한다.
 
 Python은 `.python-version`의 `3.10.12`로 고정된다. 일반적인 PyTorch 제약이 아니라 `mlagents==1.1.0`과 `mlagents-envs==1.1.0`이 선언한 Python 상한이 `3.10.12`이기 때문이다. trainer extra는 이 ML-Agents 버전이 지원하는 최신 PyTorch `2.8.0`을 사용한다. 이후 PyTorch만 단독으로 올리면 ML-Agents의 모델 export와 trainer 호환성을 다시 검증해야 한다.
 
@@ -123,6 +125,39 @@ Release 23의 Python 환경 실행기는 macOS에서 `--env`에 내부 실행 �
 ```sh
 uv run --locked --extra trainer mlagents-learn --help
 ```
+
+### 순수 PyTorch PPO 예제
+
+기존 `train.sh`와 `evaluate.sh`는 ML-Agents trainer와 ONNX export를 위한 운영 경로다. 별도 예제는 Unity 환경 어댑터, 정책 모델, PPO 학습 루프를 독립적으로 교체하려는 팀원을 위한 코드다. 기존 경로를 바꾸지 않으며 `mlagents-learn`을 호출하지 않는다.
+
+```sh
+scripts/qa/train-pytorch.sh
+scripts/qa/evaluate-pytorch.sh \
+  --checkpoint QAArtifacts/pytorch-ppo/checkpoint-final.pt \
+  --seed 1234
+```
+
+학습 기본값은 seed `42`, 총 500,000 step, rollout 2,048 step, minibatch 256개, PPO update 3 epoch다. 작은 통신·학습 검증은 다음처럼 실행할 수 있다.
+
+```sh
+scripts/qa/train-pytorch.sh \
+  --total-steps 256 \
+  --rollout-steps 64 \
+  --minibatch-size 64 \
+  --update-epochs 1 \
+  --checkpoint-interval 256 \
+  --output-dir QAArtifacts/pytorch-ppo-smoke
+```
+
+두 스크립트의 첫 번째 non-option 인자는 선택적인 `QaGameplay.app` 경로다. 생략하면 `QAArtifacts/player/QaGameplay.app`을 사용한다. 장치 기본값은 CPU이며, PyTorch가 MPS 사용 가능 상태를 보고하는 경우에만 `QA_TORCH_DEVICE=mps`를 지정할 수 있다.
+
+`qa_pytorch_ppo.environment.UnityQaEnvironment`는 관측 36개, 연속 행동 2개, 이산 branch `(5,)`, 단일 `QaGameplay` agent 계약을 확인한다. `qa_pytorch_ppo.policy.PpoPolicy`의 `act`, `evaluate_actions`, `value`를 구현하면 팀 정책을 같은 환경 및 PPO loop와 연결할 수 있다. 기본 `ActorCritic`은 tanh-squashed Gaussian 이동, Categorical 능력 선택, shared value head를 사용한다. 알고리즘 전체를 교체할 때는 `UnityQaEnvironment.reset()`과 `step(HybridAction)`만 재사용할 수 있다.
+
+주기 checkpoint는 `checkpoint-step-NNNNNNNNN.pt`, 최종 checkpoint는 `checkpoint-final.pt`다. 기존 이름과 충돌하면 기본적으로 실패하고, `--overwrite`는 정확한 checkpoint 파일만 교체한다. 평가는 사용하지 않은 양의 seed가 필요하며 pass는 종료 코드 0, 분류된 gameplay failure는 1, 구성·통신·artifact 오류는 2다.
+
+macOS Unity player는 상대 episode artifact를 `.app` 번들 옆에 기록하므로 평가기는 기본적으로 `<player-parent>/QAArtifacts`를 검색한다. player 실행 디렉터리를 별도로 구성한 경우에만 `--artifact-root`로 경로를 지정한다.
+
+이 예제의 `.pt`는 Python LLAPI 평가용이다. ML-Agents가 export하는 `.onnx`와 호환되지 않으며 Unity `BehaviorParameters`에 배치할 수 없다. v1은 ONNX export, 다중 환경, TensorBoard, 재개 학습을 지원하지 않는다.
 
 ## OpenAI LLM 에이전트 실행
 

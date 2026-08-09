@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-import json
 from pathlib import Path
 import signal
 from typing import Callable, Iterator
@@ -12,6 +11,7 @@ from mlagents_envs.base_env import ActionTuple
 from mlagents_envs.environment import UnityEnvironment
 from mlagents_envs.exception import UnityCommunicatorStoppedException
 
+from qa_agent_runtime.artifacts import EpisodeArtifactError, load_unique_episode_summary
 from qa_llm_agent.async_driver import AsyncPolicyDriver
 from qa_llm_agent.artifacts import write_episode_artifacts
 from qa_llm_agent.observation import decode_observation
@@ -74,11 +74,12 @@ def run_episode(
             environment.close()
         driver.close()
 
-    summary_path = _find_unique_summary(config.artifact_root, config.seed)
     try:
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise RunnerInfrastructureError(f"Unable to read episode summary: {error}") from error
+        episode_summary = load_unique_episode_summary(config.artifact_root, config.seed)
+    except EpisodeArtifactError as error:
+        raise RunnerInfrastructureError(str(error)) from error
+    summary_path = episode_summary.path
+    summary = episode_summary.payload
     try:
         write_episode_artifacts(
             summary_path.parent,
@@ -145,19 +146,6 @@ def _validate_config(config: RunnerConfig) -> None:
     existing = list(config.artifact_root.glob(f"episode-{config.seed:08d}-*"))
     if existing:
         raise RunnerConfigurationError(f"An episode for seed {config.seed} already exists.")
-
-
-def _find_unique_summary(artifact_root: Path, seed: int) -> Path:
-    summaries = [
-        episode / "summary.json"
-        for episode in artifact_root.glob(f"episode-{seed:08d}-*")
-        if episode.is_dir() and (episode / "summary.json").is_file()
-    ]
-    if len(summaries) != 1:
-        raise RunnerInfrastructureError(
-            f"Seed {seed} produced {len(summaries)} episode summaries; exactly one is required."
-        )
-    return summaries[0]
 
 
 @contextmanager
