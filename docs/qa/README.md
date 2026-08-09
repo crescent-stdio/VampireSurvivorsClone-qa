@@ -1,6 +1,6 @@
 # QA Gameplay lane
 
-This repository contains an additive, QA-only gameplay lane for deterministic smoke, replay, ML-Agents PPO, and an opt-in OpenAI LLM workflow. See the [Korean AI agent QA guide](AI_AGENT_QA_GUIDE.ko.md) for onboarding and operational details, and the [Korean PPO quickstart](PPO_QUICKSTART.ko.md) for connecting PPO from a fresh clone.
+This repository contains an additive, QA-only gameplay lane for deterministic smoke, replay, ML-Agents PPO, and an opt-in OpenAI LLM workflow. See the [Korean AI agent QA guide](AI_AGENT_QA_GUIDE.ko.md) for onboarding and operational details, the [Korean PPO quickstart](PPO_QUICKSTART.ko.md) for connecting PPO from a fresh clone, and the [Korean player distribution guide](PLAYER_DISTRIBUTION.ko.md) for sharing builds with teammates.
 
 ## Architecture
 

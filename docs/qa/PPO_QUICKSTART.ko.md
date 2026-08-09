@@ -2,7 +2,7 @@
 
 이 문서는 저장소를 방금 클론한 상태에서 PPO 학습기를 Unity 게임에 실제로 연결하기까지의 절차를 순서대로 설명한다. 각 단계에는 실행 명령, 검증 방법, 실패 시 대처가 함께 있다.
 
-범위는 첫 학습과 평가가 성공적으로 끝나는 지점까지다. 보상 설계, 하이퍼파라미터 튜닝, LLM 에이전트 경로는 다루지 않는다. 관측 계약, 행동 공간, 보상 구조, 산출물 스키마 등 상세 계약은 [AI 에이전트 게임 QA 가이드](AI_AGENT_QA_GUIDE.ko.md)와 [QA gameplay lane](README.md)을 참조한다.
+범위는 첫 학습과 평가가 성공적으로 끝나는 지점까지다. 보상 설계, 하이퍼파라미터 튜닝, LLM 에이전트 경로는 다루지 않는다. 관측 계약, 행동 공간, 보상 구조, 산출물 스키마 등 상세 계약은 [AI 에이전트 게임 QA 가이드](AI_AGENT_QA_GUIDE.ko.md)와 [QA gameplay lane](README.md)을 참조한다. 빌드한 player를 팀원에게 전달하는 절차는 [플레이어 배포](PLAYER_DISTRIBUTION.ko.md)에 있다.
 
 ## 두 PPO 경로
 
@@ -68,7 +68,7 @@ Unity player 빌드가 없으면 어떤 PPO 명령도 실행되지 않는다. `Q
 
 ## 1단계 — 사전 조건 확인
 
-이 문서의 1–6단계는 macOS 개발 머신을 기준으로 한다. Python CLI는 세 플랫폼을 모두 지원하지만 셸 래퍼는 macOS 전용이다. 팀원에게 빌드를 전달하는 절차와 다른 플랫폼에서의 실행 방법은 [팀원 배포](#팀원-배포)를 참조한다.
+이 문서의 1–6단계는 macOS 개발 머신을 기준으로 한다. Python CLI는 세 플랫폼을 모두 지원하지만 셸 래퍼는 macOS 전용이다. 팀원에게 빌드를 전달하는 절차와 다른 플랫폼에서의 실행 방법은 [플레이어 배포](PLAYER_DISTRIBUTION.ko.md)를 참조한다.
 
 | 항목 | 요구 버전 | 이유 |
 |---|---|---|
@@ -390,114 +390,6 @@ seed=1234 outcome=Passed steps=... total_reward=... summary=.../summary.json
 
 episode 디렉터리에는 `summary.json`(terminal 결과와 replay 데이터), `actions.jsonl`, `telemetry.jsonl`이 있다. `summary.json`은 `scripts/qa/replay.sh`로 그대로 재현에 사용할 수 있다.
 
-## 팀원 배포
-
-팀원이 각자 머신에서 학습과 평가를 돌리려면 **저장소 클론과 플랫폼별 player 빌드가 둘 다** 필요하다. player만으로는 동작하지 않는다 — `config/qa-presets.json`, `qa_pytorch_ppo`, `uv.lock`이 모두 저장소에 있다.
-
-### 빌드하는 쪽
-
-macOS 한 대에서 세 플랫폼을 전부 만들 수 있다. 스크립팅 백엔드가 Mono이기 때문이며, IL2CPP였다면 Windows player에 Windows 호스트가 필요했다.
-
-```sh
-scripts/qa/build-player.sh            # macOS  → QAArtifacts/player/QaGameplay.app
-scripts/qa/build-player-linux.sh      # Linux  → QAArtifacts/dist/linux/
-scripts/qa/build-player-windows.sh    # Windows → QAArtifacts/dist/windows/
-```
-
-Unity Hub에서 해당 플랫폼의 Build Support 모듈이 설치되어 있어야 한다. 없으면 빌드가 `Unity is missing build support for ...`로 실패한다.
-
-각 스크립트는 활성 빌드 타깃을 전환하고 **Addressables를 다시 만든 뒤** player를 빌드한다. `BuildPlayerContent`가 활성 타깃 기준으로 번들을 만들기 때문이며, 이 순서를 지키지 않으면 다른 플랫폼 번들이 들어간 player가 나온다. 이 실패는 조용하다 — 실행은 되고 에셋만 로드되지 않는다.
-
-| 플랫폼 | 산출물 | 크기 |
-|---|---|---:|
-| macOS | `QAArtifacts/player/QaGameplay.app` | 약 157MB |
-| Linux | `QAArtifacts/dist/linux/` | 약 156MB |
-| Windows | `QAArtifacts/dist/windows/` | 약 125MB |
-
-### 패키징
-
-```sh
-scripts/qa/package-players.sh
-```
-
-빌드되어 있는 player를 전부 찾아 `QAArtifacts/dist/`에 압축한다.
-
-| 산출물 | 크기 |
-|---|---:|
-| `qa-player-macos.zip` | 약 53MB |
-| `qa-player-linux.zip` | 약 50MB |
-| `qa-player-windows.zip` | 약 42MB |
-
-**반드시 압축해서 전달한다.** 이유가 플랫폼마다 다르다.
-
-- **macOS**: `.app`은 파일이 아니라 **디렉터리**다. 클라우드 스토리지에 그대로 올리면 폴더로 업로드되어 번들 구조와 실행 권한 비트가 보존되지 않는다.
-- **Linux·Windows**: 실행 파일만 보내면 옆의 `QaGameplay_Data/`와 런타임 라이브러리가 빠져 실행되지 않는다.
-
-macOS는 `zip`이 아니라 `ditto`를 쓴다. `.app`은 서명된 번들이고 `ditto`가 확장 속성과 코드 서명을 보존한다.
-
-### macOS 수신자는 격리 속성을 제거해야 한다
-
-브라우저나 메신저, 클라우드 스토리지에서 내려받은 파일에는 macOS가 `com.apple.quarantine` 속성을 붙인다. QA player는 Unity의 ad-hoc 서명이 빌드 시점에 이미 무효라서(Addressables 콘텐츠가 서명 이후 추가된다) Gatekeeper가 실행을 차단한다. **압축 방식과 무관하며 원본 빌드부터 그렇다.**
-
-증상은 조용하다. 오류 대화상자 없이 프로세스가 `SIGKILL`(종료 코드 137)로 죽고 episode 산출물이 만들어지지 않는다.
-
-```sh
-xattr -dr com.apple.quarantine QAArtifacts/player/QaGameplay.app
-```
-
-Linux와 Windows에는 해당하지 않는다. Linux는 대신 실행 권한이 필요할 수 있다.
-
-### 받는 쪽
-
-1. 저장소를 클론하고 2단계의 의존성 설치를 수행한다.
-2. 받은 압축을 **`QAArtifacts/player/`에 푼다.** 플랫폼별 기본 경로와 일치하므로 `--player`를 지정할 필요가 없다.
-
-| 플랫폼 | 압축을 풀었을 때 있어야 하는 경로 |
-|---|---|
-| macOS | `QAArtifacts/player/QaGameplay.app` |
-| Linux | `QAArtifacts/player/QaGameplay.x86_64` |
-| Windows | `QAArtifacts/player/QaGameplay.exe` |
-
-플랫폼별로 한 단계가 더 필요하다.
-
-```sh
-# macOS: 다운로드로 붙은 격리 속성 제거. 하지 않으면 종료 코드 137로 조용히 죽는다
-xattr -dr com.apple.quarantine QAArtifacts/player/QaGameplay.app
-
-# Linux: 실행 권한 부여
-chmod +x QAArtifacts/player/QaGameplay.x86_64
-```
-
-3. 학습과 평가를 실행한다.
-
-```sh
-uv run --locked --extra trainer python -m qa_pytorch_ppo.cli train
-uv run --locked --extra trainer python -m qa_pytorch_ppo.cli evaluate --seed 9101
-```
-
-다중 seed 품질 판단은 평가를 seed마다 돌린 뒤 집계한다.
-
-```sh
-uv run --locked python -m qa_agent_runtime.sweep \
-  --artifact-root QAArtifacts/player/QAArtifacts \
-  --seeds 9101 9102 9103 9104 9105
-```
-
-### 셸 래퍼는 macOS 전용이다
-
-`scripts/qa/*.sh` 16개는 POSIX sh이고, `common.sh`의 player 해석이 macOS `.app` 번들 구조를 가정한다. **Windows·Linux 팀원은 위의 Python CLI를 직접 사용한다.**
-
-| macOS 셸 래퍼 | 다른 플랫폼에서의 대체 |
-|---|---|
-| `scripts/qa/train-pytorch.sh` | `python -m qa_pytorch_ppo.cli train` |
-| `scripts/qa/evaluate-pytorch.sh` | `python -m qa_pytorch_ppo.cli evaluate --seed <n>` |
-| `scripts/qa/evaluate-sweep.sh` | 위 evaluate 반복 + `python -m qa_agent_runtime.sweep` |
-| `scripts/qa/smoke.sh` | 대체 없음 (macOS 전용 회귀 검사) |
-
-Python CLI는 프리셋 선택, 지문 검증, time scale 적용을 셸 래퍼와 동일하게 수행한다. 셸이 하는 추가 작업은 Unity 버전 확인과 `uv lock --check`뿐이다.
-
-**현재 Linux·Windows player의 실제 동작은 미검증이다.** 이 저장소에서는 빌드 성공과 플랫폼별 Addressables 번들 생성까지만 확인했다. 해당 OS에서 첫 실행 시 위 절차대로 동작하는지 확인하고 결과를 공유한다.
-
 ## 학습된 모델 테스트
 
 ### 어느 경로가 실제로 모델을 측정하는가
@@ -590,11 +482,6 @@ PPO 알고리즘 전체를 다른 것으로 바꾸는 경우에는 `UnityQaEnvir
 | Python 버전 오류 | `uv python install 3.10.12` 후 `scripts/qa/setup.sh`를 다시 실행한다 |
 | `ModuleNotFoundError: torch` | `--extra trainer`가 빠졌다. `scripts/qa/setup.sh`를 실행한다 |
 | `Required Unity app bundle does not exist` | player가 없다. 3단계를 수행한다 |
-| `Unity player executable does not exist` | Linux·Windows에서 player 경로가 틀렸다. 압축을 `QAArtifacts/player/`에 풀었는지 확인한다 |
-| `Unrecognized Unity player suffix` | `--player`에 압축 파일이나 디렉터리를 넘겼다. 실행 파일(`.x86_64`, `.exe`) 또는 `.app` 번들을 지정한다 |
-| `Unity is missing build support for ...` | Unity Hub에서 해당 플랫폼의 Build Support 모듈을 설치한다 |
-| macOS player가 오류 없이 종료 코드 137로 죽음 | 다운로드 격리 속성이다. `xattr -dr com.apple.quarantine <경로>` 실행 |
-| macOS player를 Drive 등에서 받았는데 앱이 아니라 폴더로 보임 | `.app`을 압축하지 않고 올린 것이다. `scripts/qa/package-players.sh`로 만든 zip을 전달한다 |
 | `Provided filename does not match any environments` | `--env`에 번들 내부 실행 파일이 아니라 `QaGameplay.app`을 전달한다. 저장소 스크립트는 자동 처리한다 |
 | `MPS is not available in the selected PyTorch environment` | `QA_TORCH_DEVICE=cpu`로 실행한다 |
 | `Checkpoint already exists in output directory` | 다른 `--output-dir`을 쓰거나 `--overwrite`를 지정한다 |
