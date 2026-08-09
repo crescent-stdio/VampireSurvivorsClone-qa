@@ -61,6 +61,17 @@ for QA_BUILD_PLATFORM in linux windows; do
 done
 grep -F -- 'BuildLinuxPlayerForBatchMode' "$QA_PROJECT_ROOT/scripts/qa/build-player-linux.sh" >/dev/null || qa_fail "the linux build must call its own entry point"
 grep -F -- 'BuildWindowsPlayerForBatchMode' "$QA_PROJECT_ROOT/scripts/qa/build-player-windows.sh" >/dev/null || qa_fail "the windows build must call its own entry point"
+
+# A .app is a directory, and plain zip drops the extended attributes and code signature a
+# bundle carries, so packaging uses ditto.
+[ -x "$QA_PROJECT_ROOT/scripts/qa/package-players.sh" ] || qa_fail "player packaging must be executable"
+grep -F -- 'ditto -c -k' "$QA_PROJECT_ROOT/scripts/qa/package-players.sh" >/dev/null || qa_fail "packaging must use ditto so macOS bundles survive"
+grep -F -- '--keepParent' "$QA_PROJECT_ROOT/scripts/qa/package-players.sh" >/dev/null || qa_fail "the macOS archive must contain QaGameplay.app itself"
+if QA_PACKAGE_DIR="$QA_TEST_ROOT/empty-dist" QA_MAC_PLAYER="$QA_TEST_ROOT/absent.app" \
+  "$QA_PROJECT_ROOT/scripts/qa/package-players.sh" >"$QA_TEST_ROOT/package-empty.out" 2>&1; then
+  qa_fail "packaging must fail when no player build exists"
+fi
+grep -F 'No player builds were found' "$QA_TEST_ROOT/package-empty.out" >/dev/null || qa_fail "missing player builds must be reported"
 grep -F 'm_EditorVersion: 6000.0.80f1' "$QA_PROJECT_ROOT/ProjectSettings/ProjectVersion.txt" >/dev/null || qa_fail "project must target Unity 6000.0.80f1"
 grep -F 'com.unity.ml-agents#release_23' "$QA_PROJECT_ROOT/Packages/manifest.json" >/dev/null || qa_fail "project must use ML-Agents Release 23"
 grep -A2 '"com.unity.ai.inference"' "$QA_PROJECT_ROOT/Packages/packages-lock.json" | grep -F '"version": "2.6.1"' >/dev/null || qa_fail "Unity 6000.0.80f1 must pin its minimum supported Inference Engine 2.6.1"

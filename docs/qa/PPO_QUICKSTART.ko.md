@@ -414,11 +414,38 @@ Unity Hub에서 해당 플랫폼의 Build Support 모듈이 설치되어 있어�
 | Linux | `QAArtifacts/dist/linux/` | 약 156MB |
 | Windows | `QAArtifacts/dist/windows/` | 약 125MB |
 
-**디렉터리 전체를 압축해 전달한다.** 실행 파일만 보내면 옆의 `QaGameplay_Data/`와 런타임 라이브러리가 빠져 실행되지 않는다.
+### 패키징
 
 ```sh
-cd QAArtifacts/dist && zip -r qa-player-linux.zip linux && zip -r qa-player-windows.zip windows
+scripts/qa/package-players.sh
 ```
+
+빌드되어 있는 player를 전부 찾아 `QAArtifacts/dist/`에 압축한다.
+
+| 산출물 | 크기 |
+|---|---:|
+| `qa-player-macos.zip` | 약 53MB |
+| `qa-player-linux.zip` | 약 50MB |
+| `qa-player-windows.zip` | 약 42MB |
+
+**반드시 압축해서 전달한다.** 이유가 플랫폼마다 다르다.
+
+- **macOS**: `.app`은 파일이 아니라 **디렉터리**다. 클라우드 스토리지에 그대로 올리면 폴더로 업로드되어 번들 구조와 실행 권한 비트가 보존되지 않는다.
+- **Linux·Windows**: 실행 파일만 보내면 옆의 `QaGameplay_Data/`와 런타임 라이브러리가 빠져 실행되지 않는다.
+
+macOS는 `zip`이 아니라 `ditto`를 쓴다. `.app`은 서명된 번들이고 `ditto`가 확장 속성과 코드 서명을 보존한다.
+
+### macOS 수신자는 격리 속성을 제거해야 한다
+
+브라우저나 메신저, 클라우드 스토리지에서 내려받은 파일에는 macOS가 `com.apple.quarantine` 속성을 붙인다. QA player는 Unity의 ad-hoc 서명이 빌드 시점에 이미 무효라서(Addressables 콘텐츠가 서명 이후 추가된다) Gatekeeper가 실행을 차단한다. **압축 방식과 무관하며 원본 빌드부터 그렇다.**
+
+증상은 조용하다. 오류 대화상자 없이 프로세스가 `SIGKILL`(종료 코드 137)로 죽고 episode 산출물이 만들어지지 않는다.
+
+```sh
+xattr -dr com.apple.quarantine QAArtifacts/player/QaGameplay.app
+```
+
+Linux와 Windows에는 해당하지 않는다. Linux는 대신 실행 권한이 필요할 수 있다.
 
 ### 받는 쪽
 
@@ -431,9 +458,13 @@ cd QAArtifacts/dist && zip -r qa-player-linux.zip linux && zip -r qa-player-wind
 | Linux | `QAArtifacts/player/QaGameplay.x86_64` |
 | Windows | `QAArtifacts/player/QaGameplay.exe` |
 
-Linux에서는 실행 권한이 필요할 수 있다.
+플랫폼별로 한 단계가 더 필요하다.
 
 ```sh
+# macOS: 다운로드로 붙은 격리 속성 제거. 하지 않으면 종료 코드 137로 조용히 죽는다
+xattr -dr com.apple.quarantine QAArtifacts/player/QaGameplay.app
+
+# Linux: 실행 권한 부여
 chmod +x QAArtifacts/player/QaGameplay.x86_64
 ```
 
@@ -562,6 +593,8 @@ PPO 알고리즘 전체를 다른 것으로 바꾸는 경우에는 `UnityQaEnvir
 | `Unity player executable does not exist` | Linux·Windows에서 player 경로가 틀렸다. 압축을 `QAArtifacts/player/`에 풀었는지 확인한다 |
 | `Unrecognized Unity player suffix` | `--player`에 압축 파일이나 디렉터리를 넘겼다. 실행 파일(`.x86_64`, `.exe`) 또는 `.app` 번들을 지정한다 |
 | `Unity is missing build support for ...` | Unity Hub에서 해당 플랫폼의 Build Support 모듈을 설치한다 |
+| macOS player가 오류 없이 종료 코드 137로 죽음 | 다운로드 격리 속성이다. `xattr -dr com.apple.quarantine <경로>` 실행 |
+| macOS player를 Drive 등에서 받았는데 앱이 아니라 폴더로 보임 | `.app`을 압축하지 않고 올린 것이다. `scripts/qa/package-players.sh`로 만든 zip을 전달한다 |
 | `Provided filename does not match any environments` | `--env`에 번들 내부 실행 파일이 아니라 `QaGameplay.app`을 전달한다. 저장소 스크립트는 자동 처리한다 |
 | `MPS is not available in the selected PyTorch environment` | `QA_TORCH_DEVICE=cpu`로 실행한다 |
 | `Checkpoint already exists in output directory` | 다른 `--output-dir`을 쓰거나 `--overwrite`를 지정한다 |
