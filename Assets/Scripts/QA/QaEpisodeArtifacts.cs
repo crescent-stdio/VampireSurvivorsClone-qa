@@ -68,6 +68,10 @@ namespace Vampire
         public int KillCount;
         public int FinalLevel;
         public string FailureReason;
+        public float DamageTaken;
+        public float EpisodeReturn;
+        public string Preset;
+        public string PresetFingerprint;
         public int RecordedPositionCount;
         public int DiscreteEventCount;
         public QaActionTraceEntry[] ReplayActions;
@@ -208,6 +212,10 @@ namespace Vampire
                         KillCount = result.KillCount,
                         FinalLevel = result.FinalLevel,
                         FailureReason = result.FailureReason,
+                        DamageTaken = result.DamageTaken,
+                        EpisodeReturn = result.EpisodeReturn,
+                        Preset = result.Preset,
+                        PresetFingerprint = result.PresetFingerprint,
                         RecordedPositionCount = recordedEpisode.Positions.Count,
                         DiscreteEventCount = recordedEpisode.DiscreteEvents.Count,
                         ReplayActions = new List<QaActionTraceEntry>(trace).ToArray(),

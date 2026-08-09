@@ -378,6 +378,8 @@ namespace Vampire.Tests.EditMode
             public QaObservation CaptureAgentObservation() => Observation;
             public void EnableExternalAgentControl() { EnableExternalCalls++; }
             public bool SubmitExternalAction(QaAction action) { SubmittedActions.Add(action); return true; }
+            public float ReportedEpisodeReturn { get; private set; }
+            public void ReportEpisodeReturn(float value) { ReportedEpisodeReturn = value; }
             public bool AcknowledgeTerminal() { return true; }
         }
 

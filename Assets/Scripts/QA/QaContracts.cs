@@ -87,6 +87,16 @@ public sealed class QaEpisodeResult
     public int KillCount;
     public int FinalLevel;
     public string FailureReason;
+
+    /// <summary>Damage taken as a fraction of maximum health.</summary>
+    public float DamageTaken;
+
+    /// <summary>Cumulative agent reward; zero when no external policy drove the episode.</summary>
+    public float EpisodeReturn;
+
+    /// <summary>Preset the episode ran under, and the fingerprint of its environment.</summary>
+    public string Preset;
+    public string PresetFingerprint;
 }
 
 public interface IQaPolicy

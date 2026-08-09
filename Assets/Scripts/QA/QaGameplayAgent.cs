@@ -122,6 +122,7 @@ namespace Vampire
         private void HandleTerminalReached(QaEpisodeOutcome outcome)
         {
             CompleteIfTerminal(outcome);
+            subscribedController.ReportEpisodeReturn(GetCumulativeReward());
             subscribedController.AcknowledgeTerminal();
         }
 

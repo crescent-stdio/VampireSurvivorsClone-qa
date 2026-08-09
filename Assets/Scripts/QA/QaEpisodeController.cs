@@ -61,6 +61,7 @@ namespace Vampire
         private bool randomDecisionSubscribed;
         private QaPresetBlueprint activePreset;
         private bool inferenceSourceChecked;
+        private float episodeReturn;
         private bool? inferenceSourceOverride;
         private static bool invalidSeedWarningLogged;
 
@@ -82,6 +83,17 @@ namespace Vampire
             if (behavior != null && behavior.Model != null)
                 return true;
             return Academy.IsInitialized && Academy.Instance.IsCommunicatorOn;
+        }
+
+        public void ReportEpisodeReturn(float value)
+        {
+            episodeReturn = value;
+        }
+
+        public void ConfigurePresetForTesting(QaPresetBlueprint preset)
+        {
+            presets = preset == null ? null : new[] { preset };
+            activePreset = preset;
         }
 
         public void ConfigureInferenceSourceForTesting(bool? available)
@@ -195,6 +207,7 @@ namespace Vampire
             pendingControlSeconds = 0f;
             consecutiveBacklogFrames = 0;
             elapsedUnscaledSeconds = 0f;
+            episodeReturn = 0f;
             actionTrace.Clear();
             telemetry.Clear();
             recorder.Reset();
@@ -574,7 +587,12 @@ namespace Vampire
                 ElapsedSeconds = elapsedUnscaledSeconds,
                 KillCount = statsManager == null ? 0 : statsManager.MonstersKilled,
                 FinalLevel = playerCharacter == null ? 0 : playerCharacter.CurrentLevel,
-                FailureReason = reason
+                FailureReason = reason,
+                DamageTaken = LastObservation == null || LastObservation.PlayerMaxHealth <= 0f
+                    ? 0f
+                    : LastObservation.DamageTaken / LastObservation.PlayerMaxHealth,
+                Preset = activePreset == null ? string.Empty : activePreset.PresetName,
+                PresetFingerprint = activePreset == null ? string.Empty : activePreset.Fingerprint
             };
             var requiresExternalAcknowledgement = ControlMode == QaControlMode.ExternalAgent && TerminalReached != null;
             if (requiresExternalAcknowledgement)
@@ -582,6 +600,9 @@ namespace Vampire
                 terminalNotificationInProgress = true;
                 TerminalReached.Invoke(outcome);
                 terminalNotificationInProgress = false;
+                // The agent applies its terminal reward during that notification, which is
+                // why the return is read here rather than when the result was built.
+                TerminalResult.EpisodeReturn = episodeReturn;
             }
             telemetry.Add(new QaTelemetryEntry(controlTick, elapsedUnscaledSeconds, "terminal"));
             recorder.RecordDiscreteEvent("terminal:" + outcome);

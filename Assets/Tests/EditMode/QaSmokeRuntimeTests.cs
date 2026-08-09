@@ -190,6 +190,24 @@ namespace Vampire.Tests.EditMode
         }
 
         [Test]
+        public void The_terminal_result_records_the_preset_it_ran_under()
+        {
+            // A summary that does not name its environment cannot be compared with another
+            // run, and the fingerprint is what tells two presets apart.
+            var preset = ScriptableObject.CreateInstance<QaPresetBlueprint>();
+            preset.Configure("train", "test", QaLevelTimings.Default, 1f, 0, 150f, 20f, 20f, 600f, null, null);
+            var controller = CreateController(7014);
+            controller.ConfigurePresetForTesting(preset);
+
+            controller.AdvanceForTesting(0.1f, QaSmokeOptions.MaximumGameTimeSeconds, 1f);
+
+            Assert.That(controller.TerminalResult.Preset, Is.EqualTo("train"));
+            Assert.That(controller.TerminalResult.PresetFingerprint, Is.EqualTo(preset.Fingerprint));
+            Object.DestroyImmediate(controller.gameObject);
+            Object.DestroyImmediate(preset);
+        }
+
+        [Test]
         public void Training_mode_reaches_a_terminal_so_ppo_sees_episode_boundaries()
         {
             // Without a deadline a training episode never ends: the agent has no step cap,
