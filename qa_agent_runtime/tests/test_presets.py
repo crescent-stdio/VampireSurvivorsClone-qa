@@ -82,6 +82,28 @@ def test_training_and_evaluation_differ_only_in_time_scale() -> None:
     assert train.episode.deadline_seconds == evaluation.episode.deadline_seconds
 
 
+def test_canonical_environment_stays_reproducible_in_other_runtimes() -> None:
+    assert presets.load_preset("train").canonical_environment == "\n".join(
+        [
+            "qa-preset-environment/v1",
+            "level.durationSeconds=90",
+            "level.minibossSpawnSeconds=45",
+            "character.healthMultiplier=1",
+            "character.armor=0",
+            "episode.deadlineSeconds=150",
+            "observation.elapsedSecondsScale=600",
+        ]
+    )
+
+
+def test_fingerprints_match_the_values_pinned_in_the_unity_test_suite() -> None:
+    # QaPresetContractTests pins the same literals on the C# side. Changing either
+    # implementation without the other must fail here or there, never silently.
+    assert presets.load_preset("smoke").fingerprint == "a75a0e8505ba6431"
+    assert presets.load_preset("train").fingerprint == "4ed498f8f2386317"
+    assert presets.load_preset("eval").fingerprint == "4ed498f8f2386317"
+
+
 def test_trained_policies_transfer_between_training_and_evaluation() -> None:
     assert (
         presets.load_preset("train").fingerprint

@@ -1,0 +1,27 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7f70a5cafd1d4891baad97120a80daed, type: 3}
+  m_Name: QA Preset eval
+  m_EditorClassIdentifier: 
+  presetName: eval
+  description: Deterministic single-episode inference. Shares the train fingerprint
+    so trained policies transfer.
+  levelDurationSeconds: 90
+  minibossSpawnSeconds: 45
+  characterHealthMultiplier: 1
+  characterArmor: 0
+  deadlineSeconds: 150
+  timeScale: 1
+  maximumTimeScale: 1
+  elapsedSecondsScale: 600
+  level: {fileID: 11400000, guid: 5c51994512d014a658e38357c8274dc5, type: 2}
+  character: {fileID: 11400000, guid: 622933fb783f540568dfab52411c2d76, type: 2}

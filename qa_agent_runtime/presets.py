@@ -16,6 +16,7 @@ import sys
 
 SCHEMA = "qa-presets/v1"
 DEFAULT_PRESET = "smoke"
+FINGERPRINT_SCHEMA = "qa-preset-environment/v1"
 FINGERPRINT_LENGTH = 16
 
 DEFAULT_PRESET_PATH = (
@@ -81,32 +82,40 @@ class QaPreset:
         )
 
     @property
+    def canonical_environment(self) -> str:
+        """Render the environment-defining fields in a language-neutral canonical form.
+
+        Unity computes the same string in C#, so the format avoids anything whose
+        rendering differs between runtimes: fields appear in a fixed order rather than a
+        sorted one, and numbers use :func:`format_value` so integral values never carry a
+        trailing ``.0``. Keep this in sync with ``QaPresetFingerprint`` on the C# side.
+        Both test suites pin the resulting digests as literals, so a change on either
+        side fails a test instead of silently splitting the two implementations.
+        """
+        fields = (
+            ("level.durationSeconds", self.level.duration_seconds),
+            ("level.minibossSpawnSeconds", self.level.miniboss_spawn_seconds),
+            ("character.healthMultiplier", self.character.health_multiplier),
+            ("character.armor", self.character.armor),
+            ("episode.deadlineSeconds", self.episode.deadline_seconds),
+            ("observation.elapsedSecondsScale", self.observation.elapsed_seconds_scale),
+        )
+        lines = [FINGERPRINT_SCHEMA]
+        lines.extend(f"{key}={format_value(value)}" for key, value in fields)
+        return "\n".join(lines)
+
+    @property
     def fingerprint(self) -> str:
         """Identify the simulated environment this preset defines.
 
         Covers only fields that change the simulation or the meaning of an observation.
         ``episode.timeScale`` and ``run`` are excluded: Unity uses a fixed timestep, so
         the time scale changes wall-clock duration without changing the trajectory.
-        This lets a policy trained under ``train`` be evaluated under ``eval``.
+        This lets a policy trained under ``train`` be evaluated under ``eval`` while a
+        ``smoke`` checkpoint is still rejected.
         """
-        payload = {
-            "level": {
-                "durationSeconds": self.level.duration_seconds,
-                "minibossSpawnSeconds": self.level.miniboss_spawn_seconds,
-            },
-            "character": {
-                "healthMultiplier": self.character.health_multiplier,
-                "armor": self.character.armor,
-            },
-            "episode": {"deadlineSeconds": self.episode.deadline_seconds},
-            "observation": {
-                "elapsedSecondsScale": self.observation.elapsed_seconds_scale
-            },
-        }
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[
-            :FINGERPRINT_LENGTH
-        ]
+        digest = hashlib.sha256(self.canonical_environment.encode("utf-8")).hexdigest()
+        return digest[:FINGERPRINT_LENGTH]
 
 
 def load_presets(path: Path | None = None) -> dict[str, QaPreset]:

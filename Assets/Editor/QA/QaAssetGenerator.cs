@@ -24,21 +24,42 @@ namespace Vampire.Editor.QA
         public const string QaScenePath = "Assets/Scenes/QA/QA Gameplay.unity";
         private const string SourceCharacterPath = "Assets/Blueprints/Characters/Main Character Blueprint.asset";
         private const string QaCharacterPath = "Assets/Blueprints/QA/QA Main Character.asset";
+        public const string QaAgentCharacterPath = "Assets/Blueprints/QA/QA Agent Character.asset";
+        public const string QaPresetFolder = "Assets/Blueprints/QA/Presets";
         private const string QaArtifactDirectory = "QAArtifacts";
         private const int QaDecisionPeriod = 5;
+
+        public static string GetPresetAssetPath(string presetName)
+        {
+            return QaPresetFolder + "/QA Preset " + presetName + ".asset";
+        }
+
+        /// <summary>Read the committed preset definitions from the repository.</summary>
+        public static QaPresetDefinition[] LoadPresetDefinitions()
+        {
+            var projectRoot = System.IO.Directory.GetParent(Application.dataPath).FullName;
+            var path = System.IO.Path.Combine(projectRoot, QaPresetDefinitions.DefinitionPath);
+            if (!System.IO.File.Exists(path))
+                throw new InvalidOperationException("Preset definitions are missing: " + QaPresetDefinitions.DefinitionPath);
+            return QaPresetDefinitions.Parse(System.IO.File.ReadAllText(path));
+        }
 
         [MenuItem("QA/Generate QA Gameplay Assets")]
         public static void Generate()
         {
             EnsureFolder("Assets/Blueprints", "QA");
+            EnsureFolder("Assets/Blueprints/QA", "Presets");
             EnsureFolder("Assets/Scenes", "QA");
             SynchronizeAssetCopy(SourceLevelPath, QaLevelPath);
             SynchronizeAssetCopy(SourceChestPath, QaChestPath);
             SynchronizeAssetCopy(SourceCharacterPath, QaCharacterPath);
+            SynchronizeAssetCopy(SourceCharacterPath, QaAgentCharacterPath);
 
+            var definitions = LoadPresetDefinitions();
             ConfigureQaChest();
-            ConfigureQaLevel();
-            ConfigureQaCharacter();
+            ConfigureQaLevel(definitions);
+            ConfigureCharacters(definitions);
+            ConfigureQaPresets(definitions);
             SynchronizeQaSceneCopy();
             ConfigureQaScene();
             ConfigureBuildSettings();
@@ -108,14 +129,16 @@ namespace Vampire.Editor.QA
             EditorUtility.SetDirty(qa);
         }
 
-        private static void ConfigureQaLevel()
+        private static void ConfigureQaLevel(QaPresetDefinition[] definitions)
         {
             var source = RequireAsset<LevelBlueprint>(SourceLevelPath);
             var qa = RequireAsset<LevelBlueprint>(QaLevelPath);
             if (source.levelTime <= 0f || qa.miniBosses == null || qa.miniBosses.Length == 0)
                 throw new InvalidOperationException("Level 1 must have a positive duration and one miniboss.");
 
-            var timings = QaLevelTimings.Default;
+            // Every preset currently shares one level schedule, so one level asset serves
+            // them all. Diverging timings would need a level asset per distinct schedule.
+            var timings = RequireSharedTimings(definitions);
             qa.levelTime = timings.DurationSeconds;
             qa.miniBosses[0].spawnTime = timings.MinibossSpawnSeconds;
             qa.chestSpawnDelay = timings.ScaleChestSpawnDelay(source.chestSpawnDelay, source.levelTime);
@@ -125,15 +148,75 @@ namespace Vampire.Editor.QA
             EditorUtility.SetDirty(qa);
         }
 
-        private static void ConfigureQaCharacter()
+        private static QaLevelTimings RequireSharedTimings(QaPresetDefinition[] definitions)
         {
+            var timings = definitions[0].Timings;
+            foreach (var definition in definitions)
+                if (Math.Abs(definition.Timings.DurationSeconds - timings.DurationSeconds) > float.Epsilon ||
+                    Math.Abs(definition.Timings.MinibossSpawnSeconds - timings.MinibossSpawnSeconds) > float.Epsilon)
+                    throw new InvalidOperationException(
+                        "Preset " + definition.name + " uses different level timings. Generating a level asset per " +
+                        "distinct schedule is not implemented yet.");
+            return timings;
+        }
+
+        private static void ConfigureCharacters(QaPresetDefinition[] definitions)
+        {
+            // The smoke character is deliberately durable so scripted episodes reach the
+            // final-boss phase deterministically. The agent character keeps the source
+            // durability so death stays reachable and the failure reward can fire.
+            ConfigureCharacter(QaCharacterPath, "QA Blue", QaPresetDefinitions.DefaultPresetName, definitions);
+            ConfigureCharacter(QaAgentCharacterPath, "QA Agent", "train", definitions);
+        }
+
+        private static void ConfigureCharacter(
+            string path,
+            string assetName,
+            string presetName,
+            QaPresetDefinition[] definitions)
+        {
+            var definition = QaPresetDefinitions.Require(definitions, presetName);
             var source = RequireAsset<CharacterBlueprint>(SourceCharacterPath);
-            var qa = RequireAsset<CharacterBlueprint>(QaCharacterPath);
-            qa.hp = source.hp * 10f;
-            qa.armor = 100;
-            qa.name = "QA Blue";
+            var qa = RequireAsset<CharacterBlueprint>(path);
+            qa.hp = source.hp * definition.character.healthMultiplier;
+            qa.armor = definition.character.armor;
+            qa.name = assetName;
             EditorUtility.SetDirty(qa);
         }
+
+        private static void ConfigureQaPresets(QaPresetDefinition[] definitions)
+        {
+            var level = RequireAsset<LevelBlueprint>(QaLevelPath);
+            foreach (var definition in definitions)
+            {
+                var path = GetPresetAssetPath(definition.name);
+                var preset = AssetDatabase.LoadAssetAtPath<QaPresetBlueprint>(path);
+                if (preset == null)
+                {
+                    preset = ScriptableObject.CreateInstance<QaPresetBlueprint>();
+                    AssetDatabase.CreateAsset(preset, path);
+                }
+
+                var characterPath = string.Equals(definition.name, QaPresetDefinitions.DefaultPresetName, StringComparison.Ordinal)
+                    ? QaCharacterPath
+                    : QaAgentCharacterPath;
+                preset.Configure(
+                    definition.name,
+                    definition.description,
+                    definition.Timings,
+                    definition.character.healthMultiplier,
+                    definition.character.armor,
+                    definition.episode.deadlineSeconds,
+                    definition.episode.timeScale,
+                    definition.episode.maximumTimeScale,
+                    definition.observation.elapsedSecondsScale,
+                    level,
+                    RequireAsset<CharacterBlueprint>(characterPath));
+                preset.name = "QA Preset " + definition.name;
+                EditorUtility.SetDirty(preset);
+            }
+        }
+
 
         private static void ConfigureQaScene()
         {
