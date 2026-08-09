@@ -158,6 +158,39 @@ scripts/qa/smoke.sh
 
 smoke는 기본 10개 seed를 규칙 기반 정책으로 실행하며 학습을 포함하지 않는다. 빌드와 게임 계약이 정상인지 확인하는 기준선이다. smoke가 실패하면 PPO 연결로 넘어가지 않는다. PPO를 붙여도 원인이 학습기인지 빌드인지 구분할 수 없기 때문이다.
 
+### 어떤 명령이 빌드를 요구하는가
+
+player 빌드는 한 번만 하면 되고 이후 계속 재사용한다. 다시 빌드해야 하는 경우는 Unity C# 코드, 씬, 프리셋 자산을 바꿨을 때다.
+
+| 빌드 불필요 | 빌드 필수 |
+|---|---|
+| `uv run --locked pytest` | `smoke.sh` |
+| `scripts/qa/test-editmode.sh` | `train.sh`, `evaluate.sh` |
+| `scripts/qa/test-playmode.sh` | `train-pytorch.sh`, `evaluate-pytorch.sh` |
+| `scripts/qa/test-contracts.sh` | `evaluate-sweep.sh` |
+| `scripts/qa/setup.sh`, `generate-assets.sh` | `replay.sh`, `run-llm-agent.sh` |
+
+왼쪽은 **코드가 계약을 지키는지**를 검증한다 — 프리셋 지문이 Python과 C#에서 일치하는지, 학습 모드에 deadline이 걸리는지, 스크립트가 올바른 인자를 넘기는지. CI 회귀 검사에는 이것으로 충분하다.
+
+오른쪽은 **게임이 실제로 그렇게 동작하는지**를 검증한다. 예를 들어 `evaluate.sh`가 `--mlagents-port`를 전달한다는 사실은 계약 테스트가 확인하지만, 그 포트로 player가 trainer에 실제로 연결되는지는 빌드해서 실행해야 알 수 있다.
+
+### 에디터에서 학습만 돌리는 경우
+
+Unity 에디터 Play 모드로 학습을 돌리는 것은 ML-Agents 표준 경로로 가능하다. `Academy.ReadPortFromArgs`는 에디터에서 `MLAgentsSettings.ConnectTrainer`(기본 `true`)와 `EditorPort`(기본 `5004`)를 사용하므로, `--env` 없이 trainer를 띄우고 에디터에서 Play를 누르면 연결된다.
+
+```sh
+uv run --locked --extra trainer mlagents-learn config/qa-ppo.yaml --run-id=editor-check
+```
+
+다만 **이 경로에는 QA 레인의 계약이 적용되지 않는다.** `-qaMode`, `-qaPreset`, `-qaSeed`는 `Environment.GetCommandLineArgs()`에서 읽는데 에디터에서는 그것이 Unity 에디터 자체의 실행 인자다. 결과적으로:
+
+- 프리셋이 기본값 `smoke`로 잡혀 학습에 부적합한 내구 캐릭터를 쓴다
+- `-qaMode`가 없어 학습 모드로 동작하므로 평가 모드로 만들 수 없다
+- seed를 지정할 수 없어 재현성이 없다
+- episode 산출물의 `Preset`/`PresetFingerprint`가 의도한 값과 다르다
+
+따라서 에디터 실행은 "학습 루프가 도는지" 정도의 확인용이며, QA 점수 산출이나 모델 평가에는 쓰지 않는다.
+
 ## 4단계 — 경로 A: ML-Agents PPO 연결
 
 ### 4-1. 최소 연결 확인

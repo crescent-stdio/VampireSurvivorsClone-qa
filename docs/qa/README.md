@@ -98,6 +98,10 @@ with UnityQaEnvironment(
 
 `TeamPolicy` must implement `act`, `evaluate_actions`, and `value`. The built-in checkpoint loader reconstructs the example `ActorCritic`; a custom model should pair the reusable training loop with its own versioned checkpoint loader. Standalone `.pt` checkpoints are Python LLAPI artifacts. They are not ML-Agents ONNX files and cannot be assigned to Unity `BehaviorParameters`.
 
+The player build is a one-time step reused by every later command, and is only redone when Unity C# code, the scene, or preset assets change. Everything that exercises gameplay needs it: `smoke.sh`, both training and evaluation paths, the sweep, replay, and the LLM runner. The test suites do not: `pytest`, `test-editmode.sh`, `test-playmode.sh` and `test-contracts.sh` verify that the code honours its contracts, which is enough for regression checking but cannot show that the player actually connects to a trainer over the port the contract test asserts.
+
+Training from the Unity editor works through the standard ML-Agents route, since `Academy.ReadPortFromArgs` falls back to `MLAgentsSettings.ConnectTrainer` and `EditorPort` in an editor build. It does not carry the QA lane's contracts: `-qaMode`, `-qaPreset` and `-qaSeed` come from `Environment.GetCommandLineArgs()`, which in the editor holds the editor's own arguments. An editor run therefore takes the default `smoke` preset with its durable character, cannot select evaluation mode, and has no seed control, so it shows whether a training loop turns over but produces nothing usable for QA scoring.
+
 Addressables must be built explicitly before creating or training against a player. The source Addressables setting `m_BuildAddressablesWithPlayerBuild` remains disabled by design and is not changed automatically. The local QA player disables Burst compilation because Burst 1.6.6's bundled macOS linker is incompatible with current macOS execution handling; this does not change package versions or project settings.
 
 ## Artifacts
