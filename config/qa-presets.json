@@ -1,0 +1,74 @@
+{
+  "schema": "qa-presets/v1",
+  "presets": {
+    "smoke": {
+      "description": "Rule-based regression baseline. Durable character guarantees deterministic final-boss phase reach.",
+      "level": {
+        "durationSeconds": 90.0,
+        "minibossSpawnSeconds": 45.0
+      },
+      "character": {
+        "healthMultiplier": 10.0,
+        "armor": 100
+      },
+      "episode": {
+        "deadlineSeconds": 150.0,
+        "timeScale": 4.0,
+        "maximumTimeScale": 4.0
+      },
+      "observation": {
+        "elapsedSecondsScale": 600.0
+      },
+      "run": {
+        "seeds": [8201, 8202, 8203, 8204, 8205, 8206, 8207, 8208, 8209, 8210],
+        "wallClockTimeoutSeconds": 60
+      }
+    },
+    "train": {
+      "description": "PPO training. Source durability makes death reachable so the failure reward can fire.",
+      "level": {
+        "durationSeconds": 90.0,
+        "minibossSpawnSeconds": 45.0
+      },
+      "character": {
+        "healthMultiplier": 1.0,
+        "armor": 0
+      },
+      "episode": {
+        "deadlineSeconds": 150.0,
+        "timeScale": 20.0,
+        "maximumTimeScale": 20.0
+      },
+      "observation": {
+        "elapsedSecondsScale": 600.0
+      },
+      "run": {
+        "seeds": [42],
+        "wallClockTimeoutSeconds": 60
+      }
+    },
+    "eval": {
+      "description": "Deterministic single-episode inference. Shares the train fingerprint so trained policies transfer.",
+      "level": {
+        "durationSeconds": 90.0,
+        "minibossSpawnSeconds": 45.0
+      },
+      "character": {
+        "healthMultiplier": 1.0,
+        "armor": 0
+      },
+      "episode": {
+        "deadlineSeconds": 150.0,
+        "timeScale": 1.0,
+        "maximumTimeScale": 1.0
+      },
+      "observation": {
+        "elapsedSecondsScale": 600.0
+      },
+      "run": {
+        "seeds": [9101, 9102, 9103, 9104, 9105, 9106, 9107, 9108, 9109, 9110],
+        "wallClockTimeoutSeconds": 60
+      }
+    }
+  }
+}
