@@ -98,6 +98,8 @@ with UnityQaEnvironment(
 
 `TeamPolicy` must implement `act`, `evaluate_actions`, and `value`. The built-in checkpoint loader reconstructs the example `ActorCritic`; a custom model should pair the reusable training loop with its own versioned checkpoint loader. Standalone `.pt` checkpoints are Python LLAPI artifacts. They are not ML-Agents ONNX files and cannot be assigned to Unity `BehaviorParameters`.
 
+`build-player-linux.sh` and `build-player-windows.sh` produce distributable builds for teammates, who run training and evaluation through the Python CLI directly; the shell wrappers stay macOS-only because they assume the `.app` bundle layout. Cross building works from macOS because the scripting backend is Mono. Each build switches the active build target and rebuilds Addressables before building the player, since `BuildPlayerContent` produces bundles for whichever target is active, and shipping another platform's bundles fails quietly at content load rather than at build time. Distributable builds go to their own directory per platform because Unity writes a companion `_Data` directory beside the executable.
+
 The player build is a one-time step reused by every later command, and is only redone when Unity C# code, the scene, or preset assets change. Everything that exercises gameplay needs it: `smoke.sh`, both training and evaluation paths, the sweep, replay, and the LLM runner. The test suites do not: `pytest`, `test-editmode.sh`, `test-playmode.sh` and `test-contracts.sh` verify that the code honours its contracts, which is enough for regression checking but cannot show that the player actually connects to a trainer over the port the contract test asserts.
 
 Training from the Unity editor works through the standard ML-Agents route, since `Academy.ReadPortFromArgs` falls back to `MLAgentsSettings.ConnectTrainer` and `EditorPort` in an editor build. It does not carry the QA lane's contracts: `-qaMode`, `-qaPreset` and `-qaSeed` come from `Environment.GetCommandLineArgs()`, which in the editor holds the editor's own arguments. An editor run therefore takes the default `smoke` preset with its durable character, cannot select evaluation mode, and has no seed control, so it shows whether a training loop turns over but produces nothing usable for QA scoring.
@@ -111,6 +113,7 @@ Generated outputs are intentionally ignored under `QAArtifacts/`:
 - `logs/`: Unity, training, evaluation, and replay logs.
 - `TestResults/`: Unity NUnit XML reports.
 - `player/`: local Addressables-backed player build.
+- `dist/linux/` and `dist/windows/`: distributable player builds for teammates.
 - `traces/`, `screenshots/`, `checkpoints/`, `models/`, and `pytorch-ppo/`: replay and training products.
 - `evaluate-sweep.json`: aggregated multi-seed evaluation report.
 - `episode-*` and `llm-failures/`: Unity episode data, buffered LLM decisions, and pre-terminal LLM infrastructure failures.

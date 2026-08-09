@@ -68,7 +68,7 @@ Unity player 빌드가 없으면 어떤 PPO 명령도 실행되지 않는다. `Q
 
 ## 1단계 — 사전 조건 확인
 
-현재 검증된 환경은 macOS 개발 머신이다. 순수 PyTorch PPO 코드 자체는 운영체제에 종속되지 않지만, 제공되는 셸 래퍼와 player 빌드는 macOS `.app` 번들 및 Mach-O 실행 경로를 기준으로 검증되었다. Linux와 Windows에서는 해당 플랫폼의 player 경로에 맞게 환경 어댑터와 셸 래퍼를 조정해야 한다.
+이 문서의 1–6단계는 macOS 개발 머신을 기준으로 한다. Python CLI는 세 플랫폼을 모두 지원하지만 셸 래퍼는 macOS 전용이다. 팀원에게 빌드를 전달하는 절차와 다른 플랫폼에서의 실행 방법은 [팀원 배포](#팀원-배포)를 참조한다.
 
 | 항목 | 요구 버전 | 이유 |
 |---|---|---|
@@ -390,6 +390,83 @@ seed=1234 outcome=Passed steps=... total_reward=... summary=.../summary.json
 
 episode 디렉터리에는 `summary.json`(terminal 결과와 replay 데이터), `actions.jsonl`, `telemetry.jsonl`이 있다. `summary.json`은 `scripts/qa/replay.sh`로 그대로 재현에 사용할 수 있다.
 
+## 팀원 배포
+
+팀원이 각자 머신에서 학습과 평가를 돌리려면 **저장소 클론과 플랫폼별 player 빌드가 둘 다** 필요하다. player만으로는 동작하지 않는다 — `config/qa-presets.json`, `qa_pytorch_ppo`, `uv.lock`이 모두 저장소에 있다.
+
+### 빌드하는 쪽
+
+macOS 한 대에서 세 플랫폼을 전부 만들 수 있다. 스크립팅 백엔드가 Mono이기 때문이며, IL2CPP였다면 Windows player에 Windows 호스트가 필요했다.
+
+```sh
+scripts/qa/build-player.sh            # macOS  → QAArtifacts/player/QaGameplay.app
+scripts/qa/build-player-linux.sh      # Linux  → QAArtifacts/dist/linux/
+scripts/qa/build-player-windows.sh    # Windows → QAArtifacts/dist/windows/
+```
+
+Unity Hub에서 해당 플랫폼의 Build Support 모듈이 설치되어 있어야 한다. 없으면 빌드가 `Unity is missing build support for ...`로 실패한다.
+
+각 스크립트는 활성 빌드 타깃을 전환하고 **Addressables를 다시 만든 뒤** player를 빌드한다. `BuildPlayerContent`가 활성 타깃 기준으로 번들을 만들기 때문이며, 이 순서를 지키지 않으면 다른 플랫폼 번들이 들어간 player가 나온다. 이 실패는 조용하다 — 실행은 되고 에셋만 로드되지 않는다.
+
+| 플랫폼 | 산출물 | 크기 |
+|---|---|---:|
+| macOS | `QAArtifacts/player/QaGameplay.app` | 약 157MB |
+| Linux | `QAArtifacts/dist/linux/` | 약 156MB |
+| Windows | `QAArtifacts/dist/windows/` | 약 125MB |
+
+**디렉터리 전체를 압축해 전달한다.** 실행 파일만 보내면 옆의 `QaGameplay_Data/`와 런타임 라이브러리가 빠져 실행되지 않는다.
+
+```sh
+cd QAArtifacts/dist && zip -r qa-player-linux.zip linux && zip -r qa-player-windows.zip windows
+```
+
+### 받는 쪽
+
+1. 저장소를 클론하고 2단계의 의존성 설치를 수행한다.
+2. 받은 압축을 **`QAArtifacts/player/`에 푼다.** 플랫폼별 기본 경로와 일치하므로 `--player`를 지정할 필요가 없다.
+
+| 플랫폼 | 압축을 풀었을 때 있어야 하는 경로 |
+|---|---|
+| macOS | `QAArtifacts/player/QaGameplay.app` |
+| Linux | `QAArtifacts/player/QaGameplay.x86_64` |
+| Windows | `QAArtifacts/player/QaGameplay.exe` |
+
+Linux에서는 실행 권한이 필요할 수 있다.
+
+```sh
+chmod +x QAArtifacts/player/QaGameplay.x86_64
+```
+
+3. 학습과 평가를 실행한다.
+
+```sh
+uv run --locked --extra trainer python -m qa_pytorch_ppo.cli train
+uv run --locked --extra trainer python -m qa_pytorch_ppo.cli evaluate --seed 9101
+```
+
+다중 seed 품질 판단은 평가를 seed마다 돌린 뒤 집계한다.
+
+```sh
+uv run --locked python -m qa_agent_runtime.sweep \
+  --artifact-root QAArtifacts/player/QAArtifacts \
+  --seeds 9101 9102 9103 9104 9105
+```
+
+### 셸 래퍼는 macOS 전용이다
+
+`scripts/qa/*.sh` 16개는 POSIX sh이고, `common.sh`의 player 해석이 macOS `.app` 번들 구조를 가정한다. **Windows·Linux 팀원은 위의 Python CLI를 직접 사용한다.**
+
+| macOS 셸 래퍼 | 다른 플랫폼에서의 대체 |
+|---|---|
+| `scripts/qa/train-pytorch.sh` | `python -m qa_pytorch_ppo.cli train` |
+| `scripts/qa/evaluate-pytorch.sh` | `python -m qa_pytorch_ppo.cli evaluate --seed <n>` |
+| `scripts/qa/evaluate-sweep.sh` | 위 evaluate 반복 + `python -m qa_agent_runtime.sweep` |
+| `scripts/qa/smoke.sh` | 대체 없음 (macOS 전용 회귀 검사) |
+
+Python CLI는 프리셋 선택, 지문 검증, time scale 적용을 셸 래퍼와 동일하게 수행한다. 셸이 하는 추가 작업은 Unity 버전 확인과 `uv lock --check`뿐이다.
+
+**현재 Linux·Windows player의 실제 동작은 미검증이다.** 이 저장소에서는 빌드 성공과 플랫폼별 Addressables 번들 생성까지만 확인했다. 해당 OS에서 첫 실행 시 위 절차대로 동작하는지 확인하고 결과를 공유한다.
+
 ## 학습된 모델 테스트
 
 ### 어느 경로가 실제로 모델을 측정하는가
@@ -482,6 +559,9 @@ PPO 알고리즘 전체를 다른 것으로 바꾸는 경우에는 `UnityQaEnvir
 | Python 버전 오류 | `uv python install 3.10.12` 후 `scripts/qa/setup.sh`를 다시 실행한다 |
 | `ModuleNotFoundError: torch` | `--extra trainer`가 빠졌다. `scripts/qa/setup.sh`를 실행한다 |
 | `Required Unity app bundle does not exist` | player가 없다. 3단계를 수행한다 |
+| `Unity player executable does not exist` | Linux·Windows에서 player 경로가 틀렸다. 압축을 `QAArtifacts/player/`에 풀었는지 확인한다 |
+| `Unrecognized Unity player suffix` | `--player`에 압축 파일이나 디렉터리를 넘겼다. 실행 파일(`.x86_64`, `.exe`) 또는 `.app` 번들을 지정한다 |
+| `Unity is missing build support for ...` | Unity Hub에서 해당 플랫폼의 Build Support 모듈을 설치한다 |
 | `Provided filename does not match any environments` | `--env`에 번들 내부 실행 파일이 아니라 `QaGameplay.app`을 전달한다. 저장소 스크립트는 자동 처리한다 |
 | `MPS is not available in the selected PyTorch environment` | `QA_TORCH_DEVICE=cpu`로 실행한다 |
 | `Checkpoint already exists in output directory` | 다른 `--output-dir`을 쓰거나 `--overwrite`를 지정한다 |
