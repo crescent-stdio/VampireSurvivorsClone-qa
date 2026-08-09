@@ -52,6 +52,15 @@ grep -F 'com.unity.ml-agents#release_23' "$QA_PROJECT_ROOT/Packages/manifest.jso
 grep -A2 '"com.unity.ai.inference"' "$QA_PROJECT_ROOT/Packages/packages-lock.json" | grep -F '"version": "2.6.1"' >/dev/null || qa_fail "Unity 6000.0.80f1 must pin its minimum supported Inference Engine 2.6.1"
 grep -F -- '--burst-disable-compilation' "$QA_PROJECT_ROOT/scripts/qa/test-editmode.sh" >/dev/null || qa_fail "EditMode tests must disable Burst AOT compilation"
 grep -F -- '--burst-disable-compilation' "$QA_PROJECT_ROOT/scripts/qa/test-playmode.sh" >/dev/null || qa_fail "PlayMode tests must disable Burst AOT compilation"
+
+# The sweep is the only way to make a statistical claim about a trained policy, so it
+# must refuse to run without a checkpoint rather than reporting an empty distribution.
+[ -x "$QA_PROJECT_ROOT/scripts/qa/evaluate-sweep.sh" ] || qa_fail "the evaluation sweep must be executable"
+if QA_SWEEP_CHECKPOINT="$QA_TEST_ROOT/absent-checkpoint.pt" \
+  "$QA_PROJECT_ROOT/scripts/qa/evaluate-sweep.sh" >"$QA_TEST_ROOT/sweep-missing.out" 2>&1; then
+  qa_fail "the evaluation sweep must fail without a checkpoint"
+fi
+grep -F 'absent-checkpoint.pt' "$QA_TEST_ROOT/sweep-missing.out" >/dev/null || qa_fail "a missing sweep checkpoint must be reported by path"
 grep -F "project_mgd_vampire" "$QA_PROJECT_ROOT/scripts/qa/common.sh" >/dev/null || qa_fail "default player executable must match the built macOS product"
 grep -F 'FailureReason' "$QA_PROJECT_ROOT/scripts/qa/smoke.sh" >/dev/null || qa_fail "smoke failures must require a classification"
 if grep -F -- '-qaSeed=1234' "$QA_PROJECT_ROOT/scripts/qa/replay.sh" >/dev/null; then
