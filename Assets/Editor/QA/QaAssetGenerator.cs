@@ -78,19 +78,64 @@ namespace Vampire.Editor.QA
                 throw new InvalidOperationException("Addressables build failed: " + result.Error);
         }
 
+        /// <summary>Local development build. Every shell wrapper expects this path.</summary>
         public static void BuildMacPlayerForBatchMode()
         {
-            var buildDirectory = "QAArtifacts/player";
+            BuildPlayer(BuildTarget.StandaloneOSX, "QAArtifacts/player", "QaGameplay.app");
+        }
+
+        /// <summary>Distributable Linux build.</summary>
+        public static void BuildLinuxPlayerForBatchMode()
+        {
+            BuildPlayer(BuildTarget.StandaloneLinux64, "QAArtifacts/dist/linux", "QaGameplay.x86_64");
+        }
+
+        /// <summary>Distributable Windows build.</summary>
+        public static void BuildWindowsPlayerForBatchMode()
+        {
+            BuildPlayer(BuildTarget.StandaloneWindows64, "QAArtifacts/dist/windows", "QaGameplay.exe");
+        }
+
+        /// <summary>
+        /// Switch to a build target, rebuild Addressables for it, then build the player.
+        /// </summary>
+        /// <remarks>
+        /// The three steps have to happen in this order inside one editor session.
+        /// <see cref="AddressableAssetSettings.BuildPlayerContent"/> builds bundles for
+        /// whichever target is active, so building content before switching would ship
+        /// another platform's bundles. That failure is quiet: the player launches and then
+        /// cannot load its content.
+        ///
+        /// Each target also gets its own directory, because Unity writes a companion
+        /// <c>&lt;name&gt;_Data</c> directory beside the executable and a shared directory
+        /// would have the targets overwrite one another. A distributed build is that whole
+        /// directory, not the executable alone.
+        /// </remarks>
+        private static void BuildPlayer(BuildTarget target, string buildDirectory, string playerName)
+        {
+            var group = BuildPipeline.GetBuildTargetGroup(target);
+            if (!BuildPipeline.IsBuildTargetSupported(group, target))
+                throw new InvalidOperationException(
+                    "Unity is missing build support for " + target +
+                    ". Install the matching module from Unity Hub before building.");
+
+            if (EditorUserBuildSettings.activeBuildTarget != target &&
+                !EditorUserBuildSettings.SwitchActiveBuildTarget(group, target))
+                throw new InvalidOperationException("Unable to switch the active build target to " + target + ".");
+
+            BuildAddressablesForBatchMode();
+
             if (!System.IO.Directory.Exists(buildDirectory))
                 System.IO.Directory.CreateDirectory(buildDirectory);
 
             var report = BuildPipeline.BuildPlayer(
                 GetQaPlayerBuildScenePaths(),
-                buildDirectory + "/QaGameplay.app",
-                BuildTarget.StandaloneOSX,
+                buildDirectory + "/" + playerName,
+                target,
                 BuildOptions.None);
             if (report.summary.result != BuildResult.Succeeded)
-                throw new InvalidOperationException("QA player build failed: " + report.summary.result);
+                throw new InvalidOperationException(
+                    "QA player build failed for " + target + ": " + report.summary.result);
         }
 
         public static string[] GetQaPlayerBuildScenePaths()

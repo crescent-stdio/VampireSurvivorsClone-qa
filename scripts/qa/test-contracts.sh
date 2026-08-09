@@ -47,6 +47,20 @@ UV_BIN="$QA_TEST_BIN/uv-run" "$QA_PROJECT_ROOT/scripts/qa/run-llm-agent.sh" --he
 grep -F -- "--seed" "$QA_TEST_ROOT/llm-help.out" >/dev/null || qa_fail "LLM runner help must document the required seed"
 
 grep -F -- "--burst-disable-compilation" "$QA_PROJECT_ROOT/scripts/qa/build-player.sh" >/dev/null || qa_fail "player build must use the Burst 1.6.6 macOS compatibility option"
+
+# Distributable builds for teammates. Each must select its own target, and Burst stays
+# off for all three because cross AOT compilation is more fragile than the macOS case
+# that already required disabling it.
+for QA_BUILD_PLATFORM in linux windows; do
+  QA_BUILD_SCRIPT="$QA_PROJECT_ROOT/scripts/qa/build-player-$QA_BUILD_PLATFORM.sh"
+  [ -x "$QA_BUILD_SCRIPT" ] || qa_fail "the $QA_BUILD_PLATFORM player build must be executable"
+  grep -F -- '--burst-disable-compilation' "$QA_BUILD_SCRIPT" >/dev/null ||
+    qa_fail "the $QA_BUILD_PLATFORM player build must disable Burst AOT compilation"
+  grep -F -- "-logFile" "$QA_BUILD_SCRIPT" >/dev/null ||
+    qa_fail "the $QA_BUILD_PLATFORM player build must record a log"
+done
+grep -F -- 'BuildLinuxPlayerForBatchMode' "$QA_PROJECT_ROOT/scripts/qa/build-player-linux.sh" >/dev/null || qa_fail "the linux build must call its own entry point"
+grep -F -- 'BuildWindowsPlayerForBatchMode' "$QA_PROJECT_ROOT/scripts/qa/build-player-windows.sh" >/dev/null || qa_fail "the windows build must call its own entry point"
 grep -F 'm_EditorVersion: 6000.0.80f1' "$QA_PROJECT_ROOT/ProjectSettings/ProjectVersion.txt" >/dev/null || qa_fail "project must target Unity 6000.0.80f1"
 grep -F 'com.unity.ml-agents#release_23' "$QA_PROJECT_ROOT/Packages/manifest.json" >/dev/null || qa_fail "project must use ML-Agents Release 23"
 grep -A2 '"com.unity.ai.inference"' "$QA_PROJECT_ROOT/Packages/packages-lock.json" | grep -F '"version": "2.6.1"' >/dev/null || qa_fail "Unity 6000.0.80f1 must pin its minimum supported Inference Engine 2.6.1"
