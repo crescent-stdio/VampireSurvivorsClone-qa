@@ -4,6 +4,15 @@
 
 팀원이 각자 머신에서 학습과 평가를 돌리려면 **저장소 클론과 플랫폼별 player가 둘 다** 필요하다. player만으로는 동작하지 않는다 — `config/qa-presets.json`, `qa_pytorch_ppo`, `uv.lock`이 모두 저장소에 있다.
 
+원본 게임은 Unity `2021.3.21f1`이며 ML-Agents가 들어있지 않다. 학습을 붙이기 위해 스택을 올리고 ML-Agents를 새로 추가했다.
+
+| 항목 | 버전 |
+|---|---|
+| Unity | `6000.0.80f1` |
+| [uv](https://docs.astral.sh/uv/) | `0.12.x` |
+| Python | `3.10.12` |
+| PyTorch | `2.8.0` |
+
 ## 빌드하는 쪽
 
 macOS 한 대에서 세 플랫폼을 전부 만들 수 있다.
@@ -42,7 +51,15 @@ scripts/qa/package-players.sh
 
 ## 받는 쪽
 
-1. 저장소를 클론하고 [quickstart 2단계](PPO_QUICKSTART.ko.md#2단계--의존성-설치)의 의존성 설치를 수행한다.
+1. 저장소를 클론하고 의존성을 설치한다. `torch`와 `mlagents`가 optional dependency이므로 `--extra trainer`가 없으면 설치되지 않는다.
+
+```sh
+git clone -b feat/ai-agent-qa https://github.com/crescent-stdio/VampireSurvivorsClone-qa
+cd VampireSurvivorsClone-qa
+uv python install 3.10.12
+uv sync --locked --extra trainer
+```
+
 2. 받은 압축을 **`QAArtifacts/player/`에 푼다.** 플랫폼별 기본 경로와 일치하므로 `--player`를 지정할 필요가 없다.
 
 | 플랫폼 | 압축을 풀었을 때 있어야 하는 경로 |
