@@ -155,6 +155,7 @@ UV_BIN="$QA_TRAIN_CONTRACT_BIN/uv" \
   "$QA_PROJECT_ROOT/scripts/qa/train.sh" "$QA_TRAIN_CONTRACT_ROOT/QaGameplay.app"
 grep -Fx -- '--torch-device=cpu' "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must default to the CPU torch device"
 grep -Fx -- "--env=$QA_TRAIN_CONTRACT_ROOT/QaGameplay.app" "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "ML-Agents training must receive the macOS app bundle"
+grep -Fx -- '-qaPreset=train' "$QA_TRAIN_CONTRACT_ROOT/arguments" >/dev/null || qa_fail "training must select the train preset so the agent character can die"
 
 QA_TORCH_DEVICE=mps QA_TEST_MPS_AVAILABLE=1 \
   QA_PPO_CONFIG="$QA_TRAIN_CONTRACT_ROOT/override.yaml" \
@@ -218,6 +219,7 @@ grep -Fx -- '--seed=1234' "$QA_EVALUATE_CONTRACT_ROOT/trainer-arguments" >/dev/n
 grep -Fx -- '-qaSeed=1234' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must pass the same seed to Unity"
 grep -Fx -- '-qaMode=evaluate' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must request Unity single-episode mode"
 grep -Fx -- '-qaTimeScale=1' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must run at normal game speed"
+grep -Fx -- '-qaPreset=eval' "$QA_EVALUATE_CONTRACT_ROOT/player-arguments" >/dev/null || qa_fail "evaluation must select the eval preset so it matches the training environment"
 kill -TERM "$QA_EVALUATE_PID"
 wait "$QA_EVALUATE_PID" 2>/dev/null || true
 QA_EVALUATE_UV_PID=$(sed -n '1p' "$QA_EVALUATE_CONTRACT_ROOT/uv.pid")

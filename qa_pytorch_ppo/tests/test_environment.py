@@ -192,3 +192,82 @@ def test_environment_rejects_non_finite_observations(tmp_path: Path) -> None:
     ) as environment:
         with pytest.raises(environment_module.EnvironmentContractError, match="finite"):
             environment.reset()
+
+
+def capturing_factory(fake: FakeUnityEnvironment, captured: dict) -> object:
+    """Record the keyword arguments the adapter passes to UnityEnvironment."""
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return fake
+
+    return factory
+
+
+def test_training_requests_the_train_preset_and_its_accelerated_time_scale(tmp_path: Path) -> None:
+    spec = qa_spec()
+    fake = FakeUnityEnvironment([(decision(np.zeros(36, dtype=np.float32)), TerminalSteps.empty(spec))], spec)
+    captured: dict = {}
+
+    with environment_module.UnityQaEnvironment(
+        player=player_bundle(tmp_path),
+        seed=42,
+        evaluation=False,
+        environment_factory=capturing_factory(fake, captured),
+    ) as environment:
+        assert environment.preset.name == "train"
+
+    arguments = captured["additional_args"]
+    assert "-qaPreset=train" in arguments
+    assert "-qaTimeScale=20" in arguments
+    assert "-qaMode=evaluate" not in arguments
+
+
+def test_evaluation_requests_the_eval_preset_at_real_time(tmp_path: Path) -> None:
+    spec = qa_spec()
+    fake = FakeUnityEnvironment([(decision(np.zeros(36, dtype=np.float32)), TerminalSteps.empty(spec))], spec)
+    captured: dict = {}
+
+    with environment_module.UnityQaEnvironment(
+        player=player_bundle(tmp_path),
+        seed=1234,
+        evaluation=True,
+        environment_factory=capturing_factory(fake, captured),
+    ) as environment:
+        assert environment.preset.name == "eval"
+
+    arguments = captured["additional_args"]
+    assert arguments[0] == "-qaMode=evaluate"
+    assert "-qaPreset=eval" in arguments
+    assert "-qaTimeScale=1" in arguments
+
+
+def test_the_engine_channel_carries_the_preset_time_scale(tmp_path: Path) -> None:
+    # Without this channel the player runs at 1x no matter what the preset says, which is
+    # what made 500k standalone steps take roughly fourteen hours.
+    spec = qa_spec()
+    fake = FakeUnityEnvironment([(decision(np.zeros(36, dtype=np.float32)), TerminalSteps.empty(spec))], spec)
+    captured: dict = {}
+
+    with environment_module.UnityQaEnvironment(
+        player=player_bundle(tmp_path),
+        seed=42,
+        evaluation=False,
+        environment_factory=capturing_factory(fake, captured),
+    ) as environment:
+        channels = captured["side_channels"]
+        assert len(channels) == 1
+        assert channels[0] is environment._engine_channel
+
+
+def test_evaluation_rejects_a_preset_that_is_not_real_time(tmp_path: Path) -> None:
+    from qa_agent_runtime.presets import load_preset
+
+    with pytest.raises(environment_module.EnvironmentContractError, match="time scale 1"):
+        environment_module.UnityQaEnvironment(
+            player=player_bundle(tmp_path),
+            seed=1234,
+            evaluation=True,
+            preset=load_preset("train"),
+            environment_factory=lambda **kwargs: None,
+        )

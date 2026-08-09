@@ -4,6 +4,9 @@ set -eu
 . "$(dirname -- "$0")/common.sh"
 
 QA_PLAYER=${1:-$QA_DEFAULT_PLAYER}
+QA_PRESET=${QA_PRESET:-smoke}
+# Seeds and timeouts stay shell defaults rather than preset lookups: smoke is the
+# regression baseline and deliberately runs without uv, which qa_preset_value requires.
 QA_SMOKE_SEEDS=${QA_SMOKE_SEEDS:-"8201 8202 8203 8204 8205 8206 8207 8208 8209 8210"}
 QA_SMOKE_TIME_SCALE=${QA_SMOKE_TIME_SCALE:-4}
 QA_SMOKE_WALL_TIMEOUT_SECONDS=${QA_SMOKE_WALL_TIMEOUT_SECONDS:-60}
@@ -40,7 +43,7 @@ for QA_SMOKE_SEED in $QA_SMOKE_SEEDS; do
   QA_SMOKE_LOG="$QA_PROJECT_ROOT/QAArtifacts/logs/smoke-seed-$QA_SMOKE_PADDED_SEED.log"
   QA_SMOKE_WATCHDOG_MARKER="$QA_PROJECT_ROOT/QAArtifacts/logs/smoke-seed-$QA_SMOKE_PADDED_SEED.watchdog"
   rm -f "$QA_SMOKE_WATCHDOG_MARKER"
-  "$QA_PLAYER" -batchmode -qaMode=smoke -qaSeed="$QA_SMOKE_SEED" -qaTimeScale="$QA_SMOKE_TIME_SCALE" -logFile "$QA_SMOKE_LOG" &
+  "$QA_PLAYER" -batchmode -qaPreset="$QA_PRESET" -qaMode=smoke -qaSeed="$QA_SMOKE_SEED" -qaTimeScale="$QA_SMOKE_TIME_SCALE" -logFile "$QA_SMOKE_LOG" &
   QA_SMOKE_PLAYER_PID=$!
   (
     QA_WATCHDOG_ELAPSED=0

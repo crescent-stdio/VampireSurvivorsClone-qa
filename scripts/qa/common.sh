@@ -39,6 +39,16 @@ qa_require_uv() {
   "$QA_UV_BIN" lock --check --project "$QA_PROJECT_ROOT" >/dev/null 2>&1 || qa_fail_config "uv.lock is missing or out of date. Run 'uv lock' and commit the result."
 }
 
+# Read a value from config/qa-presets.json. Delegates to Python because POSIX sh has no
+# JSON parser and every caller already requires uv.
+# Usage: qa_preset_value <preset> <dotted-key>
+qa_preset_value() {
+  [ -n "${QA_UV_BIN:-}" ] || qa_fail_config "qa_preset_value requires qa_require_uv first."
+  "$QA_UV_BIN" run --locked --project "$QA_PROJECT_ROOT" python -m qa_agent_runtime.presets \
+    --preset "$1" --key "$2" 2>/dev/null ||
+    qa_fail_config "Unable to read preset '$1' key '$2' from config/qa-presets.json."
+}
+
 qa_configure_torch_device() {
   QA_TORCH_DEVICE=${QA_TORCH_DEVICE:-cpu}
   case "$QA_TORCH_DEVICE" in
