@@ -10,12 +10,44 @@
 
 | 경로 | 실행 스크립트 | 설정 위치 | 산출물 | 용도 |
 |---|---|---|---|---|
-| ML-Agents PPO | `scripts/qa/train.sh`, `scripts/qa/evaluate.sh` | `config/qa-ppo.yaml` | `.onnx` + `.pt` | 운영 경로. ONNX를 Unity `BehaviorParameters`에 배치할 수 있다 |
-| 순수 PyTorch PPO | `scripts/qa/train-pytorch.sh`, `scripts/qa/evaluate-pytorch.sh` | CLI 플래그만 | `.pt` | 환경 어댑터, 정책 모델, 학습 루프를 독립적으로 교체하는 예제. Unity 배치 불가 |
+| ML-Agents PPO | `scripts/qa/train.sh`, `scripts/qa/evaluate.sh` | `config/qa-ppo.yaml` | `.onnx` + `.pt` | 운영 경로. Python trainer가 붙은 상태로 추론한다 |
+| 순수 PyTorch PPO | `scripts/qa/train-pytorch.sh`, `scripts/qa/evaluate-pytorch.sh` | CLI 플래그만 | `.pt` | 환경 어댑터, 정책 모델, 학습 루프를 독립적으로 교체하는 예제 |
 
-두 경로가 만드는 `.pt`는 서로 다른 형식이다. 순수 PyTorch 경로의 checkpoint는 Python LLAPI 평가 전용이며 ML-Agents가 export하는 ONNX와 호환되지 않는다. Unity 안에서 추론 모델을 돌려야 한다면 ML-Agents 경로를 사용한다.
+두 경로가 만드는 `.pt`는 서로 다른 형식이다. 순수 PyTorch 경로의 checkpoint는 Python LLAPI 평가 전용이며 ML-Agents가 export하는 ONNX와 호환되지 않는다.
+
+**ONNX를 Unity에 배치하는 경로는 아직 완성되어 있지 않다.** ML-Agents가 만드는 `.onnx`를 `BehaviorParameters`에 수동으로 지정하는 것은 가능하지만 절차가 자동화되어 있지 않고, `QaAssetGenerator.cs`가 자산을 재생성할 때 `behavior.Model = null`로 다시 지운다. 두 경로 모두 실제로는 Python 프로세스가 붙은 상태에서 추론한다.
 
 1–3단계는 두 경로가 공통으로 필요로 한다. 4단계와 5단계에서 갈라진다.
+
+## 프리셋
+
+QA 환경 설정은 `config/qa-presets.json` 한 곳에 모여 있다. Unity 자산 생성기, 셸 래퍼, Python 에이전트가 모두 이 파일을 읽는다.
+
+| | `smoke` | `train` | `eval` |
+|---|---|---|---|
+| level duration / miniboss | 90 / 45초 | 90 / 45초 | 90 / 45초 |
+| 캐릭터 | hp ×10, armor 100 | hp ×1, armor 0 | hp ×1, armor 0 |
+| 에피소드 deadline | 150초 | 150초 | 150초 |
+| Unity time scale | 4배 | 20배 | 1배 |
+| 관측 elapsed 스케일 | 600 | 600 | 600 |
+| seed 집합 | 8201–8210 | 42 | 9101–9110 |
+
+`-qaPreset=<name>`으로 선택하며 생략하면 `smoke`다. 따라서 `smoke.sh`, LLM 경로, replay는 인자를 추가하지 않아도 기존과 동일하게 동작한다.
+
+세 프리셋의 차이는 두 가지뿐이다.
+
+- **캐릭터 내구도**: `smoke`의 hp 1000 / armor 100은 규칙 기반 에피소드가 최종 보스 phase까지 결정적으로 도달하게 하려는 설정이다. `Character.cs`가 `armor >= damage`인 피격을 데미지 1로 고정하므로 죽으려면 1,000회를 맞아야 한다. 학습에는 정반대로 작용해서 실패 보상 `-2`가 사실상 발생하지 않으므로, `train`과 `eval`은 원본 내구도를 쓴다.
+- **time scale**: 고정 timestep이므로 벽시계 시간만 바뀌고 궤적은 바뀌지 않는다.
+
+### 환경 지문
+
+각 프리셋은 **환경 지문**을 갖는다. level 타이밍, 캐릭터 내구도, deadline, 관측 스케일에서 계산하며 time scale과 seed는 제외한다.
+
+```sh
+uv run --locked python -m qa_agent_runtime.presets --preset train --key fingerprint
+```
+
+`train`과 `eval`은 지문이 같으므로 학습한 정책을 그대로 평가할 수 있다. `smoke` 자산으로 만든 checkpoint를 평가에 넣으면 거부된다. 관측 계약(`36 / 2 / (5,)`)은 세 프리셋이 공유하므로 지문 없이는 이 오탑재를 막을 수 없다.
 
 ## 0단계 — 전체 흐름
 
@@ -25,10 +57,11 @@ flowchart TD
     Setup --> Build["3단계\nscripts/qa/build-player.sh\nQaGameplay.app 생성"]
     Build --> Smoke["scripts/qa/smoke.sh\n규칙 기반 회귀 검사"]
     Smoke --> Choice{"PPO 경로 선택"}
-    Choice -->|"운영 · ONNX 필요"| MLAgents["4단계\nscripts/qa/train.sh\nscripts/qa/evaluate.sh"]
+    Choice -->|"운영 경로"| MLAgents["4단계\nscripts/qa/train.sh\nscripts/qa/evaluate.sh"]
     Choice -->|"정책 · 루프 교체"| PyTorch["5단계\nscripts/qa/train-pytorch.sh\nscripts/qa/evaluate-pytorch.sh"]
     MLAgents --> Verify["6단계\n종료 코드와 산출물 확인"]
     PyTorch --> Verify
+    Verify --> Sweep["scripts/qa/evaluate-sweep.sh\n다중 seed 품질 판단"]
 ```
 
 Unity player 빌드가 없으면 어떤 PPO 명령도 실행되지 않는다. `QAArtifacts/`와 `*.app`은 `.gitignore` 대상이므로 클론 직후 저장소에는 player가 존재하지 않는다. 3단계를 건너뛸 수 없다.
@@ -172,7 +205,8 @@ uv run --locked --extra trainer mlagents-learn config/qa-ppo.yaml \
   --env=QAArtifacts/player/QaGameplay.app \
   --no-graphics \
   --torch-device=cpu \
-  --results-dir=QAArtifacts/checkpoints
+  --results-dir=QAArtifacts/checkpoints \
+  --env-args -qaPreset=train
 ```
 
 `evaluate.sh`는 trainer를 `--resume --inference`로 백그라운드에 띄운 뒤 player를 `-qaMode=evaluate`로 직접 실행하고, player 종료 코드를 그대로 반환한다. 스크립트가 종료되면 trap이 uv wrapper와 trainer 자식 프로세스 트리를 함께 정리한다.
@@ -323,6 +357,59 @@ seed=1234 outcome=Passed steps=... total_reward=... summary=.../summary.json
 
 episode 디렉터리에는 `summary.json`(terminal 결과와 replay 데이터), `actions.jsonl`, `telemetry.jsonl`이 있다. `summary.json`은 `scripts/qa/replay.sh`로 그대로 재현에 사용할 수 있다.
 
+## 학습된 모델 테스트
+
+### 어느 경로가 실제로 모델을 측정하는가
+
+| 경로 | 명령 | 실제로 로드하는 파일 |
+|---|---|---|
+| ML-Agents 추론 | `scripts/qa/evaluate.sh` | `<results-dir>/<run-id>/QaGameplay/checkpoint.pt` |
+| 순수 PyTorch | `scripts/qa/evaluate-pytorch.sh` | `QAArtifacts/pytorch-ppo/checkpoint-final.pt` |
+| 다중 seed | `scripts/qa/evaluate-sweep.sh` | 위와 동일, seed 집합 전체 |
+
+ML-Agents 평가가 읽는 것은 `.onnx`가 **아니라** `checkpoint.pt`다. `.onnx`는 Unity 내장 추론용으로만 export된다.
+
+`evaluate.sh`는 player에 `--mlagents-port`를 넘겨 trainer에 연결한다. 이 인자가 없으면 비에디터 빌드의 `Academy.ReadPortFromArgs`가 `-1`을 반환해 통신 채널이 생기지 않고, `BehaviorType.Default`가 조용히 규칙 기반 정책으로 강등된다. 이를 막기 위해 `-qaMode=evaluate` 에피소드는 추론 소스가 없으면 `Error` / `NoInferenceSource`로 종료한다.
+
+### 두 `.pt` 형식의 방어 비대칭
+
+`qa_pytorch_ppo`와 ML-Agents의 `.pt`는 서로 다른 형식이며, **한쪽만 방어된다.**
+
+- ML-Agents `.pt`를 `qa_pytorch_ppo`에 넣으면 `format_version` 검사에서 종료 코드 2로 거부한다.
+- 반대로 `qa_pytorch_ppo` `.pt`를 ML-Agents에 넣으면 `torch_model_saver.py`의 광범위한 `except`에 걸려 **경고 한 줄만 남기고 모든 모듈을 무작위 초기화한다.** 학습된 모델을 평가한다고 믿으면서 랜덤 정책을 측정하게 된다.
+
+`--run-id`와 `--results-dir`이 의도한 학습 결과를 가리키는지 확인한다.
+
+### 품질 판단에 쓰는 `summary.json` 키
+
+| 키 | 의미 |
+|---|---|
+| `Outcome` | `1` = Passed. 종료 코드가 반영하는 유일한 값 |
+| `ReplayDiscreteEvents`의 최대 `phase:N` | `3` = FinalBoss 도달. 단일 지표로는 가장 좋은 진행도 신호 |
+| `KillCount`, `FinalLevel` | 전투·성장 효율 |
+| `ElapsedSeconds` | 생존 시간 |
+| `DamageTaken` | 최대 체력 대비 피해 비율 |
+| `EpisodeReturn` | 누적 보상. 규칙 기반 smoke에서는 0 |
+| `Preset`, `PresetFingerprint` | 어느 환경에서 나온 결과인지 |
+
+### 단일 에피소드는 표본 하나다
+
+`evaluate.sh`와 `evaluate-pytorch.sh`는 seed 하나로 에피소드 하나를 돌린다. 모델 품질을 주장하려면 sweep을 쓴다.
+
+```sh
+scripts/qa/evaluate-sweep.sh
+```
+
+`eval` 프리셋의 seed 10개를 돌리고 outcome 분포, `phase:3` 도달률, 주요 지표의 평균과 표준편차를 출력한다. 결과는 `QAArtifacts/evaluate-sweep.json`에도 기록된다. 분류된 gameplay 실패는 데이터로 취급해 계속 진행하지만, 에피소드가 아예 생성되지 않으면 중단한다 — 빠진 에피소드를 평균에 넣으면 모델을 측정하는 게 아니라 과소평가하게 된다. 지문이 다른 에피소드가 섞이면 평균 대신 거부한다.
+
+### replay는 정책을 재실행하지 않는다
+
+```sh
+scripts/qa/replay.sh QAArtifacts/episode-00001234-<id>/summary.json
+```
+
+replay 모드는 정책을 `QaReplayPolicy`로 교체해 **기록된 행동을 그대로 재생**한다. 신경망은 호출되지 않는다. 즉 게임 엔진의 결정성 검증이지 모델 재현성 검증이 아니다. 위치 비교 허용 오차는 `0.05`이며 outcome과 discrete event는 정확히 일치해야 한다.
+
 ## 커스텀 정책 연결
 
 순수 PyTorch 경로는 정책만 교체하고 환경 어댑터와 PPO 학습 루프는 그대로 재사용할 수 있도록 설계되어 있다. `qa_pytorch_ppo.policy.PpoPolicy`의 `act`, `evaluate_actions`, `value` 세 메서드를 구현한다.
@@ -369,3 +456,9 @@ PPO 알고리즘 전체를 다른 것으로 바꾸는 경우에는 `UnityQaEnvir
 | `Seed must be a positive integer.` | `--seed`와 `QA_EVALUATE_SEED`는 양의 정수만 허용한다 |
 | 학습이 조용히 멈춘 것처럼 보임 | `train.sh`는 출력을 `QAArtifacts/logs/train.log`로 보낸다. `tail -f QAArtifacts/logs/train.log`로 확인한다 |
 | 관측/행동 계약 오류 (코드 2) | Unity 씬의 `BehaviorParameters`가 관측 36, 연속 2, 이산 `(5,)`, 이름 `QaGameplay`인지 확인한다 |
+| `NoInferenceSource` | 평가에 추론 소스가 없다. trainer가 붙지 않았거나 checkpoint가 없다. `QAArtifacts/logs/evaluate-trainer.log`를 확인한다 |
+| `The evaluation trainer exited before the player started` | `--resume` 대상 run이 없다. `QA_PPO_RUN_ID`와 `QA_PPO_RESULTS_DIR`이 학습 결과를 가리키는지 확인한다 |
+| `UnknownQaPreset` | `-qaPreset=`에 없는 이름을 넘겼다. `uv run --locked python -m qa_agent_runtime.presets --list`로 확인한다 |
+| `does not match preset 'eval'` | 다른 프리셋에서 학습한 checkpoint다. `train` 프리셋으로 다시 학습한다 |
+| `Unsupported checkpoint format: 1` | 프리셋 기록 이전의 checkpoint다. 환경을 사후에 확정할 수 없으므로 재학습이 필요하다 |
+| `TrainingDeadline` | 정상이다. 학습 에피소드가 150초 게임 시간에 종료된 것으로, PPO가 terminal을 받는다는 뜻이다 |

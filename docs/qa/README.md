@@ -1,8 +1,14 @@
 # QA Gameplay lane
 
-This repository contains an additive, QA-only gameplay lane for deterministic smoke, replay, ML-Agents PPO, and an opt-in OpenAI LLM workflow. See the [Korean AI agent QA guide](AI_AGENT_QA_GUIDE.ko.md) for onboarding and operational details.
+This repository contains an additive, QA-only gameplay lane for deterministic smoke, replay, ML-Agents PPO, and an opt-in OpenAI LLM workflow. See the [Korean AI agent QA guide](AI_AGENT_QA_GUIDE.ko.md) for onboarding and operational details, and the [Korean PPO quickstart](PPO_QUICKSTART.ko.md) for connecting PPO from a fresh clone.
 
 ## Architecture
+
+`config/qa-presets.json` is the single source of truth for QA environment settings. `Assets/Editor/QA/QaAssetGenerator.cs` turns it into `QaPresetBlueprint` assets so a built player resolves its configuration from an asset instead of a repository file, while shell wrappers and Python agents read the JSON directly. `-qaPreset=<name>` selects one and defaults to `smoke`, so smoke, LLM and replay runs are unaffected.
+
+Three presets ship. `smoke` preserves the regression baseline exactly. `train` and `eval` give the character its source durability, because the durable smoke character clamps every hit to one damage against 1000 HP and makes death unreachable, which leaves PPO's failure reward unused; they differ only in time scale, which cannot change a trajectory under a fixed timestep. Each preset carries an environment fingerprint over its level timings, character durability, deadline and observation scale, recorded in every episode summary and in every standalone checkpoint: `train` and `eval` match so a trained policy transfers, and a `smoke` checkpoint is refused. The shared 36/2/(5,) contract cannot catch that on its own.
+
+Training episodes end at the preset deadline. The agent has no step cap and a pass requires killing the boss that spawns at the level duration, so without it an untrained policy never reached a terminal and PPO saw neither terminal reward.
 
 `Assets/Editor/QA/QaAssetGenerator.cs` reproducibly creates and repairs the committed QA assets:
 
@@ -44,11 +50,14 @@ scripts/qa/train.sh
 scripts/qa/evaluate.sh
 scripts/qa/train-pytorch.sh
 scripts/qa/evaluate-pytorch.sh
+scripts/qa/evaluate-sweep.sh
 OPENAI_API_KEY=... scripts/qa/run-llm-agent.sh --seed 9301
 scripts/qa/replay.sh QAArtifacts/traces/example.json
 ```
 
 `smoke.sh` runs exactly ten default scripted seeds at the supported `4x` Unity time scale, exits after one terminal result per player process, and requires at least one recorded final-boss phase. Values above `4x` are rejected explicitly because the controller performs at most four 10 Hz logical ticks per frame. A transient loading-frame backlog may drain over the next frames; a backlog remaining for eight consecutive frames is classified as `ControlBacklogExceeded`, preventing silent long-term drift without unbounded frame work. A smoke episode is classified as `TimedOut` after 150 seconds of game time. A provider-neutral POSIX watchdog also terminates a non-responsive player after 60 seconds of wall-clock time by default; override `QA_SMOKE_WALL_TIMEOUT_SECONDS` only for slower hosts. A crash, watchdog timeout, missing unique summary, or incomplete failure artifacts is an infrastructure failure and makes the smoke command exit non-zero. Classified gameplay failures retain the seed, action trace, summary, Unity log, and anomaly screenshot under `QAArtifacts`.
+
+`evaluate.sh` passes `--mlagents-port` to the player. Without it a standalone build creates no communicator, and `BehaviorType.Default` degrades to the heuristic policy, so the run measures `ScriptedQaPolicy` and reports it as the model's result; evaluation now ends as `Error`/`NoInferenceSource` when neither a communicator nor an assigned model is present. It also aborts when the trainer dies, which `--resume` does whenever the run id has no prior data. A single episode is one sample, so `evaluate-sweep.sh` runs the preset's seed set and reports outcome counts, the final-boss reach rate, and the mean and deviation of kills, level, elapsed time, damage and return.
 
 `evaluate.sh` defaults to seed `1234`; set `QA_EVALUATE_SEED` to another positive integer. It starts `mlagents-learn` with `uv run --locked --extra trainer`, `--resume`, and `--inference`, then launches Unity in the single-episode `evaluate` mode. Replay accepts a project-relative trace or an explicit absolute file and validates it before launching the player. Pass an episode `summary.json` produced in `QAArtifacts`: it contains the seed, recorded actions, events, and positions. Replay loads that seed before `Random.InitState`, feeds recorded actions through the normal policy path, compares terminal output using `QaReplayComparator`, and exits with code 0 for a match or 1 for a mismatch. Legacy direct replay traces without a `Seed` are rejected with an actionable compatibility message; use a current summary artifact. Training invokes `mlagents-learn config/qa-ppo.yaml`; the behavior name in that file must remain `QaGameplay`. Release 23 receives the macOS `.app` bundle as `--env`; the scripts resolve the internal executable only when launching the player directly.
 
@@ -99,6 +108,7 @@ Generated outputs are intentionally ignored under `QAArtifacts/`:
 - `TestResults/`: Unity NUnit XML reports.
 - `player/`: local Addressables-backed player build.
 - `traces/`, `screenshots/`, `checkpoints/`, `models/`, and `pytorch-ppo/`: replay and training products.
+- `evaluate-sweep.json`: aggregated multi-seed evaluation report.
 - `episode-*` and `llm-failures/`: Unity episode data, buffered LLM decisions, and pre-terminal LLM infrastructure failures.
 
 ## Known source risks
