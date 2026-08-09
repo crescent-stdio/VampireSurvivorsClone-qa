@@ -90,11 +90,16 @@ namespace Vampire
     {
         public static QaLevelPhase Resolve(float levelTime)
         {
-            if (levelTime >= 90f)
+            return Resolve(levelTime, QaLevelTimings.Default);
+        }
+
+        public static QaLevelPhase Resolve(float levelTime, QaLevelTimings timings)
+        {
+            if (levelTime >= timings.DurationSeconds)
                 return QaLevelPhase.FinalBoss;
-            if (levelTime >= 45f)
+            if (levelTime >= timings.MinibossSpawnSeconds)
                 return QaLevelPhase.Miniboss;
-            if (levelTime >= 22.5f)
+            if (levelTime >= timings.MidPhaseSeconds)
                 return QaLevelPhase.Mid;
             return QaLevelPhase.Early;
         }

@@ -115,9 +115,10 @@ namespace Vampire.Editor.QA
             if (source.levelTime <= 0f || qa.miniBosses == null || qa.miniBosses.Length == 0)
                 throw new InvalidOperationException("Level 1 must have a positive duration and one miniboss.");
 
-            qa.levelTime = 90f;
-            qa.miniBosses[0].spawnTime = 45f;
-            qa.chestSpawnDelay = source.chestSpawnDelay * (qa.levelTime / source.levelTime);
+            var timings = QaLevelTimings.Default;
+            qa.levelTime = timings.DurationSeconds;
+            qa.miniBosses[0].spawnTime = timings.MinibossSpawnSeconds;
+            qa.chestSpawnDelay = timings.ScaleChestSpawnDelay(source.chestSpawnDelay, source.levelTime);
             qa.chestSpawnAmount = source.chestSpawnAmount;
             qa.chestBlueprint = RequireAsset<ChestBlueprint>(QaChestPath);
             qa.name = "QA Level 1";
