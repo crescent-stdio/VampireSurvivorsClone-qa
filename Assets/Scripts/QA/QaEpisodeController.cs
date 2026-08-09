@@ -17,6 +17,7 @@ namespace Vampire
 
         [SerializeField] private int episodeSeed = 1;
         [SerializeField] private CharacterBlueprint qaCharacter;
+        [SerializeField] private QaPresetBlueprint[] presets;
         [SerializeField] private string qaSceneName = "QA Level";
         [SerializeField] private string sourceSceneFingerprint;
         [SerializeField] private string artifactDirectory = "QAArtifacts";
@@ -57,7 +58,20 @@ namespace Vampire
         private bool terminalNotificationInProgress;
         private bool terminalAcknowledged;
         private bool randomDecisionSubscribed;
+        private QaPresetBlueprint activePreset;
         private static bool invalidSeedWarningLogged;
+
+        /// <summary>Preset resolved from <c>-qaPreset=</c>, or null when running outside a preset.</summary>
+        public QaPresetBlueprint ActivePreset => activePreset;
+
+        /// <summary>Game-time deadline for this episode.</summary>
+        public float DeadlineSeconds =>
+            activePreset == null ? QaSmokeOptions.MaximumGameTimeSeconds : activePreset.DeadlineSeconds;
+
+        public float ObservationElapsedSecondsScale =>
+            activePreset == null
+                ? QaGameplayObservationEncoder.ElapsedSecondsScale
+                : activePreset.ElapsedSecondsScale;
 
         public event Action<QaEpisodeOutcome> TerminalReached;
 
@@ -241,7 +255,13 @@ namespace Vampire
                 return;
 
             var arguments = Environment.GetCommandLineArgs();
-            var smokeOptions = QaSmokeOptions.Parse(Environment.GetCommandLineArgs());
+            // Resolve the preset from a first pass so its ceiling governs the real parse.
+            activePreset = FindPreset(QaSmokeOptions.Parse(arguments).PresetName);
+            var maximumTimeScale = activePreset == null
+                ? QaSmokeOptions.MaximumSupportedTimeScale
+                : activePreset.MaximumTimeScale;
+            var smokeOptions = QaSmokeOptions.Parse(arguments, maximumTimeScale);
+            var presetFailure = ResolvePresetFailure(smokeOptions);
             smokeRequested = smokeRequested || smokeOptions.IsRequested;
             llmRequested = llmRequested || smokeOptions.IsLlmRequested;
             evaluationRequested = evaluationRequested || smokeOptions.IsEvaluationRequested;
@@ -268,7 +288,7 @@ namespace Vampire
             {
                 episodeSeed = ResolveEpisodeSeed(episodeSeed);
             }
-            QaEpisodeBootstrap.Prepare(episodeSeed, qaCharacter);
+            QaEpisodeBootstrap.Prepare(episodeSeed, ResolveCharacter());
             SnapshotCoins();
             policy = policy ?? new ScriptedQaPolicy();
             sceneReloader = sceneReloader ?? new UnityQaSceneReloader();
@@ -279,10 +299,47 @@ namespace Vampire
             QaRandomDecisionRecorder.DecisionRecorded += RecordDiscreteEvent;
             randomDecisionSubscribed = true;
             episodeStarted = true;
-            if ((smokeRequested || llmRequested || evaluationRequested) && !smokeOptions.IsValid)
+            if (!string.IsNullOrEmpty(presetFailure))
+                Complete(QaEpisodeOutcome.Error, presetFailure);
+            else if ((smokeRequested || llmRequested || evaluationRequested) && !smokeOptions.IsValid)
                 Complete(QaEpisodeOutcome.Error, smokeOptions.FailureReason);
             else if (!string.IsNullOrEmpty(replayLoadFailure))
                 Complete(QaEpisodeOutcome.Error, replayLoadFailure);
+        }
+
+        /// <summary>Locate the requested preset among the ones wired into the scene.</summary>
+        private QaPresetBlueprint FindPreset(string presetName)
+        {
+            if (presets == null || string.IsNullOrEmpty(presetName))
+                return null;
+            foreach (var preset in presets)
+                if (preset != null && string.Equals(preset.PresetName, presetName, StringComparison.Ordinal))
+                    return preset;
+            return null;
+        }
+
+        /// <summary>
+        /// Report a preset that was named but not found.
+        /// </summary>
+        /// <remarks>
+        /// Scenes built before presets existed carry none, so an unresolved default is not
+        /// an error; silently ignoring an explicitly requested name would be.
+        /// </remarks>
+        private string ResolvePresetFailure(QaSmokeOptions options)
+        {
+            if (activePreset != null)
+                return string.Empty;
+            if (presets == null || presets.Length == 0)
+                return string.Empty;
+            return string.Equals(options.PresetName, QaSmokeOptions.DefaultPresetName, StringComparison.Ordinal)
+                ? string.Empty
+                : "UnknownQaPreset";
+        }
+
+        /// <summary>Prefer the active preset's character so durability follows the preset.</summary>
+        private CharacterBlueprint ResolveCharacter()
+        {
+            return activePreset != null && activePreset.Character != null ? activePreset.Character : qaCharacter;
         }
 
         private void Advance(float unscaledDeltaSeconds, float gameTime, float currentTimeScale)
@@ -291,17 +348,17 @@ namespace Vampire
                 return;
 
             elapsedUnscaledSeconds += Mathf.Max(0f, unscaledDeltaSeconds);
-            if (smokeRequested && gameTime >= QaSmokeOptions.MaximumGameTimeSeconds)
+            if (smokeRequested && gameTime >= DeadlineSeconds)
             {
                 Complete(QaEpisodeOutcome.TimedOut, "SmokeDeadline");
                 return;
             }
-            if (llmRequested && gameTime >= QaSmokeOptions.MaximumGameTimeSeconds)
+            if (llmRequested && gameTime >= DeadlineSeconds)
             {
                 Complete(QaEpisodeOutcome.TimedOut, "LlmDeadline");
                 return;
             }
-            if (evaluationRequested && gameTime >= QaSmokeOptions.MaximumGameTimeSeconds)
+            if (evaluationRequested && gameTime >= DeadlineSeconds)
             {
                 Complete(QaEpisodeOutcome.TimedOut, "EvaluationDeadline");
                 return;

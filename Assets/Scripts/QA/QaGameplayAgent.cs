@@ -52,7 +52,9 @@ namespace Vampire
 
         public override void CollectObservations(VectorSensor sensor)
         {
-            var values = QaGameplayObservationEncoder.Encode(CaptureObservation());
+            var values = QaGameplayObservationEncoder.Encode(
+                CaptureObservation(),
+                RequireController().ObservationElapsedSecondsScale);
             for (var index = 0; index < QaGameplayObservationEncoder.ObservationSize; index++)
                 sensor.AddObservation(values[index]);
         }

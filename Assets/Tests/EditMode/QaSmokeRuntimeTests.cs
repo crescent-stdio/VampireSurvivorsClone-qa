@@ -24,6 +24,33 @@ namespace Vampire.Tests.EditMode
         }
 
         [Test]
+        public void Preset_defaults_to_smoke_and_accepts_an_explicit_name()
+        {
+            Assert.That(QaSmokeOptions.Parse(new[] { "player" }).PresetName, Is.EqualTo("smoke"));
+            Assert.That(
+                QaSmokeOptions.Parse(new[] { "player", "-qaPreset=train" }).PresetName,
+                Is.EqualTo("train"));
+
+            var empty = QaSmokeOptions.Parse(new[] { "player", "-qaPreset=" });
+            Assert.That(empty.IsValid, Is.False);
+            Assert.That(empty.FailureReason, Is.EqualTo("UnsupportedQaPreset"));
+        }
+
+        [Test]
+        public void A_preset_ceiling_admits_the_time_scale_training_needs()
+        {
+            // The four-tick catch-up limit applies to the scripted controller loop, which
+            // training does not use; the agent's DecisionRequester drives it instead.
+            var training = QaSmokeOptions.Parse(new[] { "player", "-qaPreset=train", "-qaTimeScale=20" }, 20f);
+
+            Assert.That(training.IsValid, Is.True);
+            Assert.That(training.TimeScale, Is.EqualTo(20f));
+            Assert.That(
+                QaSmokeOptions.Parse(new[] { "player", "-qaTimeScale=20" }, 4f).FailureReason,
+                Is.EqualTo("UnsupportedSmokeTimeScale"));
+        }
+
+        [Test]
         public void Llm_options_require_explicit_mode_and_only_accept_normal_time_scale()
         {
             var options = QaSmokeOptions.Parse(new[] { "player", "-qaMode=llm", "-qaTimeScale=1" });

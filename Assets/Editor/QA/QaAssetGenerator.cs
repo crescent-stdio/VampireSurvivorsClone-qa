@@ -61,7 +61,7 @@ namespace Vampire.Editor.QA
             ConfigureCharacters(definitions);
             ConfigureQaPresets(definitions);
             SynchronizeQaSceneCopy();
-            ConfigureQaScene();
+            ConfigureQaScene(definitions);
             ConfigureBuildSettings();
             AssetDatabase.SaveAssets();
         }
@@ -218,7 +218,7 @@ namespace Vampire.Editor.QA
         }
 
 
-        private static void ConfigureQaScene()
+        private static void ConfigureQaScene(QaPresetDefinition[] definitions)
         {
             var scene = EditorSceneManager.OpenScene(QaScenePath, OpenSceneMode.Additive);
             try
@@ -237,6 +237,10 @@ namespace Vampire.Editor.QA
                 var requester = GetOrAdd<DecisionRequester>(root);
 
                 SetObjectReference(controller, "qaCharacter", RequireAsset<CharacterBlueprint>(QaCharacterPath));
+                SetObjectReferenceArray(
+                    controller,
+                    "presets",
+                    definitions.Select(definition => (UnityEngine.Object)RequireAsset<QaPresetBlueprint>(GetPresetAssetPath(definition.name))).ToArray());
                 SetString(controller, "qaSceneName", "QA Gameplay");
                 SetString(controller, "sourceSceneFingerprint", GetSourceSceneFingerprint());
                 SetString(controller, "artifactDirectory", QaArtifactDirectory);
@@ -392,6 +396,21 @@ namespace Vampire.Editor.QA
         {
             if (!AssetDatabase.IsValidFolder(parent + "/" + child))
                 AssetDatabase.CreateFolder(parent, child);
+        }
+
+        private static void SetObjectReferenceArray(
+            UnityEngine.Object target,
+            string propertyName,
+            UnityEngine.Object[] values)
+        {
+            var serialized = new SerializedObject(target);
+            var property = serialized.FindProperty(propertyName);
+            if (property == null)
+                throw new InvalidOperationException("Missing serialized property " + propertyName + ".");
+            property.arraySize = values.Length;
+            for (var index = 0; index < values.Length; index++)
+                property.GetArrayElementAtIndex(index).objectReferenceValue = values[index];
+            serialized.ApplyModifiedPropertiesWithoutUndo();
         }
 
         private static void SetObjectReference(UnityEngine.Object target, string propertyName, UnityEngine.Object value)

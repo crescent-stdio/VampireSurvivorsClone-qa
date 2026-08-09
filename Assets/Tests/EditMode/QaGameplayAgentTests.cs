@@ -374,6 +374,7 @@ namespace Vampire.Tests.EditMode
             public QaEpisodeOutcome Outcome { get; set; }
             public int EnableExternalCalls { get; private set; }
             public QaEpisodeOutcome CurrentOutcome => Outcome;
+            public float ObservationElapsedSecondsScale { get; set; } = QaGameplayObservationEncoder.ElapsedSecondsScale;
             public QaObservation CaptureAgentObservation() => Observation;
             public void EnableExternalAgentControl() { EnableExternalCalls++; }
             public bool SubmitExternalAction(QaAction action) { SubmittedActions.Add(action); return true; }

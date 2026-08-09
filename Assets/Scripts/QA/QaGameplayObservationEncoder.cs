@@ -13,13 +13,30 @@ namespace Vampire
         public const float PositionScale = 20f;
         public const float LevelScale = 100f;
         public const float KillScale = 1000f;
+        /// <summary>Elapsed-time saturation point used when no preset supplies one.</summary>
         public const float ElapsedSecondsScale = 600f;
 
         public static float[] Encode(QaObservation observation)
         {
+            return Encode(observation, ElapsedSecondsScale);
+        }
+
+        /// <summary>
+        /// Encode using a preset's elapsed-time scale.
+        /// </summary>
+        /// <remarks>
+        /// This scale decides what index 33 means, so two presets that disagree on it
+        /// produce vectors a policy cannot share. It is part of the preset fingerprint for
+        /// exactly that reason.
+        /// </remarks>
+        public static float[] Encode(QaObservation observation, float elapsedSecondsScale)
+        {
             var values = new float[ObservationSize];
             if (observation == null)
                 return values;
+
+            if (elapsedSecondsScale <= 0f)
+                elapsedSecondsScale = ElapsedSecondsScale;
 
             var index = 0;
             values[index++] = Ratio(observation.PlayerHealth, observation.PlayerMaxHealth);
@@ -43,7 +60,7 @@ namespace Vampire
 
             values[index++] = Mathf.Clamp01((float)Mathf.Clamp((int)observation.LevelPhase, 0, (int)QaLevelPhase.Completed) / (int)QaLevelPhase.Completed);
             values[index++] = NormalizeNonNegative(observation.KillCount, KillScale);
-            values[index++] = NormalizeNonNegative(observation.ElapsedSeconds, ElapsedSecondsScale);
+            values[index++] = NormalizeNonNegative(observation.ElapsedSeconds, elapsedSecondsScale);
             values[index++] = Ratio(observation.DamageTaken, observation.PlayerMaxHealth);
             values[index] = observation.IsAbilitySelectionOpen ? 1f : 0f;
             return values;

@@ -20302,6 +20302,10 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   episodeSeed: 1
   qaCharacter: {fileID: 11400000, guid: 2726200741c0d400eb66fbdc353bcd19, type: 2}
+  presets:
+  - {fileID: 11400000, guid: 45838975a43334963be0d6441a588ff4, type: 2}
+  - {fileID: 11400000, guid: 15c7723330a9a4b84b57d2340755f4bd, type: 2}
+  - {fileID: 11400000, guid: 03e2e7f1d9867439883a1266f6bde8f5, type: 2}
   qaSceneName: QA Gameplay
   sourceSceneFingerprint: 77f36773be250919fbc1fbe6ee734cc4
   artifactDirectory: QAArtifacts

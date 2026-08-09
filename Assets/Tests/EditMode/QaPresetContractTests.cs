@@ -2,6 +2,7 @@ using System.IO;
 using System.Linq;
 using NUnit.Framework;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 
 namespace Vampire.Tests.EditMode
@@ -148,6 +149,33 @@ namespace Vampire.Tests.EditMode
 
             foreach (var definition in LoadDefinitions())
                 Assert.That(LoadPreset(definition.name).Level, Is.SameAs(level));
+        }
+
+        [Test]
+        public void The_qa_scene_carries_every_generated_preset()
+        {
+            var scene = EditorSceneManager.OpenScene("Assets/Scenes/QA/QA Gameplay.unity", OpenSceneMode.Additive);
+            try
+            {
+                var controller = scene.GetRootGameObjects()
+                    .SelectMany(root => root.GetComponentsInChildren<QaEpisodeController>(true))
+                    .Single();
+                var wired = new SerializedObject(controller).FindProperty("presets");
+                var expected = LoadDefinitions().Select(definition => definition.name).ToArray();
+
+                Assert.That(wired, Is.Not.Null, "The QA controller must expose a presets array.");
+                Assert.That(wired.arraySize, Is.EqualTo(expected.Length));
+                for (var index = 0; index < wired.arraySize; index++)
+                {
+                    var preset = wired.GetArrayElementAtIndex(index).objectReferenceValue as QaPresetBlueprint;
+                    Assert.That(preset, Is.Not.Null, "Preset slot " + index + " is empty.");
+                    Assert.That(expected, Does.Contain(preset.PresetName));
+                }
+            }
+            finally
+            {
+                EditorSceneManager.CloseScene(scene, true);
+            }
         }
 
         [Test]
