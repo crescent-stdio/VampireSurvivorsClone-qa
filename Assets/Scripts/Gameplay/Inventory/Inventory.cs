@@ -9,6 +9,24 @@ namespace Vampire
         [SerializeField] private InventorySlot[] inventorySlots;
         private Dictionary<CollectableType, InventorySlot> inventorySlotByType;
 
+        public int SlotCount => inventorySlots == null ? 0 : inventorySlots.Length;
+
+        public InventorySlot GetSlot(int index)
+        {
+            if (inventorySlots == null || index < 0 || index >= inventorySlots.Length)
+                return null;
+            return inventorySlots[index];
+        }
+
+        public bool UseItemAt(int index)
+        {
+            var slot = GetSlot(index);
+            if (slot == null || slot.Count == 0)
+                return false;
+            slot.UseItem();
+            return true;
+        }
+
         public void Init()
         {
             inventorySlotByType = new Dictionary<CollectableType, InventorySlot>();
