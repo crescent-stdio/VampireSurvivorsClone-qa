@@ -25,6 +25,8 @@ namespace Vampire
 
         public bool Initialized { get => initialized; }
         public float LevelTime { get => levelTime; }
+        public bool MiniBossSpawned => miniBossSpawned;
+        public bool FinalBossSpawned => finalBossSpawned;
         public QaEpisodeOutcome Outcome { get => outcome; }
 
         public void Init(LevelBlueprint levelBlueprint)

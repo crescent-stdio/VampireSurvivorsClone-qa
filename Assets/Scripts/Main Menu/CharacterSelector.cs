@@ -11,6 +11,8 @@ namespace Vampire
         [SerializeField] protected CoinDisplay coinDisplay;
 
         private CharacterCard[] characterCards;
+
+        public int CharacterCount => characterBlueprints == null ? 0 : characterBlueprints.Length;
         
         public void Init()
         {
@@ -31,6 +33,15 @@ namespace Vampire
         {
             CrossSceneData.CharacterBlueprint = characterBlueprint;
             SceneManager.LoadScene(1);
+        }
+
+        public bool StartGameByIndex(int index)
+        {
+            if (characterBlueprints == null || index < 0 || index >= characterBlueprints.Length)
+                return false;
+
+            StartGame(characterBlueprints[index]);
+            return true;
         }
     }
 }

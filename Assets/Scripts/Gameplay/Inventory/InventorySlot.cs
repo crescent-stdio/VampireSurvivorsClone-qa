@@ -15,6 +15,10 @@ namespace Vampire
         private List<Collectable> items;
         private FastList<Collectable> itemsBeingAdded;
 
+        public int Count => items == null ? 0 : items.Count;
+        public int PendingCount => itemsBeingAdded == null ? 0 : itemsBeingAdded.Count;
+        public string ItemTypeName => CollectableType == null ? "" : CollectableType.name;
+
         public void Init()
         {
             items = new List<Collectable>();

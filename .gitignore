@@ -86,6 +86,7 @@ crashlytics-build.properties
 /.venv/
 /.venv-qa/
 /.pytest_cache/
+/qa_smoke/.test_tmp/
 __pycache__/
 *.py[cod]
 
