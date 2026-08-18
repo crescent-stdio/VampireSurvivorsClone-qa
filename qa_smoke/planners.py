@@ -12,6 +12,55 @@ from typing import Any, Protocol
 from .charter import TestCharter
 
 
+TRACKED_DELTA_PATHS = (
+    "scene",
+    "player.health",
+    "player.max_health",
+    "player.health_ratio",
+    "player.level",
+    "player.exp",
+    "player.next_level_exp",
+    "player.exp_ratio",
+    "player.position.x",
+    "player.position.y",
+    "progress.level_time",
+    "progress.monsters_killed",
+    "progress.coins_gained",
+    "menu.upgrade_open",
+    "menu.game_over",
+    "inventory",
+    "world.chest_count",
+    "world.enemy_count",
+    "event_state.type",
+    "event_state.event_id",
+)
+
+
+def _nested_value(value: dict[str, Any], path: str) -> Any:
+    current: Any = value
+    for segment in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(segment)
+    return current
+
+
+def compute_observed_delta(
+    before: dict[str, Any], after: dict[str, Any]
+) -> dict[str, Any]:
+    changes = []
+    for path in TRACKED_DELTA_PATHS:
+        previous = _nested_value(before, path)
+        current = _nested_value(after, path)
+        if previous != current:
+            changes.append({"path": path, "before": previous, "after": current})
+    return {
+        "before_observation_id": str(before.get("observation_id") or ""),
+        "after_observation_id": str(after.get("observation_id") or ""),
+        "changes": changes,
+    }
+
+
 def observation_phase(observation: dict[str, Any]) -> str:
     """Return an explicit gameplay phase, including compatibility with protocol 1.2."""
     phase = str(observation.get("phase") or "").strip().lower()
@@ -205,11 +254,59 @@ def build_decision_response_schema(contract: dict[str, Any]) -> dict[str, Any] |
                 }
             )
             required_arguments.extend(("intent", "target_id"))
+    reflection_schema = {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["matched", "unexpected", "uncertain", "not_applicable"],
+            },
+            "summary": {"type": "string"},
+            "evidence_refs": {"type": "array", "items": {"type": "string"}},
+            "candidate_id": {"type": "string"},
+            "reproduction_attempted": {"type": "boolean"},
+        },
+        "required": [
+            "status",
+            "summary",
+            "evidence_refs",
+            "candidate_id",
+            "reproduction_attempted",
+        ],
+        "additionalProperties": False,
+    }
+    required_fields = [
+        "plan",
+        "hypothesis",
+        "qa_observation",
+        "tool",
+        "action",
+        "arguments",
+        "reflection",
+    ]
+    requires_expected = (
+        not contract.get("has_previous_transition")
+        or action
+        in (
+            "direct_steer",
+            "steer",
+            "move",
+            "wait",
+            "select_upgrade",
+            "use_item",
+            "restart",
+            "start_game",
+            "return_to_menu",
+        )
+    )
+    if requires_expected:
+        required_fields.append("expected_effect")
     return {
         "type": "object",
         "properties": {
             "plan": {"type": "string"},
             "hypothesis": {"type": "string"},
+            "qa_observation": {"type": "string"},
             "tool": {"type": "string", "enum": ["game"]},
             "action": {"type": "string", "enum": [action]},
             "arguments": {
@@ -218,8 +315,10 @@ def build_decision_response_schema(contract: dict[str, Any]) -> dict[str, Any] |
                 "required": required_arguments,
                 "additionalProperties": False,
             },
+            "expected_effect": {"type": "string"},
+            "reflection": reflection_schema,
         },
-        "required": ["plan", "hypothesis", "tool", "action", "arguments"],
+        "required": required_fields,
         "additionalProperties": False,
     }
 
@@ -264,6 +363,60 @@ def validate_decision_against_contract(
         allowed_indices = contract.get("allowed_indices") or []
         if allowed_indices and index not in allowed_indices:
             return f"arguments.index={index} is not one of the available indices {allowed_indices}"
+    if not isinstance(decision.get("qa_observation"), str):
+        return "qa_observation must be a string separate from the navigation hypothesis"
+    reflection = decision.get("reflection")
+    if not isinstance(reflection, dict):
+        return "reflection must be a JSON object"
+    reflection_status = str(reflection.get("status") or "")
+    allowed_reflection_statuses = {
+        "matched",
+        "unexpected",
+        "uncertain",
+        "not_applicable",
+    }
+    if reflection_status not in allowed_reflection_statuses:
+        return f"reflection.status must be one of {sorted(allowed_reflection_statuses)}"
+    has_previous = bool(contract.get("has_previous_transition"))
+    if has_previous and reflection_status == "not_applicable":
+        return "reflection.status cannot be not_applicable when a previous transition exists"
+    if not has_previous and reflection_status != "not_applicable":
+        return "the first planning step requires reflection.status=not_applicable"
+    if not isinstance(reflection.get("summary"), str):
+        return "reflection.summary must be a string"
+    evidence_refs = reflection.get("evidence_refs")
+    if not isinstance(evidence_refs, list) or any(
+        not isinstance(reference, str) for reference in evidence_refs
+    ):
+        return "reflection.evidence_refs must be an array of strings"
+    if has_previous and reflection_status != "not_applicable" and not evidence_refs:
+        return "reflection must cite evidence_refs from the observed transition"
+    if reflection_status in ("unexpected", "uncertain") and not str(
+        reflection.get("candidate_id") or ""
+    ).strip():
+        return "unexpected or uncertain reflection requires candidate_id"
+    if not isinstance(reflection.get("reproduction_attempted"), bool):
+        return "reflection.reproduction_attempted must be a boolean"
+    expected_required = (
+        tool not in ("source_search", "source_read")
+        and (
+            not has_previous
+            or call
+            in {
+                "game.direct_steer",
+                "game.steer",
+                "game.move",
+                "game.wait",
+                "game.select_upgrade",
+                "game.use_item",
+                "game.restart",
+                "game.start_game",
+                "game.return_to_menu",
+            }
+        )
+    )
+    if expected_required and not str(decision.get("expected_effect") or "").strip():
+        return f"{call} requires a non-empty expected_effect before execution"
     return None
 
 
@@ -482,9 +635,11 @@ During active gameplay use direct_steer. You alone must decide whether to contin
 Unity does NOT automatically avoid enemies, choose a chest, attract toward a chest, enforce the requested heading, or alter your direction. It only holds your chosen vector every frame and detects events. Use world.threat_entities, danger_score, escape_vector, and chest relative vectors to choose x/y yourself.
 When intent=collect_chest, aim x/y toward that target's relative_x/relative_y (normally the normalized target vector); do not claim collection while moving away from it. When danger is high, an evade vector should materially align with escape_vector. Choose full 2D movement, not only a cardinal axis.
 The horizon can end early on a chest entering close-control range, chest collection, low health, danger spikes, stuck detection, level-up, death, or another event. Re-plan from event_state and controller state.
+Act as a QA engineer while you play. Before every state-changing game action, state a concrete expected_effect. On the next planning step, compare observed_delta with that expectation in reflection. Use matched, unexpected, or uncertain and cite observation/event IDs from the transition. The first step has no prior transition and must use reflection.status=not_applicable.
+Keep navigation reasoning in hypothesis and QA findings in qa_observation. An unexpected result starts a hypothesis; mark reproduction_attempted only when you deliberately repeated a relevant setup/action. A candidate becomes confirmed only after its own reproduction path, never from hidden evaluator data.
 For direct_steer and wait, normally request a duration no greater than {self.plan_horizon_seconds:.3f} simulation seconds.
-Return one JSON object only with keys: plan, hypothesis, tool, action, arguments.
-Keep plan and hypothesis under 20 words each. tool must be game, source_search, or source_read. Player mode must always use game."""
+Return one JSON object only with keys: plan, hypothesis, qa_observation, tool, action, arguments, expected_effect, reflection.
+Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary concise. tool must be game, source_search, or source_read. Player mode must always use game."""
 
     def _planning_payload(
         self,
@@ -493,19 +648,38 @@ Keep plan and hypothesis under 20 words each. tool must be game, source_search, 
         tool_context: list[dict[str, Any]],
         source_steps_remaining: int,
     ) -> dict[str, Any]:
+        action_contract = build_action_contract(
+            observation, self.mode, self.charter, source_steps_remaining
+        )
+        action_contract["has_previous_transition"] = bool(tool_context)
+        previous_transition = tool_context[-1] if tool_context else None
         return {
             "step": step,
             "test_charter": self.charter.as_dict(),
             "observation": compact_observation(observation),
-            "action_contract": build_action_contract(
-                observation, self.mode, self.charter, source_steps_remaining
+            "action_contract": action_contract,
+            "previous_transition": previous_transition,
+            "observed_delta": (
+                previous_transition.get("observed_delta")
+                if isinstance(previous_transition, dict)
+                else None
             ),
-            "previous_transition": tool_context[-1] if tool_context else None,
         }
 
     def final_assessment(self, context: dict[str, Any]) -> dict[str, Any] | None:
-        system = """You are a senior game QA engineer. Based only on the supplied run summary and anomaly evidence, return a JSON object with keys executive_summary, bug_candidates, coverage_gaps. Each bug candidate must have title, severity, evidence, minimal_reproduction_steps, expected, actual, confidence. Do not call normal gameplay outcomes bugs and do not fabricate evidence."""
-        return self._request(system, json.dumps(context, ensure_ascii=False), max_tokens=1400)
+        system = """You are a senior game QA engineer. Report only the agent's confirmed hypotheses from its own reproduction attempts. Return a JSON object with keys executive_summary, bug_candidates, coverage_gaps. Do not infer bugs from evaluator data, hidden fault identities, rule-based anomaly output, or normal gameplay outcomes."""
+        agent_context = {
+            "mode": context.get("mode"),
+            "policy": context.get("policy"),
+            "test_charter": context.get("test_charter"),
+            "charter_compliance": context.get("charter_compliance"),
+            "metrics": context.get("metrics"),
+            "confirmed_hypotheses": context.get("confirmed_hypotheses") or [],
+            "fatal_error": context.get("fatal_error"),
+        }
+        return self._request(
+            system, json.dumps(agent_context, ensure_ascii=False), max_tokens=1400
+        )
 
     def _request(
         self,
@@ -599,4 +773,3 @@ Keep plan and hypothesis under 20 words each. tool must be game, source_search, 
         if not isinstance(parsed, dict):
             raise ValueError("LLM response must be a JSON object")
         return parsed
-

@@ -136,7 +136,7 @@ class RunRecorder:
     scenario_fingerprint: str = ""
     fault_id: str | None = None
     protocol_version: str = "1.4"
-    prompt_version: str = "qa-planning/v1"
+    prompt_version: str = "qa-planning/v2"
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     steps: list[dict[str, Any]] = field(default_factory=list)
     anomalies: list[dict[str, Any]] = field(default_factory=list)
@@ -181,6 +181,10 @@ class RunRecorder:
             "run_id": observation.get("run_id") or self.run_id,
             "observation_id": observation.get("observation_id") or "",
             "decision_id": decision.get("decision_id") or "",
+            "expected_effect": decision.get("expected_effect") or "",
+            "reflection": decision.get("reflection") or {},
+            "observed_delta": decision.get("observed_delta") or {},
+            "hypothesis_state": decision.get("hypothesis_state"),
             "elapsed_wall_seconds": round(elapsed, 3),
             "decision": decision,
             "observation": observation,

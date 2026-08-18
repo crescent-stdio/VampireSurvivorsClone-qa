@@ -13,6 +13,7 @@ from typing import Any, Sequence
 from .bridge_client import BridgeClient
 from .charter import DEFAULT_OBJECTIVE, TestCharter
 from .evaluation import evaluate_coverage, evaluate_oracle
+from .hypotheses import HypothesisTracker
 from .planners import (
     HeuristicPlanner,
     LLMPlanner,
@@ -20,6 +21,7 @@ from .planners import (
     build_action_contract,
     canonicalize_decision_arguments,
     compact_observation,
+    compute_observed_delta,
     observation_phase,
     validate_decision_against_contract,
 )
@@ -285,9 +287,20 @@ def normalize_decision(
     return {
         "plan": str(decision.get("plan", "")),
         "hypothesis": str(decision.get("hypothesis", "")),
+        "qa_observation": str(decision.get("qa_observation", "")),
         "tool": tool,
         "action": action,
         "arguments": arguments,
+        "expected_effect": str(decision.get("expected_effect", "")),
+        "reflection": decision.get("reflection")
+        if isinstance(decision.get("reflection"), dict)
+        else {
+            "status": "not_applicable",
+            "summary": "No agent reflection was supplied.",
+            "evidence_refs": [],
+            "candidate_id": "",
+            "reproduction_attempted": False,
+        },
         "constraint_enforcements": enforcements,
         "syntax_normalizations": list(decision.get("_syntax_normalizations") or []),
     }
@@ -353,6 +366,29 @@ def execute_source_tool(tools: SourceTools, decision: dict[str, Any]) -> dict[st
         int(arguments.get("line_start", 1)),
         int(arguments.get("line_count", 120)),
     )
+
+
+def execute_game_action(client: Any, decision: dict[str, Any]) -> dict[str, Any]:
+    action_observation = client.command(
+        decision["action"],
+        decision_id=decision["decision_id"],
+        **decision["arguments"],
+    )
+    if decision["action"] not in {"select_upgrade", "use_item", "restart"}:
+        return action_observation
+    decision["action_observation_id"] = str(
+        action_observation.get("observation_id") or ""
+    )
+    if not action_observation.get("ok"):
+        return action_observation
+    verification = client.command(
+        "observe",
+        decision_id=decision["decision_id"],
+    )
+    decision["verification_observation_id"] = str(
+        verification.get("observation_id") or ""
+    )
+    return verification
 
 
 def merge_api_usage(*items: dict[str, int]) -> dict[str, int]:
@@ -487,6 +523,7 @@ def run_session(args: argparse.Namespace) -> int:
 
     source_tools = SourceTools(args.project_root)
     tool_context: list[dict[str, Any]] = []
+    hypothesis_tracker = HypothesisTracker()
     source_steps = 0
     fatal_error: str | None = None
     last_observation: dict[str, Any] = {}
@@ -573,6 +610,7 @@ def run_session(args: argparse.Namespace) -> int:
                 contract = build_action_contract(
                     last_observation, args.mode, charter, source_steps_remaining
                 )
+                contract["has_previous_transition"] = bool(tool_context)
                 contract_error = validate_decision_against_contract(raw_decision, contract)
                 if contract_error:
                     record_contract_event(
@@ -638,6 +676,7 @@ def run_session(args: argparse.Namespace) -> int:
                             "LLM repeated an invalid action after one corrective retry: " + repair_error
                         )
                     raw_decision = repaired_decision
+            hypothesis_state = hypothesis_tracker.observe_decision(raw_decision)
             decision = normalize_decision(
                 raw_decision,
                 args.mode,
@@ -648,6 +687,8 @@ def run_session(args: argparse.Namespace) -> int:
                 not args.pause_during_planning,
             )
             decision = attach_decision_identity(decision, run_id, step)
+            if hypothesis_state is not None:
+                decision["hypothesis_state"] = hypothesis_state.as_dict()
             attach_navigation_evaluation_context(decision, last_observation)
             if not args.quiet:
                 arguments_text = json.dumps(decision["arguments"], ensure_ascii=False)
@@ -661,22 +702,42 @@ def run_session(args: argparse.Namespace) -> int:
                 else:
                     result = execute_source_tool(source_tools, decision)
                     source_steps += 1
-                tool_context.append({"decision": decision, "result": result})
+                tool_context.append(
+                    {
+                        "decision": decision,
+                        "result": result,
+                        "observed_delta": compute_observed_delta(
+                            last_observation, last_observation
+                        ),
+                    }
+                )
+                decision["observed_delta"] = tool_context[-1]["observed_delta"]
                 recorder.record(step, decision, last_observation, time.monotonic() - started, planning_usage)
                 continue
             if decision["tool"] != "game":
                 decision = attach_decision_identity(
-                    {"plan": "Recover from invalid tool.", "hypothesis": "", "tool": "game", "action": "observe", "arguments": {}},
+                    normalize_decision(
+                        {
+                            "plan": "Recover from invalid tool.",
+                            "hypothesis": "",
+                            "qa_observation": "The requested tool was invalid.",
+                            "tool": "game",
+                            "action": "observe",
+                            "arguments": {},
+                        },
+                        args.mode,
+                        charter,
+                    ),
                     run_id,
                     step,
                 )
 
             previous_observation = last_observation
-            last_observation = client.command(
-                decision["action"],
-                decision_id=decision["decision_id"],
-                **decision["arguments"],
+            last_observation = execute_game_action(client, decision)
+            observed_delta = compute_observed_delta(
+                previous_observation, last_observation
             )
+            decision["observed_delta"] = observed_delta
             if decision["action"] == "restart" and last_observation.get("ok"):
                 restarts_used += 1
             recorder.record(step, decision, last_observation, time.monotonic() - started, planning_usage)
@@ -721,6 +782,7 @@ def run_session(args: argparse.Namespace) -> int:
                     "menu": last_observation.get("menu"),
                     "event_state": event_state,
                     "controller": last_observation.get("controller"),
+                    "observed_delta": observed_delta,
                     "navigation": {
                         "danger_score": world.get("danger_score"),
                         "nearby_enemy_count": world.get("nearby_enemy_count"),
@@ -758,6 +820,7 @@ def run_session(args: argparse.Namespace) -> int:
         },
         "anomalies": recorder.anomalies,
         "last_observation": compact_observation(last_observation),
+        "confirmed_hypotheses": hypothesis_tracker.confirmed(),
         "fatal_error": fatal_error,
     }
     llm_assessment = None

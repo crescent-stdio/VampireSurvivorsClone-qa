@@ -19,6 +19,7 @@ from .evaluation import (
     evaluate_coverage,
     evaluate_oracle,
 )
+from .hypotheses import HypothesisTracker
 from .planners import (
     HeuristicPlanner,
     LLMPlanner,
@@ -26,11 +27,17 @@ from .planners import (
     build_decision_response_schema,
     canonicalize_decision_arguments,
     compact_observation,
+    compute_observed_delta,
     validate_decision_against_contract,
 )
 from .reporting import RunRecorder, aggregate_annotations, build_run_verdict
 from . import run as run_module
-from .run import attach_navigation_evaluation_context, normalize_decision, terminal_stop_reason
+from .run import (
+    attach_navigation_evaluation_context,
+    execute_game_action,
+    normalize_decision,
+    terminal_stop_reason,
+)
 from .scenarios import Scenario, ScenarioContractError, load_scenario
 from .source_tools import SourceTools
 
@@ -264,9 +271,18 @@ class LLMPlannerTests(unittest.TestCase):
         ))
         self.assertIsNone(validate_decision_against_contract(
             {
+                "qa_observation": "No anomaly observed yet.",
                 "tool": "game",
                 "action": "direct_steer",
                 "arguments": {"x": 0.7, "y": 0.7, "duration": 5},
+                "expected_effect": "The player position should change along the chosen vector.",
+                "reflection": {
+                    "status": "not_applicable",
+                    "summary": "No previous transition exists.",
+                    "evidence_refs": [],
+                    "candidate_id": "",
+                    "reproduction_attempted": False,
+                },
             },
             contract,
         ))
@@ -327,7 +343,20 @@ class LLMPlannerTests(unittest.TestCase):
         contract = build_action_contract(observation, "qa", TestCharter(), 6)
         self.assertEqual([0, 1, 2], contract["allowed_indices"])
         self.assertIsNone(validate_decision_against_contract(
-            {"tool": "game", "action": "select_upgrade", "arguments": {"index": 2}},
+            {
+                "qa_observation": "The upgrade dialog is blocking gameplay.",
+                "tool": "game",
+                "action": "select_upgrade",
+                "arguments": {"index": 2},
+                "expected_effect": "The selected ability should become owned or increase level.",
+                "reflection": {
+                    "status": "not_applicable",
+                    "summary": "No previous transition exists.",
+                    "evidence_refs": [],
+                    "candidate_id": "",
+                    "reproduction_attempted": False,
+                },
+            },
             contract,
         ))
         self.assertIsNotNone(validate_decision_against_contract(
@@ -338,6 +367,161 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIsNotNone(schema)
         index_schema = schema["properties"]["arguments"]["properties"]["index"]
         self.assertEqual([0, 1, 2], index_schema["enum"])
+
+    def test_direct_steer_contract_rejects_missing_expected_effect(self) -> None:
+        contract = {
+            "phase": "active_gameplay",
+            "allowed_calls": ["game.direct_steer"],
+            "required_arguments": {},
+            "has_previous_transition": True,
+        }
+        decision = {
+            "qa_observation": "The prior movement reached the expected area.",
+            "tool": "game",
+            "action": "direct_steer",
+            "arguments": {"x": 1.0, "y": 0.0, "duration": 2.0},
+            "reflection": {
+                "status": "matched",
+                "summary": "Position advanced east.",
+                "evidence_refs": ["obs-2"],
+                "candidate_id": "",
+                "reproduction_attempted": False,
+            },
+        }
+
+        error = validate_decision_against_contract(decision, contract)
+
+        self.assertIn("expected_effect", error or "")
+
+    def test_source_read_is_exempt_from_expected_effect_but_requires_reflection(self) -> None:
+        contract = {
+            "phase": "active_gameplay",
+            "allowed_calls": ["source_read"],
+            "required_arguments": {},
+            "has_previous_transition": True,
+        }
+        decision = {
+            "qa_observation": "A runtime error warrants source inspection.",
+            "tool": "source_read",
+            "action": "",
+            "arguments": {"path": "Assets/Scripts/Character/Character.cs"},
+            "reflection": {
+                "status": "unexpected",
+                "summary": "The prior action emitted an exception.",
+                "evidence_refs": ["obs-error"],
+                "candidate_id": "runtime-exception",
+                "reproduction_attempted": False,
+            },
+        }
+
+        self.assertIsNone(validate_decision_against_contract(decision, contract))
+
+    def test_extended_decision_schema_is_supported_by_strict_and_json_object_paths(self) -> None:
+        contract = {
+            "phase": "active_gameplay",
+            "allowed_calls": ["game.direct_steer"],
+            "allowed_indices": [],
+            "has_previous_transition": True,
+        }
+        schema = build_decision_response_schema(contract)
+        self.assertIsNotNone(schema)
+        self.assertIn("expected_effect", schema["required"])
+        self.assertIn("reflection", schema["required"])
+        strict = LLMPlanner(
+            "qa", "gpt-4o-mini", TestCharter(), 5.0, api_key="test-key"
+        )
+        compatible = LLMPlanner(
+            "qa",
+            "provider-model",
+            TestCharter(),
+            5.0,
+            api_url="https://provider.example/v1/chat/completions",
+            api_key="test-key",
+        )
+        self.assertEqual("json_schema", strict._response_format(schema)["type"])
+        self.assertEqual("json_object", compatible._response_format(schema)["type"])
+
+    def test_planning_payload_contains_deterministic_observed_delta(self) -> None:
+        planner = LLMPlanner("qa", "test-model", TestCharter(), 5.0, api_key="test-key")
+        previous = {
+            "observed_delta": {
+                "changes": [
+                    {"path": "player.health", "before": 100.0, "after": 75.0}
+                ]
+            }
+        }
+
+        payload = planner._planning_payload(
+            {"available_actions": ["observe"]}, 2, [previous], 0
+        )
+
+        self.assertEqual(previous["observed_delta"], payload["observed_delta"])
+        self.assertTrue(payload["action_contract"]["has_previous_transition"])
+
+    def test_observed_delta_reports_only_changed_tracked_values(self) -> None:
+        delta = compute_observed_delta(
+            {
+                "observation_id": "obs-1",
+                "player": {"health": 100.0, "level": 1},
+                "progress": {"coins_gained": 0},
+            },
+            {
+                "observation_id": "obs-2",
+                "player": {"health": 75.0, "level": 1},
+                "progress": {"coins_gained": 0},
+            },
+        )
+
+        self.assertEqual("obs-1", delta["before_observation_id"])
+        self.assertEqual("obs-2", delta["after_observation_id"])
+        self.assertEqual(
+            [{"path": "player.health", "before": 100.0, "after": 75.0}],
+            delta["changes"],
+        )
+
+    def test_final_assessment_uses_only_confirmed_agent_hypotheses(self) -> None:
+        planner = LLMPlanner("qa", "test-model", TestCharter(), 5.0, api_key="test-key")
+        with patch.object(planner, "_request", return_value={}) as request:
+            planner.final_assessment(
+                {
+                    "metrics": {"steps": 3},
+                    "confirmed_hypotheses": [{"candidate_id": "agent-found"}],
+                    "anomalies": [{"kind": "health_ratio_out_of_range"}],
+                    "fault_id": "health_ratio_out_of_range",
+                    "ground_truth": {"bug_id": "health_ratio_out_of_range"},
+                }
+            )
+
+        supplied = request.call_args.args[1]
+        self.assertIn("agent-found", supplied)
+        self.assertNotIn("health_ratio_out_of_range", supplied)
+        self.assertNotIn("ground_truth", supplied)
+
+    def test_instant_effect_action_is_followed_by_verification_observation(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, object]]] = []
+
+            def command(self, action: str, **parameters: object) -> dict[str, object]:
+                self.calls.append((action, parameters))
+                return {
+                    "ok": True,
+                    "observation_id": f"obs-{len(self.calls)}",
+                    "command_id": f"command-{len(self.calls)}",
+                }
+
+        client = FakeClient()
+        decision = {
+            "decision_id": "decision-1",
+            "action": "select_upgrade",
+            "arguments": {"index": 0},
+        }
+
+        observation = execute_game_action(client, decision)
+
+        self.assertEqual(["select_upgrade", "observe"], [call[0] for call in client.calls])
+        self.assertEqual("obs-1", decision["action_observation_id"])
+        self.assertEqual("obs-2", observation["observation_id"])
 
     def test_official_gpt4o_mini_uses_strict_structured_output(self) -> None:
         planner = LLMPlanner("qa", "gpt-4o-mini", TestCharter(), 5.0, api_key="test-key")
@@ -502,6 +686,10 @@ class ReportingTests(unittest.TestCase):
                 "tool": "game",
                 "action": "observe",
                 "arguments": {},
+                "expected_effect": "Refresh observable state.",
+                "reflection": {"status": "matched"},
+                "observed_delta": {"changes": []},
+                "hypothesis_state": {"status": "hypothesis"},
             },
             {
                 "run_id": "run-42",
@@ -519,6 +707,10 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual("run-42", entry["run_id"])
         self.assertEqual("run-42-obs-00000004", entry["observation_id"])
         self.assertEqual("run-42-decision-00000003", entry["decision_id"])
+        self.assertEqual("Refresh observable state.", entry["expected_effect"])
+        self.assertEqual("matched", entry["reflection"]["status"])
+        self.assertEqual([], entry["observed_delta"]["changes"])
+        self.assertEqual("hypothesis", entry["hypothesis_state"]["status"])
 
     def test_decision_identity_is_stable_for_a_run_step(self) -> None:
         decision = {"tool": "game", "action": "observe", "arguments": {}}
@@ -671,6 +863,58 @@ class SourceToolTests(unittest.TestCase):
         tools = SourceTools(root)
         result = tools.read("../outside.cs")
         self.assertFalse(result["ok"])
+
+    def test_fault_injection_sources_are_denied_for_search_and_read(self) -> None:
+        root = TEST_TEMP_ROOT / "denied-source"
+        fault_source = root / "Assets" / "Scripts" / "QA" / "QaFaultInjection.cs"
+        fault_source.parent.mkdir(parents=True, exist_ok=True)
+        fault_source.write_text("class QaFaultInjection {}", encoding="utf-8")
+        scenario_config = root / "config" / "qa-scenarios.json"
+        scenario_config.parent.mkdir(parents=True, exist_ok=True)
+        scenario_config.write_text("{}", encoding="utf-8")
+        tools = SourceTools(root)
+
+        self.assertFalse(tools.search("QaFaultInjection")["ok"])
+        self.assertFalse(tools.read("Assets/Scripts/QA/QaFaultInjection.cs")["ok"])
+        self.assertFalse(tools.read("config/qa-scenarios.json")["ok"])
+
+
+class HypothesisTrackerTests(unittest.TestCase):
+    @staticmethod
+    def candidate(**overrides: object) -> dict[str, object]:
+        candidate: dict[str, object] = {
+            "candidate_id": "candidate-1",
+            "statement": "Upgrade acknowledgement did not change ability state.",
+            "reflection_status": "unexpected",
+            "evidence_refs": ["obs-1"],
+            "reproduction_attempted": False,
+        }
+        candidate.update(overrides)
+        return candidate
+
+    def test_oracle_fields_cannot_confirm_an_agent_hypothesis(self) -> None:
+        tracker = HypothesisTracker()
+
+        state = tracker.observe(
+            self.candidate(oracle_verdict="fail", ground_truth="bug-1")
+        )
+
+        self.assertEqual("hypothesis", state.status)
+        self.assertEqual([], tracker.confirmed())
+
+    def test_agent_reproduction_path_can_confirm_a_hypothesis(self) -> None:
+        tracker = HypothesisTracker()
+        tracker.observe(self.candidate())
+        reproducing = tracker.observe(
+            self.candidate(reproduction_attempted=True, evidence_refs=["obs-2"])
+        )
+        confirmed = tracker.observe(
+            self.candidate(reproduction_attempted=True, evidence_refs=["obs-3"])
+        )
+
+        self.assertEqual("reproducing", reproducing.status)
+        self.assertEqual("confirmed", confirmed.status)
+        self.assertEqual("candidate-1", tracker.confirmed()[0]["candidate_id"])
 
 
 class BridgeProtocolTests(unittest.TestCase):
