@@ -28,7 +28,7 @@ from .planners import (
     compact_observation,
     validate_decision_against_contract,
 )
-from .reporting import RunRecorder
+from .reporting import RunRecorder, aggregate_annotations, build_run_verdict
 from . import run as run_module
 from .run import attach_navigation_evaluation_context, normalize_decision, terminal_stop_reason
 from .scenarios import Scenario, ScenarioContractError, load_scenario
@@ -395,6 +395,97 @@ class LLMPlannerTests(unittest.TestCase):
 
 
 class ReportingTests(unittest.TestCase):
+    @staticmethod
+    def annotation(reviewer_id: str, label: str) -> dict[str, object]:
+        return {
+            "reviewer_id": reviewer_id,
+            "candidate_id": "candidate-1",
+            "label": label,
+            "matched_bug_id": "bug-1" if label == "valid_bug" else None,
+            "reproducible": True,
+            "spec_violation": label == "valid_bug",
+            "system_caused": False,
+            "difficulty": "medium",
+            "evidence_refs": ["obs-1"],
+            "notes": "",
+        }
+
+    def test_infrastructure_error_cannot_report_oracle_pass(self) -> None:
+        with self.assertRaisesRegex(ValueError, "infrastructure_error"):
+            build_run_verdict(
+                execution_status="infrastructure_error",
+                coverage_status="reached",
+                oracle_verdict="pass",
+                agent_detection="not_evaluated",
+                evidence_refs=["obs-1"],
+            )
+
+    def test_single_reviewer_annotation_aggregation_is_provisional(self) -> None:
+        aggregate = aggregate_annotations([self.annotation("reviewer-1", "valid_bug")])
+
+        self.assertEqual("provisional", aggregate["status"])
+        self.assertEqual("valid_bug", aggregate["candidates"][0]["label"])
+
+    def test_three_reviewer_two_to_one_vote_uses_majority_label(self) -> None:
+        aggregate = aggregate_annotations(
+            [
+                self.annotation("reviewer-1", "valid_bug"),
+                self.annotation("reviewer-2", "valid_bug"),
+                self.annotation("reviewer-3", "non_bug"),
+            ]
+        )
+
+        candidate = aggregate["candidates"][0]
+        self.assertEqual("reviewed", aggregate["status"])
+        self.assertEqual("valid_bug", candidate["label"])
+        self.assertEqual("majority", candidate["agreement"])
+
+    def test_fault_identity_is_written_only_to_evaluator_manifest(self) -> None:
+        output = TEST_TEMP_ROOT / "separated-channels"
+        recorder = RunRecorder(
+            output,
+            "qa",
+            "heuristic",
+            9101,
+            run_id="run-private",
+            scenario_id="easy-health-ratio",
+            preset="smoke",
+            scenario_fingerprint="fingerprint-1",
+            fault_id="health_ratio_out_of_range",
+        )
+        recorder.record(
+            0,
+            {"decision_id": "decision-1", "tool": "game", "action": "observe"},
+            {
+                "run_id": "run-private",
+                "observation_id": "obs-1",
+                "player": {},
+                "progress": {},
+                "menu": {},
+                "world": {},
+                "event_state": {},
+            },
+            0.1,
+        )
+        verdict = build_run_verdict(
+            execution_status="completed",
+            coverage_status="reached",
+            oracle_verdict="fail",
+            agent_detection="miss",
+            evidence_refs=["obs-1"],
+        )
+
+        recorder.write_channel_artifacts(verdict, {"candidates": []})
+
+        steps = (output / "steps.jsonl").read_text(encoding="utf-8")
+        manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+        self.assertNotIn("health_ratio_out_of_range", steps)
+        self.assertNotIn("ground_truth", steps)
+        self.assertEqual("health_ratio_out_of_range", manifest["fault_id"])
+        self.assertTrue((output / "verdict.json").is_file())
+        self.assertTrue((output / "critic.json").is_file())
+        self.assertEqual("", (output / "annotations.jsonl").read_text(encoding="utf-8"))
+
     def test_step_records_correlation_identifiers(self) -> None:
         output = TEST_TEMP_ROOT / "correlated-report"
         recorder = RunRecorder(
@@ -675,6 +766,21 @@ class BridgeProtocolTests(unittest.TestCase):
 
 
 class ScenarioContractTests(unittest.TestCase):
+    def test_scenario_exit_code_uses_execution_axis_instead_of_legacy_smoke_checks(self) -> None:
+        scenario_args = type("Args", (), {"scenario_definition": object()})()
+        ad_hoc_args = type("Args", (), {"scenario_definition": None})()
+        legacy_report = {"result": "fail"}
+        completed = {"execution_status": "completed"}
+
+        self.assertEqual(
+            0,
+            run_module.session_exit_code(scenario_args, legacy_report, completed),
+        )
+        self.assertEqual(
+            1,
+            run_module.session_exit_code(ad_hoc_args, legacy_report, completed),
+        )
+
     def test_missing_scenario_identifier_is_rejected(self) -> None:
         with self.assertRaisesRegex(ScenarioContractError, "unknown scenario"):
             load_scenario("does-not-exist")

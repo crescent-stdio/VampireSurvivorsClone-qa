@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Literal
@@ -174,3 +175,7 @@ def canonical_scenario_json(scenario: Scenario) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def scenario_fingerprint(scenario: Scenario) -> str:
+    return hashlib.sha256(canonical_scenario_json(scenario).encode("utf-8")).hexdigest()

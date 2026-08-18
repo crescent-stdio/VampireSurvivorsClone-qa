@@ -2,12 +2,123 @@ from __future__ import annotations
 
 import json
 import math
+import platform
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict
 
 from .charter import MOVEMENT_VECTORS
+
+
+EXECUTION_STATUSES = {"completed", "infrastructure_error", "contract_error"}
+COVERAGE_STATUSES = {"reached", "not_reached"}
+ORACLE_VERDICTS = {"pass", "fail", "not_evaluated"}
+AGENT_DETECTIONS = {"match", "miss", "false_positive", "not_evaluated"}
+
+
+class Annotation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    reviewer_id: str
+    candidate_id: str
+    label: Literal["valid_bug", "non_bug", "duplicate", "uncertain"]
+    matched_bug_id: str | None
+    reproducible: bool
+    spec_violation: bool
+    system_caused: bool
+    difficulty: Literal["easy", "medium", "hard"]
+    evidence_refs: list[str]
+    notes: str
+
+
+def build_run_verdict(
+    *,
+    execution_status: str,
+    coverage_status: str,
+    oracle_verdict: str,
+    agent_detection: str,
+    evidence_refs: list[str],
+) -> dict[str, Any]:
+    if execution_status not in EXECUTION_STATUSES:
+        raise ValueError(f"unsupported execution_status: {execution_status}")
+    if coverage_status not in COVERAGE_STATUSES:
+        raise ValueError(f"unsupported coverage_status: {coverage_status}")
+    if oracle_verdict not in ORACLE_VERDICTS:
+        raise ValueError(f"unsupported oracle_verdict: {oracle_verdict}")
+    if agent_detection not in AGENT_DETECTIONS:
+        raise ValueError(f"unsupported agent_detection: {agent_detection}")
+    if execution_status == "infrastructure_error" and oracle_verdict == "pass":
+        raise ValueError("infrastructure_error execution cannot report oracle_verdict pass")
+    if coverage_status == "not_reached" and oracle_verdict != "not_evaluated":
+        raise ValueError("not_reached coverage requires oracle_verdict not_evaluated")
+    if execution_status == "completed" and not evidence_refs:
+        raise ValueError("completed verdict requires evidence_refs")
+    return {
+        "schema_version": "qa-run-verdict/v1",
+        "execution_status": execution_status,
+        "coverage_status": coverage_status,
+        "oracle_verdict": oracle_verdict,
+        "agent_detection": agent_detection,
+        "evidence_refs": list(dict.fromkeys(evidence_refs)),
+    }
+
+
+def aggregate_annotations(records: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[str, list[Annotation]] = defaultdict(list)
+    for record in records:
+        annotation = Annotation.model_validate(record)
+        grouped[annotation.candidate_id].append(annotation)
+
+    candidates: list[dict[str, Any]] = []
+    all_reviewed = bool(grouped)
+    for candidate_id, annotations in sorted(grouped.items()):
+        reviewer_ids = {annotation.reviewer_id for annotation in annotations}
+        if len(reviewer_ids) != len(annotations):
+            raise ValueError(f"duplicate reviewer annotation for candidate {candidate_id}")
+        counts = Counter(annotation.label for annotation in annotations)
+        label, votes = counts.most_common(1)[0]
+        tied = sum(1 for count in counts.values() if count == votes) > 1
+        if tied:
+            label = "uncertain"
+            agreement = "no_consensus"
+        elif votes == len(annotations):
+            agreement = "unanimous"
+        elif votes > len(annotations) / 2:
+            agreement = "majority"
+        else:
+            agreement = "no_consensus"
+        reviewed = len(reviewer_ids) >= 3
+        all_reviewed = all_reviewed and reviewed
+        candidates.append(
+            {
+                "candidate_id": candidate_id,
+                "label": label,
+                "agreement": agreement,
+                "reviewer_count": len(reviewer_ids),
+                "matched_bug_ids": sorted(
+                    {
+                        annotation.matched_bug_id
+                        for annotation in annotations
+                        if annotation.matched_bug_id
+                    }
+                ),
+                "evidence_refs": list(
+                    dict.fromkeys(
+                        reference
+                        for annotation in annotations
+                        for reference in annotation.evidence_refs
+                    )
+                ),
+            }
+        )
+    return {
+        "status": "reviewed" if all_reviewed else "provisional",
+        "candidates": candidates,
+    }
 
 
 @dataclass
@@ -20,6 +131,12 @@ class RunRecorder:
     charter: dict[str, Any] = field(default_factory=dict)
     model: str | None = None
     game_window_visible: bool = True
+    scenario_id: str = ""
+    preset: str = ""
+    scenario_fingerprint: str = ""
+    fault_id: str | None = None
+    protocol_version: str = "1.4"
+    prompt_version: str = "qa-planning/v1"
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     steps: list[dict[str, Any]] = field(default_factory=list)
     anomalies: list[dict[str, Any]] = field(default_factory=list)
@@ -45,6 +162,7 @@ class RunRecorder:
     api_usage_events: list[dict[str, Any]] = field(default_factory=list)
     navigation_evaluations: list[dict[str, Any]] = field(default_factory=list)
     continuous_control_horizons: int = 0
+    verdict_axes: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -79,6 +197,38 @@ class RunRecorder:
         if not usage:
             return
         self.api_usage_events.append({"phase": phase, "step": step, **usage})
+
+    def write_channel_artifacts(
+        self,
+        verdict: dict[str, Any],
+        critic: dict[str, Any],
+    ) -> None:
+        self.verdict_axes = verdict
+        manifest = {
+            "schema_version": "qa-run-manifest/v1",
+            "protocol_version": self.protocol_version,
+            "run_id": self.run_id,
+            "scenario_id": self.scenario_id,
+            "preset": self.preset,
+            "scenario_fingerprint": self.scenario_fingerprint,
+            "seed": self.seed,
+            "platform": platform.platform(),
+            "mode": self.mode,
+            "policy": self.policy,
+            "model": self.model,
+            "prompt_version": self.prompt_version,
+            "fault_id": self.fault_id,
+        }
+        for name, payload in (
+            ("manifest.json", manifest),
+            ("verdict.json", verdict),
+            ("critic.json", critic),
+        ):
+            (self.output_dir / name).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        (self.output_dir / "annotations.jsonl").touch(exist_ok=True)
 
     def api_usage_totals(self) -> dict[str, Any]:
         keys = (
@@ -330,6 +480,7 @@ class RunRecorder:
             "seed": self.seed,
             "result": "pass" if passed else "fail",
             "fatal_error": fatal_error,
+            "verdict_axes": self.verdict_axes,
             "metrics": {
                 "steps": len(self.steps),
                 "total_simulation_time": round(self.total_simulation_time, 3),

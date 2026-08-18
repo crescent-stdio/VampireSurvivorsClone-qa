@@ -12,6 +12,7 @@ from typing import Any, Sequence
 
 from .bridge_client import BridgeClient
 from .charter import DEFAULT_OBJECTIVE, TestCharter
+from .evaluation import evaluate_coverage, evaluate_oracle
 from .planners import (
     HeuristicPlanner,
     LLMPlanner,
@@ -22,8 +23,8 @@ from .planners import (
     observation_phase,
     validate_decision_against_contract,
 )
-from .reporting import RunRecorder
-from .scenarios import ScenarioContractError, load_scenario
+from .reporting import RunRecorder, build_run_verdict
+from .scenarios import ScenarioContractError, load_scenario, scenario_fingerprint
 from .source_tools import SourceTools
 
 
@@ -391,6 +392,62 @@ def record_contract_event(output_dir: Path, event: dict[str, Any]) -> None:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def session_evidence_refs(
+    recorder: RunRecorder, last_observation: dict[str, Any]
+) -> list[str]:
+    references: list[str] = []
+    for transition in recorder.steps:
+        observation = transition.get("observation") or {}
+        references.append(str(observation.get("observation_id") or ""))
+        event = observation.get("event_state") or {}
+        references.append(str(event.get("event_id") or ""))
+    references.append(str(last_observation.get("observation_id") or ""))
+    return list(dict.fromkeys(reference for reference in references if reference))
+
+
+def build_session_verdict(
+    args: argparse.Namespace,
+    recorder: RunRecorder,
+    fatal_error: str | None,
+    last_observation: dict[str, Any],
+) -> dict[str, Any]:
+    if fatal_error is None:
+        execution_status = "completed"
+    elif fatal_error.startswith(("BridgeContractError:", "ScenarioContractError:")):
+        execution_status = "contract_error"
+    else:
+        execution_status = "infrastructure_error"
+
+    scenario = getattr(args, "scenario_definition", None)
+    if execution_status == "completed" and scenario is not None:
+        coverage = evaluate_coverage(scenario, recorder.steps)
+        oracle = evaluate_oracle(scenario, recorder.steps)
+        evidence_refs = coverage.evidence_refs + oracle.evidence_refs
+        coverage_status = coverage.status
+        oracle_verdict = oracle.verdict
+    else:
+        evidence_refs = session_evidence_refs(recorder, last_observation)
+        coverage_status = "not_reached"
+        oracle_verdict = "not_evaluated"
+    return build_run_verdict(
+        execution_status=execution_status,
+        coverage_status=coverage_status,
+        oracle_verdict=oracle_verdict,
+        agent_detection="not_evaluated",
+        evidence_refs=evidence_refs,
+    )
+
+
+def session_exit_code(
+    args: argparse.Namespace,
+    report: dict[str, Any],
+    verdict: dict[str, Any],
+) -> int:
+    if getattr(args, "scenario_definition", None) is not None:
+        return 0 if verdict.get("execution_status") == "completed" else 1
+    return 0 if report.get("result") == "pass" else 1
+
+
 def run_session(args: argparse.Namespace) -> int:
     output_dir = args.output.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -401,6 +458,7 @@ def run_session(args: argparse.Namespace) -> int:
     except Exception as error:
         print(json.dumps({"result": "fail", "error": f"Invalid test charter: {error}"}, ensure_ascii=False))
         return 2
+    scenario = getattr(args, "scenario_definition", None)
     recorder = RunRecorder(
         output_dir,
         args.mode,
@@ -410,6 +468,10 @@ def run_session(args: argparse.Namespace) -> int:
         charter=charter.as_dict(),
         model=args.model if args.policy == "llm" else None,
         game_window_visible=not args.headless,
+        scenario_id=scenario_id,
+        preset=getattr(args, "preset", ""),
+        scenario_fingerprint=scenario_fingerprint(scenario) if scenario is not None else "",
+        fault_id=scenario.ground_truth.fault_id if scenario is not None else None,
     )
     planner: Planner
     try:
@@ -705,12 +767,41 @@ def run_session(args: argparse.Namespace) -> int:
             recorder.add_api_usage("final_assessment", planner.take_last_usage())
         except Exception as error:
             recorder.anomalies.append({"step": len(recorder.steps), "kind": "llm_report_failed", "severity": "medium", "evidence": str(error)})
+    try:
+        verdict = build_session_verdict(args, recorder, fatal_error, last_observation)
+    except Exception as error:
+        fatal_error = fatal_error or f"EvaluationContractError: {error}"
+        verdict = build_run_verdict(
+            execution_status="contract_error",
+            coverage_status="not_reached",
+            oracle_verdict="not_evaluated",
+            agent_detection="not_evaluated",
+            evidence_refs=session_evidence_refs(recorder, last_observation),
+        )
+    recorder.verdict_axes = verdict
     report = recorder.build_report(llm_assessment, fatal_error)
+    recorder.write_channel_artifacts(
+        verdict,
+        {
+            "schema_version": "qa-critic/v1",
+            "llm_assessment": llm_assessment,
+            "rule_based_bug_candidates": report["rule_based_bug_candidates"],
+        },
+    )
     recorder.write_report(report)
     if not args.quiet:
         print(f"[report] {output_dir / 'report.md'}", flush=True)
-    print(json.dumps({"result": report["result"], "report": str(output_dir / "report.json")}, ensure_ascii=False))
-    return 0 if report["result"] == "pass" else 1
+    print(
+        json.dumps(
+            {
+                "result": report["result"],
+                "execution_status": verdict["execution_status"],
+                "report": str(output_dir / "report.json"),
+            },
+            ensure_ascii=False,
+        )
+    )
+    return session_exit_code(args, report, verdict)
 
 
 def main() -> None:
