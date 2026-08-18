@@ -8,6 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from qa_agent_runtime.player import PlayerError, resolve_executable, validate_player
+
 
 class BridgeError(RuntimeError):
     pass
@@ -51,8 +53,10 @@ class BridgeClient:
         return self.bridge_dir / "ready.json"
 
     def launch(self) -> dict[str, Any]:
-        if not self.game_exe.is_file():
-            raise BridgeError(f"Game executable does not exist: {self.game_exe}")
+        try:
+            self.game_exe = resolve_executable(validate_player(self.game_exe))
+        except PlayerError as error:
+            raise BridgeError(str(error)) from error
         self.bridge_dir.mkdir(parents=True, exist_ok=True)
         self.response_directory.mkdir(parents=True, exist_ok=True)
         self._stdout = (self.session_dir / "game-console.log").open("wb")
@@ -144,4 +148,3 @@ class BridgeClient:
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
-

@@ -11,14 +11,24 @@ namespace Vampire.Editor.QA
     {
         private const string MainMenuScene = "Assets/Scenes/Game/Main Menu.unity";
         private const string LevelScene = "Assets/Scenes/Game/Level 1.unity";
+        private const string DefaultMacPlayer = "QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app";
         private const string DefaultWindowsPlayer = "QAArtifacts/bridge-player/windows/VampireSurvivorsClone.exe";
+
+        public static void BuildMacPlayerForBatchMode()
+        {
+            BuildPlayer(BuildTarget.StandaloneOSX, DefaultMacPlayer);
+        }
 
         public static void BuildWindowsPlayerForBatchMode()
         {
-            var target = BuildTarget.StandaloneWindows64;
+            BuildPlayer(BuildTarget.StandaloneWindows64, DefaultWindowsPlayer);
+        }
+
+        private static void BuildPlayer(BuildTarget target, string defaultPlayer)
+        {
             var group = BuildPipeline.GetBuildTargetGroup(target);
             if (!BuildPipeline.IsBuildTargetSupported(group, target))
-                throw new InvalidOperationException("Unity is missing Windows standalone build support.");
+                throw new InvalidOperationException("Unity is missing standalone build support for " + target + ".");
 
             if (EditorUserBuildSettings.activeBuildTarget != target &&
                 !EditorUserBuildSettings.SwitchActiveBuildTarget(group, target))
@@ -35,7 +45,7 @@ namespace Vampire.Editor.QA
 
             var buildPath = Environment.GetEnvironmentVariable("QA_BRIDGE_BUILD_PATH");
             if (string.IsNullOrWhiteSpace(buildPath))
-                buildPath = DefaultWindowsPlayer;
+                buildPath = defaultPlayer;
             buildPath = Path.GetFullPath(buildPath);
             Directory.CreateDirectory(Path.GetDirectoryName(buildPath));
 

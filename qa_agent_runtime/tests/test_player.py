@@ -36,6 +36,42 @@ def test_a_macos_bundle_is_accepted_as_a_directory(tmp_path: Path) -> None:
     assert player.validate_player(bundle) == bundle
 
 
+def test_resolve_executable_reads_bundle_executable(tmp_path: Path) -> None:
+    bundle = tmp_path / "VampireSurvivorsClone.app"
+    executable_directory = bundle / "Contents" / "MacOS"
+    executable_directory.mkdir(parents=True)
+    (bundle / "Contents" / "Info.plist").write_text(
+        '<?xml version="1.0"?><plist version="1.0"><dict>'
+        "<key>CFBundleExecutable</key><string>VampireSurvivorsClone</string>"
+        "</dict></plist>",
+        encoding="utf-8",
+    )
+    executable = executable_directory / "VampireSurvivorsClone"
+    executable.touch()
+
+    assert player.resolve_executable(bundle) == executable
+
+
+def test_resolve_executable_passes_through_plain_file(tmp_path: Path) -> None:
+    executable = tmp_path / "VampireSurvivorsClone.exe"
+    executable.touch()
+
+    assert player.resolve_executable(executable) == executable
+
+
+def test_resolve_executable_reports_missing_bundle_key(tmp_path: Path) -> None:
+    bundle = tmp_path / "Broken.app"
+    contents = bundle / "Contents"
+    contents.mkdir(parents=True)
+    (contents / "Info.plist").write_text(
+        '<?xml version="1.0"?><plist version="1.0"><dict></dict></plist>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(player.PlayerError, match="CFBundleExecutable"):
+        player.resolve_executable(bundle)
+
+
 @pytest.mark.parametrize("name", ["QaGameplay.x86_64", "QaGameplay.exe"])
 def test_other_platforms_are_accepted_as_files(tmp_path: Path, name: str) -> None:
     executable = tmp_path / name

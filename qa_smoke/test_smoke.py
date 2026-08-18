@@ -27,6 +27,41 @@ TEST_TEMP_ROOT = Path(__file__).resolve().parent / ".test_tmp"
 TEST_TEMP_ROOT.mkdir(exist_ok=True)
 
 
+class BridgeClientTests(unittest.TestCase):
+    def test_macos_bundle_is_resolved_before_launch(self) -> None:
+        bundle = TEST_TEMP_ROOT / "bridge-player.app"
+        executable_directory = bundle / "Contents" / "MacOS"
+        executable_directory.mkdir(parents=True, exist_ok=True)
+        (bundle / "Contents" / "Info.plist").write_text(
+            '<?xml version="1.0"?><plist version="1.0"><dict>'
+            "<key>CFBundleExecutable</key><string>BridgePlayer</string>"
+            "</dict></plist>",
+            encoding="utf-8",
+        )
+        executable = executable_directory / "BridgePlayer"
+        executable.touch()
+
+        session = TEST_TEMP_ROOT / "session"
+        client = BridgeClient(bundle, session, "qa", 42, 1.0)
+        client.bridge_dir.mkdir(parents=True, exist_ok=True)
+        client.ready_path.write_text('{"ready":true}', encoding="utf-8")
+
+        class AliveProcess:
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        with patch("qa_smoke.bridge_client.subprocess.Popen", return_value=AliveProcess()) as popen:
+            try:
+                client.launch()
+            finally:
+                if client._stdout is not None:
+                    client._stdout.close()
+                    client._stdout = None
+
+        self.assertEqual(str(executable.resolve()), popen.call_args.args[0][0])
+
+
 class HeuristicPlannerTests(unittest.TestCase):
     def test_enters_game_from_menu(self) -> None:
         planner = HeuristicPlanner()

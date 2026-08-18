@@ -5,6 +5,7 @@ set -eu
 
 QA_TEST_ROOT="$QA_PROJECT_ROOT/QAArtifacts/task-6-script-contract"
 QA_TEST_BIN="$QA_TEST_ROOT/bin"
+export QA_TEST_ROOT
 mkdir -p "$QA_TEST_BIN"
 
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "2020.3.0f1"' >"$QA_TEST_BIN/wrong-unity"
@@ -45,6 +46,21 @@ chmod +x "$QA_TEST_BIN/uv-run"
 export QA_PROJECT_ROOT
 UV_BIN="$QA_TEST_BIN/uv-run" "$QA_PROJECT_ROOT/scripts/qa/run-llm-agent.sh" --help >"$QA_TEST_ROOT/llm-help.out" 2>&1 || qa_fail "LLM runner help must work without an API key or player build"
 grep -F -- "--seed" "$QA_TEST_ROOT/llm-help.out" >/dev/null || qa_fail "LLM runner help must document the required seed"
+
+UV_BIN="$QA_TEST_BIN/uv-run" "$QA_PROJECT_ROOT/scripts/qa/run-bridge-smoke.sh" --help >"$QA_TEST_ROOT/bridge-help.out" 2>&1 || qa_fail "Bridge runner help must work without an API key or player build"
+grep -F -- "--game-exe" "$QA_TEST_ROOT/bridge-help.out" >/dev/null || qa_fail "Bridge runner help must expose the player override"
+
+printf '%s\n' \
+  '#!/bin/sh' \
+  'if [ "${1:-}" = -version ]; then printf "%s\n" "6000.0.80f1"; exit 0; fi' \
+  'printf "%s\n" "$@" >"$QA_TEST_ROOT/bridge-build-arguments"' \
+  'mkdir -p "$QA_BRIDGE_BUILD_PATH"' >"$QA_TEST_BIN/bridge-unity"
+chmod +x "$QA_TEST_BIN/bridge-unity"
+QA_BRIDGE_BUILD_PATH="$QA_TEST_ROOT/VampireSurvivorsClone.app" \
+  UNITY_EDITOR="$QA_TEST_BIN/bridge-unity" \
+  "$QA_PROJECT_ROOT/scripts/qa/build-bridge-player.sh"
+grep -Fx 'Vampire.Editor.QA.QaBridgeBuild.BuildMacPlayerForBatchMode' "$QA_TEST_ROOT/bridge-build-arguments" >/dev/null || qa_fail "macOS Bridge build must call its own entry point"
+[ -d "$QA_TEST_ROOT/VampireSurvivorsClone.app" ] || qa_fail "macOS Bridge build must require an app bundle result"
 
 grep -F -- "--burst-disable-compilation" "$QA_PROJECT_ROOT/scripts/qa/build-player.sh" >/dev/null || qa_fail "player build must use the Burst 1.6.6 macOS compatibility option"
 

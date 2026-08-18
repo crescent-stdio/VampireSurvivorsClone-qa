@@ -9,6 +9,7 @@ validation and the default path.
 from __future__ import annotations
 
 from pathlib import Path
+import plistlib
 import sys
 
 PLAYER_STEM = "QaGameplay"
@@ -58,6 +59,28 @@ def validate_player(player: Path) -> Path:
     if not player.is_file():
         raise PlayerError(f"Unity player executable does not exist: {player}")
     return player
+
+
+def resolve_executable(player: Path) -> Path:
+    """Return the executable launched directly by the Bridge client."""
+    if player.suffix != MACOS_SUFFIX:
+        return player
+
+    plist_path = player / "Contents" / "Info.plist"
+    try:
+        with plist_path.open("rb") as plist_file:
+            plist = plistlib.load(plist_file)
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise PlayerError(f"Unable to read macOS player Info.plist: {plist_path}") from error
+
+    executable_name = plist.get("CFBundleExecutable")
+    if not isinstance(executable_name, str) or not executable_name:
+        raise PlayerError(f"macOS player Info.plist is missing CFBundleExecutable: {plist_path}")
+
+    executable = player / "Contents" / "MacOS" / executable_name
+    if not executable.is_file():
+        raise PlayerError(f"Unity player executable does not exist: {executable}")
+    return executable
 
 
 def artifact_root(player: Path) -> Path:
