@@ -12,6 +12,13 @@ from . import bridge_client as bridge_client_module
 from . import benchmark as benchmark_module
 from .bridge_client import BridgeClient
 from .charter import TestCharter
+from .evaluation import (
+    CoverageResult,
+    EvaluationContractError,
+    OracleResult,
+    evaluate_coverage,
+    evaluate_oracle,
+)
 from .planners import (
     HeuristicPlanner,
     LLMPlanner,
@@ -796,6 +803,78 @@ class ScenarioContractTests(unittest.TestCase):
         self.assertEqual("easy-health-ratio", first_args.scenario)
         self.assertEqual("smoke", first_args.preset)
         self.assertTrue(first_args.headless)
+
+
+class EvaluationTests(unittest.TestCase):
+    @staticmethod
+    def transition(
+        observation_id: str,
+        *,
+        action: str = "observe",
+        player: dict[str, object] | None = None,
+        event_state: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "decision": {"action": action},
+            "observation": {
+                "observation_id": observation_id,
+                "player": player or {},
+                "world": {},
+                "progress": {},
+                "inventory": {},
+                "event_state": event_state or {},
+            },
+        }
+
+    def test_evaluation_rejects_an_unregistered_identifier(self) -> None:
+        scenario = load_scenario("easy-health-ratio").model_copy(
+            update={"oracle": "unregistered-oracle"}
+        )
+
+        with self.assertRaisesRegex(EvaluationContractError, "unregistered oracle"):
+            evaluate_oracle(
+                scenario,
+                [self.transition("obs-1", player={"present": True})],
+            )
+
+    def test_not_reached_coverage_forces_not_evaluated_oracle(self) -> None:
+        scenario = load_scenario("medium-upgrade-effect")
+        transitions = [self.transition("obs-1", player={"present": True})]
+
+        coverage = evaluate_coverage(scenario, transitions)
+        oracle = evaluate_oracle(scenario, transitions)
+
+        self.assertEqual("not_reached", coverage.status)
+        self.assertEqual("not_evaluated", oracle.verdict)
+        self.assertEqual(["obs-1"], oracle.evidence_refs)
+
+    def test_evaluation_evidence_references_resolve_to_transition_ids(self) -> None:
+        scenario = load_scenario("easy-health-ratio")
+        transitions = [
+            self.transition(
+                "obs-health",
+                player={
+                    "present": True,
+                    "health": 50.0,
+                    "max_health": 100.0,
+                    "health_ratio": 0.5,
+                },
+            )
+        ]
+
+        coverage = evaluate_coverage(scenario, transitions)
+        oracle = evaluate_oracle(scenario, transitions)
+
+        self.assertEqual("reached", coverage.status)
+        self.assertEqual("pass", oracle.verdict)
+        self.assertEqual(["obs-health"], coverage.evidence_refs)
+        self.assertEqual(["obs-health"], oracle.evidence_refs)
+
+    def test_verdict_models_reject_missing_evidence(self) -> None:
+        with self.assertRaisesRegex(Exception, "evidence_refs"):
+            CoverageResult(status="reached", evidence_refs=[])
+        with self.assertRaisesRegex(Exception, "evidence_refs"):
+            OracleResult(verdict="pass", evidence_refs=[])
 
 
 if __name__ == "__main__":
