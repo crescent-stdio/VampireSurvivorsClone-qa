@@ -777,9 +777,13 @@ def run_session(args: argparse.Namespace) -> int:
                 {
                     "game_action": decision,
                     "result": last_observation.get("result"),
+                    "observation_id": last_observation.get("observation_id"),
+                    "command_id": last_observation.get("command_id"),
                     "scene": last_observation.get("scene"),
+                    "player": last_observation.get("player"),
                     "progress": last_observation.get("progress"),
                     "menu": last_observation.get("menu"),
+                    "inventory": last_observation.get("inventory"),
                     "event_state": event_state,
                     "controller": last_observation.get("controller"),
                     "observed_delta": observed_delta,
@@ -791,7 +795,6 @@ def run_session(args: argparse.Namespace) -> int:
                     },
                 }
             )
-            tool_context[:] = tool_context[-6:]
             if recorder.total_simulation_time >= args.max_simulation_seconds:
                 break
     except Exception as error:

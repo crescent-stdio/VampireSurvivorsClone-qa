@@ -10,6 +10,7 @@ import time
 from typing import Any, Protocol
 
 from .charter import TestCharter
+from .memory import SessionMemory
 
 
 TRACKED_DELTA_PATHS = (
@@ -648,17 +649,21 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
         tool_context: list[dict[str, Any]],
         source_steps_remaining: int,
     ) -> dict[str, Any]:
+        memory = SessionMemory.from_transitions(tool_context)
+        recent_transitions = memory.recent_transitions()
         action_contract = build_action_contract(
             observation, self.mode, self.charter, source_steps_remaining
         )
-        action_contract["has_previous_transition"] = bool(tool_context)
-        previous_transition = tool_context[-1] if tool_context else None
+        action_contract["has_previous_transition"] = bool(recent_transitions)
+        previous_transition = recent_transitions[-1] if recent_transitions else None
         return {
             "step": step,
             "test_charter": self.charter.as_dict(),
             "observation": compact_observation(observation),
             "action_contract": action_contract,
             "previous_transition": previous_transition,
+            "recent_transitions": recent_transitions,
+            "session_memory": memory.summary(),
             "observed_delta": (
                 previous_transition.get("observed_delta")
                 if isinstance(previous_transition, dict)

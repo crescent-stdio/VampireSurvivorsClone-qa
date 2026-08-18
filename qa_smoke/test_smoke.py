@@ -20,6 +20,7 @@ from .evaluation import (
     evaluate_oracle,
 )
 from .hypotheses import HypothesisTracker
+from .memory import SessionMemory
 from .planners import (
     HeuristicPlanner,
     LLMPlanner,
@@ -915,6 +916,128 @@ class HypothesisTrackerTests(unittest.TestCase):
         self.assertEqual("reproducing", reproducing.status)
         self.assertEqual("confirmed", confirmed.status)
         self.assertEqual("candidate-1", tracker.confirmed()[0]["candidate_id"])
+
+
+class SessionMemoryTests(unittest.TestCase):
+    @staticmethod
+    def transition(step: int, **overrides: object) -> dict[str, object]:
+        transition: dict[str, object] = {
+            "step": step,
+            "decision": {
+                "decision_id": f"decision-{step}",
+                "action": "direct_steer",
+                "arguments": {},
+            },
+            "progress": {"level_time": float(step), "level": 1},
+            "player": {"position": {"x": float(step), "y": 0.0}},
+            "event_state": {},
+        }
+        transition.update(overrides)
+        return transition
+
+    def test_unresolved_hypothesis_survives_from_step_two_to_step_forty(self) -> None:
+        memory = SessionMemory(recent_limit=6, token_budget=500)
+        memory.add(
+            self.transition(
+                2,
+                decision={
+                    "decision_id": "decision-2",
+                    "action": "observe",
+                    "hypothesis_state": {
+                        "candidate_id": "candidate-early",
+                        "statement": "Health changed without damage evidence.",
+                        "status": "hypothesis",
+                        "evidence_refs": ["obs-2"],
+                    },
+                },
+            )
+        )
+        for step in range(3, 41):
+            memory.add(self.transition(step))
+
+        summary = memory.summary()
+
+        self.assertIn(
+            "candidate-early",
+            [item["candidate_id"] for item in summary["unresolved_hypotheses"]],
+        )
+        self.assertEqual(6, len(memory.recent_transitions()))
+
+    def test_action_event_causality_survives_compression(self) -> None:
+        memory = SessionMemory(recent_limit=2, token_budget=500)
+        memory.add(
+            self.transition(
+                1,
+                decision={
+                    "decision_id": "decision-1",
+                    "action": "direct_steer",
+                    "arguments": {},
+                },
+                event_state={
+                    "event_id": "event-1",
+                    "caused_by_command_id": "command-1",
+                    "type": "chest_collected",
+                },
+                command_id="command-1",
+            )
+        )
+        memory.add(self.transition(2))
+        memory.add(self.transition(3))
+
+        links = memory.summary()["action_event_links"]
+
+        self.assertEqual("chest_collected", links[0]["event_type"])
+        self.assertEqual("direct_steer", links[0]["action"])
+        self.assertEqual("event-1", links[0]["event_id"])
+
+    def test_compressed_memory_stays_below_fixed_token_budget(self) -> None:
+        memory = SessionMemory(recent_limit=6, token_budget=220)
+        for step in range(100):
+            memory.add(
+                self.transition(
+                    step,
+                    event_state={
+                        "type": "danger_spike",
+                        "detail": "x" * 1000,
+                        "event_id": f"event-{step}",
+                    },
+                )
+            )
+
+        self.assertLessEqual(memory.estimated_summary_tokens(), 220)
+
+    def test_evaluator_channel_fields_are_removed_from_memory(self) -> None:
+        memory = SessionMemory(recent_limit=6, token_budget=500)
+        memory.add(
+            self.transition(
+                1,
+                fault_id="health_ratio_out_of_range",
+                ground_truth={"bug_id": "hidden-bug"},
+                oracle_verdict="fail",
+                evaluator={"coverage_status": "reached"},
+            )
+        )
+
+        payload = json.dumps(
+            {
+                "recent": memory.recent_transitions(),
+                "summary": memory.summary(),
+            }
+        )
+        self.assertNotIn("health_ratio_out_of_range", payload)
+        self.assertNotIn("hidden-bug", payload)
+        self.assertNotIn("oracle_verdict", payload)
+
+    def test_planning_payload_contains_recent_transitions_and_session_memory(self) -> None:
+        planner = LLMPlanner("qa", "test-model", TestCharter(), 5.0, api_key="test-key")
+        transitions = [self.transition(step) for step in range(10)]
+
+        payload = planner._planning_payload(
+            {"available_actions": ["observe"]}, 10, transitions, 0
+        )
+
+        self.assertEqual(6, len(payload["recent_transitions"]))
+        self.assertIn("event_counts", payload["session_memory"])
 
 
 class BridgeProtocolTests(unittest.TestCase):
