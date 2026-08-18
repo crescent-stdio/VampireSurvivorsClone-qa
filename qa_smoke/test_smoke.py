@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import unittest
@@ -8,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from . import bridge_client as bridge_client_module
+from . import benchmark as benchmark_module
 from .bridge_client import BridgeClient
 from .charter import TestCharter
 from .planners import (
@@ -22,6 +24,7 @@ from .planners import (
 from .reporting import RunRecorder
 from . import run as run_module
 from .run import attach_navigation_evaluation_context, normalize_decision, terminal_stop_reason
+from .scenarios import Scenario, ScenarioContractError, load_scenario
 from .source_tools import SourceTools
 
 
@@ -662,6 +665,137 @@ class BridgeProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(bridge_client_module.BridgeContractError, "orphan"):
             client.command("observe", timeout=2.0)
         thread.join(timeout=2.0)
+
+
+class ScenarioContractTests(unittest.TestCase):
+    def test_missing_scenario_identifier_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ScenarioContractError, "unknown scenario"):
+            load_scenario("does-not-exist")
+
+    def test_unknown_scenario_key_is_rejected(self) -> None:
+        payload = {
+            "id": "invalid-extra-key",
+            "difficulty": "easy",
+            "preset": "smoke",
+            "charter": {"objective": "Exercise observation validation."},
+            "seed_set": [9101, 9102, 9103],
+            "limits": {"max_simulation_seconds": 60.0, "max_steps": 20},
+            "coverage_target": "observe_player_state",
+            "oracle": "health_ratio_consistency",
+            "ground_truth": {
+                "bug_id": "health_ratio_out_of_range",
+                "fault_id": None,
+                "expected_behavior": "Reported health values remain internally consistent.",
+                "reproduction_steps": ["Observe player health."],
+                "review_status": "pending",
+            },
+            "unexpected": True,
+        }
+
+        with self.assertRaisesRegex(Exception, "Extra inputs are not permitted"):
+            Scenario.model_validate(payload)
+
+    def test_unregistered_oracle_identifier_is_rejected(self) -> None:
+        payload = {
+            "id": "invalid-oracle",
+            "difficulty": "easy",
+            "preset": "smoke",
+            "charter": {"objective": "Exercise oracle validation."},
+            "seed_set": [9101, 9102, 9103],
+            "limits": {"max_simulation_seconds": 60.0, "max_steps": 20},
+            "coverage_target": "observe_player_state",
+            "oracle": "arbitrary_python_expression",
+            "ground_truth": {
+                "bug_id": None,
+                "fault_id": None,
+                "expected_behavior": "The run remains valid.",
+                "reproduction_steps": ["Observe gameplay."],
+                "review_status": "pending",
+            },
+        }
+
+        with self.assertRaisesRegex(Exception, "unregistered oracle"):
+            Scenario.model_validate(payload)
+
+    def test_scenario_rejects_charter_override(self) -> None:
+        with self.assertRaisesRegex(ScenarioContractError, "--objective"):
+            run_module.parse_args(
+                [
+                    "--game-exe", "player.app",
+                    "--output", "artifacts",
+                    "--scenario", "easy-health-ratio",
+                    "--objective", "Override the benchmark contract",
+                ]
+            )
+
+    def test_scenario_allows_seed_from_owned_seed_set(self) -> None:
+        args = run_module.parse_args(
+            [
+                "--game-exe", "player.app",
+                "--output", "artifacts",
+                "--scenario", "easy-health-ratio",
+                "--seed", "9102",
+            ]
+        )
+
+        self.assertEqual(9102, args.seed)
+        self.assertEqual("easy-health-ratio", args.scenario_definition.id)
+        self.assertEqual("Exercise single-observation health consistency.", args.objective)
+
+    def test_scenario_rejects_seed_outside_owned_seed_set(self) -> None:
+        with self.assertRaisesRegex(ScenarioContractError, "seed_set"):
+            run_module.parse_args(
+                [
+                    "--game-exe", "player.app",
+                    "--output", "artifacts",
+                    "--scenario", "easy-health-ratio",
+                    "--seed", "1337",
+                ]
+            )
+
+    def test_ad_hoc_arguments_preserve_previous_defaults_and_environment_fallbacks(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"QA_MODEL": "operator-model", "QA_API_URL": "https://operator.example/v1"},
+            clear=False,
+        ):
+            args = run_module.parse_args(
+                ["--game-exe", "player.app", "--output", "artifacts"]
+            )
+
+        charter = run_module.charter_from_args(args)
+        self.assertEqual(TestCharter().as_dict(), charter.as_dict())
+        self.assertEqual(1337, args.seed)
+        self.assertEqual(60.0, args.max_simulation_seconds)
+        self.assertEqual("operator-model", args.model)
+        self.assertEqual("https://operator.example/v1", args.api_url)
+
+    def test_benchmark_assigns_an_independent_directory_to_each_seed(self) -> None:
+        scenario = load_scenario("easy-health-ratio")
+        output_root = TEST_TEMP_ROOT / "benchmark-runs"
+
+        with patch.object(benchmark_module, "run_session", side_effect=[0, 0]) as run_session:
+            results = benchmark_module.run_benchmark(
+                [scenario],
+                [9101, 9102],
+                game_exe=Path("player.app"),
+                project_root=Path.cwd(),
+                output_root=output_root,
+                headless=True,
+                quiet=True,
+            )
+
+        self.assertEqual(
+            [
+                output_root / "easy-health-ratio" / "9101",
+                output_root / "easy-health-ratio" / "9102",
+            ],
+            [result.output_dir for result in results],
+        )
+        first_args = run_session.call_args_list[0].args[0]
+        self.assertEqual("easy-health-ratio", first_args.scenario)
+        self.assertEqual("smoke", first_args.preset)
+        self.assertTrue(first_args.headless)
 
 
 if __name__ == "__main__":

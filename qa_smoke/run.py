@@ -8,7 +8,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .bridge_client import BridgeClient
 from .charter import DEFAULT_OBJECTIVE, TestCharter
@@ -23,10 +23,45 @@ from .planners import (
     validate_decision_against_contract,
 )
 from .reporting import RunRecorder
+from .scenarios import ScenarioContractError, load_scenario
 from .source_tools import SourceTools
 
 
-def parse_args() -> argparse.Namespace:
+SCENARIO_OWNED_ARGUMENTS = {
+    "objective": "--objective",
+    "movement_constraint": "--movement-constraint",
+    "max_restarts": "--max-restarts",
+    "focus_area": "--focus-area",
+    "min_forward_component": "--min-forward-component",
+    "collect_chests": "--collect-chests/--no-collect-chests",
+    "chest_radius": "--chest-radius",
+    "threat_radius": "--threat-radius",
+    "survival_weight": "--survival-weight",
+    "interrupt_health_ratio": "--interrupt-health-ratio",
+    "interrupt_danger_score": "--interrupt-danger-score",
+    "max_simulation_seconds": "--max-simulation-seconds",
+    "max_steps": "--max-steps",
+}
+
+AD_HOC_DEFAULTS: dict[str, Any] = {
+    "objective": DEFAULT_OBJECTIVE,
+    "movement_constraint": "free",
+    "max_restarts": 1,
+    "focus_area": [],
+    "seed": 1337,
+    "min_forward_component": 0.15,
+    "collect_chests": True,
+    "chest_radius": 16.0,
+    "threat_radius": 8.0,
+    "survival_weight": 1.4,
+    "interrupt_health_ratio": 0.30,
+    "interrupt_danger_score": 0.85,
+    "max_simulation_seconds": 60.0,
+    "max_steps": 80,
+}
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run an online, pause/step gameplay QA smoke session.")
     parser.add_argument("--game-exe", type=Path, required=True)
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
@@ -35,15 +70,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy", choices=("heuristic", "llm"), default="heuristic")
     parser.add_argument("--model", default=os.environ.get("QA_MODEL", ""))
     parser.add_argument("--api-url", default=os.environ.get("QA_API_URL"))
-    parser.add_argument("--objective", "--instruction", default=DEFAULT_OBJECTIVE)
+    parser.add_argument("--scenario")
+    parser.add_argument("--objective", "--instruction", default=None)
     parser.add_argument(
         "--movement-constraint",
         choices=("free", "east", "west", "north", "south"),
-        default="free",
+        default=None,
     )
-    parser.add_argument("--max-restarts", type=int, default=1)
-    parser.add_argument("--focus-area", action="append", default=[])
-    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--max-restarts", type=int, default=None)
+    parser.add_argument("--focus-area", action="append", default=None)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--time-scale", type=float, default=1.0)
     parser.add_argument(
         "--plan-horizon-seconds", "--action-seconds", dest="plan_horizon_seconds",
@@ -55,18 +91,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Pause after each horizon instead of holding the previous LLM vector while the next plan is pending.",
     )
-    parser.add_argument("--min-forward-component", type=float, default=0.15)
+    parser.add_argument("--min-forward-component", type=float, default=None)
     chest_group = parser.add_mutually_exclusive_group()
     chest_group.add_argument("--collect-chests", dest="collect_chests", action="store_true")
     chest_group.add_argument("--no-collect-chests", dest="collect_chests", action="store_false")
-    parser.set_defaults(collect_chests=True)
-    parser.add_argument("--chest-radius", type=float, default=16.0)
-    parser.add_argument("--threat-radius", type=float, default=8.0)
-    parser.add_argument("--survival-weight", type=float, default=1.4)
-    parser.add_argument("--interrupt-health-ratio", type=float, default=0.30)
-    parser.add_argument("--interrupt-danger-score", type=float, default=0.85)
-    parser.add_argument("--max-simulation-seconds", type=float, default=60.0)
-    parser.add_argument("--max-steps", type=int, default=80)
+    parser.set_defaults(collect_chests=None)
+    parser.add_argument("--chest-radius", type=float, default=None)
+    parser.add_argument("--threat-radius", type=float, default=None)
+    parser.add_argument("--survival-weight", type=float, default=None)
+    parser.add_argument("--interrupt-health-ratio", type=float, default=None)
+    parser.add_argument("--interrupt-danger-score", type=float, default=None)
+    parser.add_argument("--max-simulation-seconds", type=float, default=None)
+    parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--max-source-steps", type=int, default=6)
     parser.add_argument(
         "--max-stalled-steps",
@@ -76,7 +112,54 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--headless", action="store_true", help="Suppress the game window. Visible window is the default.")
     parser.add_argument("--quiet", action="store_true", help="Suppress live plan/action console output.")
-    return parser.parse_args()
+    return resolve_run_arguments(parser.parse_args(argv))
+
+
+def resolve_run_arguments(args: argparse.Namespace) -> argparse.Namespace:
+    args.scenario_definition = None
+    args.preset = ""
+    if args.scenario:
+        conflicting = [
+            flag
+            for name, flag in SCENARIO_OWNED_ARGUMENTS.items()
+            if getattr(args, name) is not None
+        ]
+        if conflicting:
+            raise ScenarioContractError(
+                f"scenario {args.scenario!r} owns its charter and limits; remove {conflicting[0]}"
+            )
+        scenario_path = args.project_root.resolve() / "config" / "qa-scenarios.json"
+        scenario = load_scenario(args.scenario, scenario_path)
+        args.scenario_definition = scenario
+        args.preset = scenario.preset
+        args.seed = scenario.select_seed(args.seed)
+        charter_values = scenario.charter_definition.model_dump(mode="python")
+        for name, value in charter_values.items():
+            setattr(args, "focus_area" if name == "focus_areas" else name, value)
+        args.max_simulation_seconds = scenario.limits.max_simulation_seconds
+        args.max_steps = scenario.limits.max_steps
+        return args
+
+    for name, value in AD_HOC_DEFAULTS.items():
+        if getattr(args, name) is None:
+            setattr(args, name, list(value) if isinstance(value, list) else value)
+    return args
+
+
+def charter_from_args(args: argparse.Namespace) -> TestCharter:
+    return TestCharter(
+        objective=args.objective,
+        movement_constraint=args.movement_constraint,
+        max_restarts=args.max_restarts,
+        focus_areas=tuple(args.focus_area),
+        min_forward_component=args.min_forward_component,
+        collect_chests=args.collect_chests,
+        chest_radius=args.chest_radius,
+        threat_radius=args.threat_radius,
+        survival_weight=args.survival_weight,
+        interrupt_health_ratio=args.interrupt_health_ratio,
+        interrupt_danger_score=args.interrupt_danger_score,
+    )
 
 
 def terminal_stop_reason(
@@ -314,19 +397,7 @@ def run_session(args: argparse.Namespace) -> int:
     run_id = uuid.uuid4().hex
     scenario_id = str(getattr(args, "scenario", "") or "")
     try:
-        charter = TestCharter(
-            objective=args.objective,
-            movement_constraint=args.movement_constraint,
-            max_restarts=args.max_restarts,
-            focus_areas=tuple(args.focus_area),
-            min_forward_component=args.min_forward_component,
-            collect_chests=args.collect_chests,
-            chest_radius=args.chest_radius,
-            threat_radius=args.threat_radius,
-            survival_weight=args.survival_weight,
-            interrupt_health_ratio=args.interrupt_health_ratio,
-            interrupt_danger_score=args.interrupt_danger_score,
-        )
+        charter = charter_from_args(args)
     except Exception as error:
         print(json.dumps({"result": "fail", "error": f"Invalid test charter: {error}"}, ensure_ascii=False))
         return 2
@@ -367,6 +438,7 @@ def run_session(args: argparse.Namespace) -> int:
         args.headless,
         run_id=run_id,
         scenario_id=scenario_id,
+        preset=getattr(args, "preset", ""),
     )
     restarts_used = 0
     stalled_steps = 0
@@ -384,8 +456,29 @@ def run_session(args: argparse.Namespace) -> int:
             )
         ready = client.launch()
         recorder.launched = True
+        serialized_arguments = {
+            key: value
+            for key, value in vars(args).items()
+            if key != "scenario_definition"
+        }
+        serialized_arguments.update(
+            {
+                "game_exe": str(args.game_exe),
+                "project_root": str(args.project_root),
+                "output": str(args.output),
+            }
+        )
         (output_dir / "run.json").write_text(
-            json.dumps({"run_id": run_id, "scenario_id": scenario_id, "arguments": vars(args) | {"game_exe": str(args.game_exe), "project_root": str(args.project_root), "output": str(args.output)}, "ready": ready}, ensure_ascii=False, indent=2),
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "scenario_id": scenario_id,
+                    "arguments": serialized_arguments,
+                    "ready": ready,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
             encoding="utf-8",
         )
         last_observation = client.command(
@@ -621,7 +714,12 @@ def run_session(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
-    sys.exit(run_session(parse_args()))
+    try:
+        args = parse_args()
+    except ScenarioContractError as error:
+        print(json.dumps({"result": "contract_error", "error": str(error)}, ensure_ascii=False))
+        sys.exit(2)
+    sys.exit(run_session(args))
 
 
 if __name__ == "__main__":
