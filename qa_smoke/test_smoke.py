@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from . import bridge_client as bridge_client_module
 from .bridge_client import BridgeClient
 from .charter import TestCharter
 from .planners import (
@@ -19,6 +20,7 @@ from .planners import (
     validate_decision_against_contract,
 )
 from .reporting import RunRecorder
+from . import run as run_module
 from .run import attach_navigation_evaluation_context, normalize_decision, terminal_stop_reason
 from .source_tools import SourceTools
 
@@ -28,6 +30,49 @@ TEST_TEMP_ROOT.mkdir(exist_ok=True)
 
 
 class BridgeClientTests(unittest.TestCase):
+    class AliveProcess:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    def make_plain_client(
+        self, name: str, run_id: str = "run-42", scenario_id: str = "scenario-7"
+    ) -> BridgeClient:
+        executable = TEST_TEMP_ROOT / f"{name}.exe"
+        executable.touch()
+        return BridgeClient(
+            executable,
+            TEST_TEMP_ROOT / name,
+            "qa",
+            42,
+            1.0,
+            run_id=run_id,
+            scenario_id=scenario_id,
+        )
+
+    @staticmethod
+    def write_ready(client: BridgeClient, **overrides: object) -> None:
+        client.bridge_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "protocol_version": "1.4",
+            "run_id": client.run_id,
+            "scenario_id": client.scenario_id,
+            "ready": True,
+        }
+        payload.update(overrides)
+        client.ready_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def launch_with_fake_process(self, client: BridgeClient) -> dict[str, object]:
+        with patch(
+            "qa_smoke.bridge_client.subprocess.Popen", return_value=self.AliveProcess()
+        ):
+            try:
+                return client.launch()
+            finally:
+                if client._stdout is not None:
+                    client._stdout.close()
+                    client._stdout = None
+
     def test_macos_bundle_is_resolved_before_launch(self) -> None:
         bundle = TEST_TEMP_ROOT / "bridge-player.app"
         executable_directory = bundle / "Contents" / "MacOS"
@@ -42,16 +87,14 @@ class BridgeClientTests(unittest.TestCase):
         executable.touch()
 
         session = TEST_TEMP_ROOT / "session"
-        client = BridgeClient(bundle, session, "qa", 42, 1.0)
-        client.bridge_dir.mkdir(parents=True, exist_ok=True)
-        client.ready_path.write_text('{"ready":true}', encoding="utf-8")
+        client = BridgeClient(
+            bundle, session, "qa", 42, 1.0, run_id="run-mac", scenario_id=""
+        )
+        self.write_ready(client)
 
-        class AliveProcess:
-            @staticmethod
-            def poll() -> None:
-                return None
-
-        with patch("qa_smoke.bridge_client.subprocess.Popen", return_value=AliveProcess()) as popen:
+        with patch(
+            "qa_smoke.bridge_client.subprocess.Popen", return_value=self.AliveProcess()
+        ) as popen:
             try:
                 client.launch()
             finally:
@@ -59,7 +102,24 @@ class BridgeClientTests(unittest.TestCase):
                     client._stdout.close()
                     client._stdout = None
 
-        self.assertEqual(str(executable.resolve()), popen.call_args.args[0][0])
+        launch_arguments = popen.call_args.args[0]
+        self.assertEqual(str(executable.resolve()), launch_arguments[0])
+        self.assertIn("-qaRunId=run-mac", launch_arguments)
+        self.assertIn("-qaScenarioId=", launch_arguments)
+
+    def test_launch_rejects_unknown_protocol_version(self) -> None:
+        client = self.make_plain_client("unknown-protocol")
+        self.write_ready(client, protocol_version="9.9")
+
+        with self.assertRaisesRegex(bridge_client_module.BridgeContractError, "protocol_version"):
+            self.launch_with_fake_process(client)
+
+    def test_launch_rejects_run_identifier_mismatch(self) -> None:
+        client = self.make_plain_client("run-mismatch")
+        self.write_ready(client, run_id="another-run")
+
+        with self.assertRaisesRegex(bridge_client_module.BridgeContractError, "run_id"):
+            self.launch_with_fake_process(client)
 
 
 class HeuristicPlannerTests(unittest.TestCase):
@@ -325,6 +385,47 @@ class LLMPlannerTests(unittest.TestCase):
 
 
 class ReportingTests(unittest.TestCase):
+    def test_step_records_correlation_identifiers(self) -> None:
+        output = TEST_TEMP_ROOT / "correlated-report"
+        recorder = RunRecorder(
+            output,
+            "qa",
+            "heuristic",
+            42,
+            run_id="run-42",
+        )
+        recorder.record(
+            3,
+            {
+                "decision_id": "run-42-decision-00000003",
+                "tool": "game",
+                "action": "observe",
+                "arguments": {},
+            },
+            {
+                "run_id": "run-42",
+                "observation_id": "run-42-obs-00000004",
+                "player": {},
+                "progress": {},
+                "menu": {},
+                "world": {},
+                "event_state": {},
+            },
+            0.1,
+        )
+
+        entry = recorder.steps[0]
+        self.assertEqual("run-42", entry["run_id"])
+        self.assertEqual("run-42-obs-00000004", entry["observation_id"])
+        self.assertEqual("run-42-decision-00000003", entry["decision_id"])
+
+    def test_decision_identity_is_stable_for_a_run_step(self) -> None:
+        decision = {"tool": "game", "action": "observe", "arguments": {}}
+
+        identified = run_module.attach_decision_identity(decision, "run-42", 3)
+
+        self.assertEqual("run-42-decision-00000003", identified["decision_id"])
+
     def test_error_log_becomes_reproducible_candidate(self) -> None:
         output = TEST_TEMP_ROOT / "report"
         output.mkdir(exist_ok=True)
@@ -472,23 +573,34 @@ class SourceToolTests(unittest.TestCase):
 
 
 class BridgeProtocolTests(unittest.TestCase):
-    def test_command_waits_for_matching_atomic_response(self) -> None:
-        session = TEST_TEMP_ROOT / "bridge"
-        bridge_directory = session / "bridge"
-        bridge_directory.mkdir(parents=True, exist_ok=True)
-        for name in ("command.json",):
-            path = bridge_directory / name
-            if path.exists():
-                path.unlink()
+    class AliveProcess:
+        @staticmethod
+        def poll() -> None:
+            return None
 
-        class AliveProcess:
-            @staticmethod
-            def poll() -> None:
-                return None
+    def make_client(self, name: str) -> BridgeClient:
+        session = TEST_TEMP_ROOT / name
+        client = BridgeClient(
+            Path("unused.exe"),
+            session,
+            "player",
+            7,
+            1.0,
+            run_id=f"run-{name}",
+            scenario_id="",
+        )
+        client.response_directory.mkdir(parents=True, exist_ok=True)
+        client.process = self.AliveProcess()  # type: ignore[assignment]
+        return client
 
-        client = BridgeClient(Path("unused.exe"), session, "player", 7, 1.0)
-        client.response_directory.mkdir(exist_ok=True)
-        client.process = AliveProcess()  # type: ignore[assignment]
+    def start_response(
+        self,
+        client: BridgeClient,
+        observation_id: str,
+        event_state: dict[str, object] | None = None,
+    ) -> threading.Thread:
+        if client.command_path.exists():
+            client.command_path.unlink()
 
         def responder() -> None:
             deadline = time.monotonic() + 2.0
@@ -500,15 +612,56 @@ class BridgeProtocolTests(unittest.TestCase):
                     continue
                 client._write_json_atomic(
                     client.response_path(command["id"]),
-                    {"command_id": command["id"], "ok": True, "result": "fake Unity response"},
+                    {
+                        "protocol_version": "1.4",
+                        "run_id": client.run_id,
+                        "scenario_id": client.scenario_id,
+                        "observation_id": observation_id,
+                        "command_id": command["id"],
+                        "event_state": event_state or {},
+                        "ok": True,
+                        "result": "fake Unity response",
+                    },
                 )
                 return
 
         thread = threading.Thread(target=responder)
         thread.start()
+        return thread
+
+    def test_command_waits_for_matching_atomic_response(self) -> None:
+        client = self.make_client("bridge")
+        thread = self.start_response(client, "obs-1")
         observation = client.command("observe", timeout=2.0)
         thread.join(timeout=2.0)
         self.assertEqual("fake Unity response", observation["result"])
+
+    def test_duplicate_observation_identifier_is_rejected(self) -> None:
+        client = self.make_client("duplicate-observation")
+        first = self.start_response(client, "obs-reused")
+        client.command("observe", timeout=2.0)
+        first.join(timeout=2.0)
+
+        second = self.start_response(client, "obs-reused")
+        with self.assertRaisesRegex(bridge_client_module.BridgeContractError, "duplicate"):
+            client.command("observe", timeout=2.0)
+        second.join(timeout=2.0)
+
+    def test_event_referencing_an_unknown_command_is_rejected(self) -> None:
+        client = self.make_client("orphan-event")
+        thread = self.start_response(
+            client,
+            "obs-event",
+            {
+                "event_id": "event-1",
+                "caused_by_command_id": "never-issued",
+                "type": "chest_collected",
+            },
+        )
+
+        with self.assertRaisesRegex(bridge_client_module.BridgeContractError, "orphan"):
+            client.command("observe", timeout=2.0)
+        thread.join(timeout=2.0)
 
 
 if __name__ == "__main__":

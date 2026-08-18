@@ -26,6 +26,8 @@ namespace Vampire.QA
         private string responseDirectory;
         private string eventPath;
         private string readyPath;
+        private string runId;
+        private string scenarioId;
         private string mode = "player";
         private string lastCommandId = "";
         private int seed = 1337;
@@ -62,13 +64,20 @@ namespace Vampire.QA
         private int steeringStuckWindows;
         private string eventType = "";
         private string eventDetail = "";
+        private string eventId = "";
+        private string eventCausedByCommandId = "";
+        private float eventLevelTime;
+        private int observationSequence;
 
         private void Awake()
         {
             DontDestroyOnLoad(gameObject);
             Application.runInBackground = true;
 
-            bridgeDirectory = ReadArgument("-qaBridgeDir", "");
+            QABridgeLaunchOptions launchOptions = QABridgeLaunchOptions.Parse(Environment.GetCommandLineArgs());
+            bridgeDirectory = launchOptions.BridgeDirectory;
+            runId = launchOptions.RunId;
+            scenarioId = launchOptions.ScenarioId;
             mode = ReadArgument("-qaMode", "player").ToLowerInvariant();
             int.TryParse(ReadArgument("-qaSeed", "1337"), out seed);
             float parsedScale;
@@ -100,6 +109,8 @@ namespace Vampire.QA
             Time.timeScale = 0;
             QAReadyState ready = new QAReadyState
             {
+                run_id = runId,
+                scenario_id = scenarioId,
                 ready = true,
                 process_id = Process.GetCurrentProcess().Id,
                 bridge_directory = bridgeDirectory,
@@ -107,7 +118,7 @@ namespace Vampire.QA
                 seed = seed
             };
             WriteAtomic(readyPath, JsonUtility.ToJson(ready, true));
-            WriteObservation("startup", true, "QA Bridge ready");
+            WriteObservation("startup", "", true, "QA Bridge ready");
         }
 
         private void OnDestroy()
@@ -778,9 +789,10 @@ namespace Vampire.QA
 
         private void InterruptPlanningHold(string type, string detail, float levelTime)
         {
+            string causedByCommandId = planningHoldCommand != null ? planningHoldCommand.id : "";
             CancelPlanningHold(true);
             planningHoldInterrupted = true;
-            SetEvent(type, detail, levelTime);
+            SetEvent(type, detail, levelTime, causedByCommandId);
         }
 
         private void CancelPlanningHold(bool stopPlayer)
@@ -799,20 +811,21 @@ namespace Vampire.QA
         private void Complete(QACommand command, bool ok, string result)
         {
             string commandId = command != null ? command.id : "unknown";
-            WriteObservation(commandId, ok, result);
+            string decisionId = command != null ? command.decision_id : "";
+            WriteObservation(commandId, decisionId, ok, result);
             ClearEvent();
         }
 
-        private void WriteObservation(string commandId, bool ok, string result)
+        private void WriteObservation(string commandId, string decisionId, bool ok, string result)
         {
-            QAObservation observation = CaptureObservation(commandId, ok, result);
+            QAObservation observation = CaptureObservation(commandId, decisionId, ok, result);
             string json = JsonUtility.ToJson(observation, true);
             string safeCommandId = string.Concat(commandId.Select(character => Path.GetInvalidFileNameChars().Contains(character) ? '_' : character));
             WriteAtomic(Path.Combine(responseDirectory, safeCommandId + ".json"), json);
             File.AppendAllText(eventPath, JsonUtility.ToJson(observation, false) + Environment.NewLine);
         }
 
-        private QAObservation CaptureObservation(string commandId, bool ok, string result)
+        private QAObservation CaptureObservation(string commandId, string decisionId, bool ok, string result)
         {
             Character player = FindObjectOfType<Character>();
             EntityManager entities = FindObjectOfType<EntityManager>();
@@ -826,6 +839,10 @@ namespace Vampire.QA
 
             QAObservation observation = new QAObservation
             {
+                run_id = runId,
+                scenario_id = scenarioId,
+                observation_id = runId + "-obs-" + (++observationSequence).ToString("D8"),
+                decision_id = decisionId,
                 command_id = commandId,
                 ok = ok,
                 result = result,
@@ -847,9 +864,11 @@ namespace Vampire.QA
                 controller = CaptureController(player, entities),
                 event_state = new EventState
                 {
+                    event_id = eventId,
+                    caused_by_command_id = eventCausedByCommandId,
                     type = eventType,
                     detail = eventDetail,
-                    level_time = level != null ? level.LevelTime : 0f
+                    level_time = eventType.Length > 0 ? eventLevelTime : level != null ? level.LevelTime : 0f
                 },
                 available_actions = AvailableActions(player, abilityDialog, selector),
                 recent_logs = recentLogs.ToArray()
@@ -1153,16 +1172,23 @@ namespace Vampire.QA
             return player != null && player.MaxHealth > 0 ? player.CurrentHealth / player.MaxHealth : 0f;
         }
 
-        private void SetEvent(string type, string detail, float levelTime)
+        private void SetEvent(string type, string detail, float levelTime, string causedByCommandId = null)
         {
+            eventId = runId + "-event-" + Guid.NewGuid().ToString("N");
+            eventCausedByCommandId = causedByCommandId ??
+                (activeCommand != null ? activeCommand.id : planningHoldCommand != null ? planningHoldCommand.id : "");
             eventType = type;
             eventDetail = detail;
+            eventLevelTime = levelTime;
         }
 
         private void ClearEvent()
         {
+            eventId = "";
+            eventCausedByCommandId = "";
             eventType = "";
             eventDetail = "";
+            eventLevelTime = 0f;
         }
 
         private ProgressState CaptureProgress(LevelManager level, StatsManager stats)

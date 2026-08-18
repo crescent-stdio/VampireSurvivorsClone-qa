@@ -6,6 +6,7 @@ import math
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,14 @@ def terminal_stop_reason(
             f"({restarts_used}/{max_restarts})."
         )
     return None
+
+
+def attach_decision_identity(
+    decision: dict[str, Any], run_id: str, step: int
+) -> dict[str, Any]:
+    identified = dict(decision)
+    identified["decision_id"] = f"{run_id}-decision-{step:08d}"
+    return identified
 
 
 def normalize_decision(
@@ -302,6 +311,8 @@ def record_contract_event(output_dir: Path, event: dict[str, Any]) -> None:
 def run_session(args: argparse.Namespace) -> int:
     output_dir = args.output.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    run_id = uuid.uuid4().hex
+    scenario_id = str(getattr(args, "scenario", "") or "")
     try:
         charter = TestCharter(
             objective=args.objective,
@@ -324,6 +335,7 @@ def run_session(args: argparse.Namespace) -> int:
         args.mode,
         args.policy,
         args.seed,
+        run_id=run_id,
         charter=charter.as_dict(),
         model=args.model if args.policy == "llm" else None,
         game_window_visible=not args.headless,
@@ -346,7 +358,16 @@ def run_session(args: argparse.Namespace) -> int:
     fatal_error: str | None = None
     last_observation: dict[str, Any] = {}
     started = time.monotonic()
-    client = BridgeClient(args.game_exe, output_dir, args.mode, args.seed, args.time_scale, args.headless)
+    client = BridgeClient(
+        args.game_exe,
+        output_dir,
+        args.mode,
+        args.seed,
+        args.time_scale,
+        args.headless,
+        run_id=run_id,
+        scenario_id=scenario_id,
+    )
     restarts_used = 0
     stalled_steps = 0
 
@@ -364,10 +385,12 @@ def run_session(args: argparse.Namespace) -> int:
         ready = client.launch()
         recorder.launched = True
         (output_dir / "run.json").write_text(
-            json.dumps({"arguments": vars(args) | {"game_exe": str(args.game_exe), "project_root": str(args.project_root), "output": str(args.output)}, "ready": ready}, ensure_ascii=False, indent=2),
+            json.dumps({"run_id": run_id, "scenario_id": scenario_id, "arguments": vars(args) | {"game_exe": str(args.game_exe), "project_root": str(args.project_root), "output": str(args.output)}, "ready": ready}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        last_observation = client.command("observe")
+        last_observation = client.command(
+            "observe", decision_id=f"{run_id}-decision-bootstrap"
+        )
         for step in range(args.max_steps):
             stop_reason = terminal_stop_reason(last_observation, restarts_used, charter.max_restarts)
             if stop_reason:
@@ -469,6 +492,7 @@ def run_session(args: argparse.Namespace) -> int:
                 args.policy == "llm",
                 not args.pause_during_planning,
             )
+            decision = attach_decision_identity(decision, run_id, step)
             attach_navigation_evaluation_context(decision, last_observation)
             if not args.quiet:
                 arguments_text = json.dumps(decision["arguments"], ensure_ascii=False)
@@ -486,10 +510,18 @@ def run_session(args: argparse.Namespace) -> int:
                 recorder.record(step, decision, last_observation, time.monotonic() - started, planning_usage)
                 continue
             if decision["tool"] != "game":
-                decision = {"plan": "Recover from invalid tool.", "hypothesis": "", "tool": "game", "action": "observe", "arguments": {}}
+                decision = attach_decision_identity(
+                    {"plan": "Recover from invalid tool.", "hypothesis": "", "tool": "game", "action": "observe", "arguments": {}},
+                    run_id,
+                    step,
+                )
 
             previous_observation = last_observation
-            last_observation = client.command(decision["action"], **decision["arguments"])
+            last_observation = client.command(
+                decision["action"],
+                decision_id=decision["decision_id"],
+                **decision["arguments"],
+            )
             if decision["action"] == "restart" and last_observation.get("ok"):
                 restarts_used += 1
             recorder.record(step, decision, last_observation, time.monotonic() - started, planning_usage)

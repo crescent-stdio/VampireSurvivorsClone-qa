@@ -16,6 +16,7 @@ class RunRecorder:
     mode: str
     policy: str
     seed: int
+    run_id: str = ""
     charter: dict[str, Any] = field(default_factory=dict)
     model: str | None = None
     game_window_visible: bool = True
@@ -59,6 +60,9 @@ class RunRecorder:
     ) -> None:
         entry = {
             "step": step,
+            "run_id": observation.get("run_id") or self.run_id,
+            "observation_id": observation.get("observation_id") or "",
+            "decision_id": decision.get("decision_id") or "",
             "elapsed_wall_seconds": round(elapsed, 3),
             "decision": decision,
             "observation": observation,
@@ -515,4 +519,3 @@ class RunRecorder:
         if report.get("llm_assessment"):
             lines.extend(["", "## LLM assessment", "", "```json", json.dumps(report["llm_assessment"], ensure_ascii=False, indent=2), "```"])
         (self.output_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-

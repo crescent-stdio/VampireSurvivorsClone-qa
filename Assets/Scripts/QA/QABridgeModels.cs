@@ -2,10 +2,57 @@ using System;
 
 namespace Vampire.QA
 {
+    public static class QABridgeModels
+    {
+        public const string ProtocolVersion = "1.4";
+    }
+
+    public readonly struct QABridgeLaunchOptions
+    {
+        private QABridgeLaunchOptions(string bridgeDirectory, string runId, string scenarioId)
+        {
+            BridgeDirectory = bridgeDirectory;
+            RunId = runId;
+            ScenarioId = scenarioId;
+        }
+
+        public string BridgeDirectory { get; }
+        public string RunId { get; }
+        public string ScenarioId { get; }
+        public bool IsRequested => !string.IsNullOrWhiteSpace(BridgeDirectory);
+
+        public static QABridgeLaunchOptions Parse(string[] arguments)
+        {
+            string bridgeDirectory = ReadArgument(arguments, "-qaBridgeDir", "");
+            string runId = ReadArgument(arguments, "-qaRunId", "");
+            string scenarioId = ReadArgument(arguments, "-qaScenarioId", "");
+            if (string.IsNullOrWhiteSpace(runId))
+                runId = Guid.NewGuid().ToString("N");
+            return new QABridgeLaunchOptions(bridgeDirectory, runId, scenarioId);
+        }
+
+        private static string ReadArgument(string[] arguments, string name, string fallback)
+        {
+            if (arguments == null)
+                return fallback;
+            string prefix = name + "=";
+            for (int index = 0; index < arguments.Length; index++)
+            {
+                string argument = arguments[index];
+                if (string.Equals(argument, name, StringComparison.Ordinal) && index + 1 < arguments.Length)
+                    return arguments[index + 1] ?? fallback;
+                if (argument != null && argument.StartsWith(prefix, StringComparison.Ordinal))
+                    return argument.Substring(prefix.Length);
+            }
+            return fallback;
+        }
+    }
+
     [Serializable]
     public class QACommand
     {
         public string id;
+        public string decision_id;
         public string action;
         public float x;
         public float y;
@@ -109,6 +156,8 @@ namespace Vampire.QA
     [Serializable]
     public class EventState
     {
+        public string event_id;
+        public string caused_by_command_id;
         public string type;
         public string detail;
         public float level_time;
@@ -161,7 +210,11 @@ namespace Vampire.QA
     [Serializable]
     public class QAObservation
     {
-        public string protocol_version = "1.3";
+        public string protocol_version = QABridgeModels.ProtocolVersion;
+        public string run_id;
+        public string scenario_id;
+        public string observation_id;
+        public string decision_id;
         public string command_id;
         public bool ok;
         public string result;
@@ -189,7 +242,9 @@ namespace Vampire.QA
     [Serializable]
     public class QAReadyState
     {
-        public string protocol_version = "1.3";
+        public string protocol_version = QABridgeModels.ProtocolVersion;
+        public string run_id;
+        public string scenario_id;
         public bool ready;
         public int process_id;
         public string bridge_directory;
@@ -197,4 +252,3 @@ namespace Vampire.QA
         public int seed;
     }
 }
-
