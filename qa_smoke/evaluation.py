@@ -218,8 +218,9 @@ def _relative_position_consistency(
     return True, evidence, "relative positions are consistent"
 
 
-def _inventory_signature(observation: dict[str, Any]) -> str:
-    return json.dumps(observation.get("inventory") or {}, sort_keys=True, separators=(",", ":"))
+def _ability_signature(observation: dict[str, Any]) -> str:
+    abilities = (observation.get("inventory") or {}).get("abilities") or []
+    return json.dumps(abilities, sort_keys=True, separators=(",", ":"))
 
 
 def _upgrade_effect(transitions: list[Transition]) -> tuple[bool, list[str], str]:
@@ -229,7 +230,7 @@ def _upgrade_effect(transitions: list[Transition]) -> tuple[bool, list[str], str
         before = _observation(transitions[index - 1]) if index > 0 else {}
         after = _observation(transition)
         refs = (_refs_for(transitions[index - 1]) if index > 0 else []) + _refs_for(transition)
-        changed = bool(before) and _inventory_signature(before) != _inventory_signature(after)
+        changed = bool(before) and _ability_signature(before) != _ability_signature(after)
         return changed, refs or _fallback_refs(transitions), (
             "inventory changed after upgrade selection"
             if changed
@@ -252,11 +253,7 @@ def _chest_state_transition(transitions: list[Transition]) -> tuple[bool, list[s
         progress_changed = any(
             before_progress.get(key) != after_progress.get(key) for key in progress_keys
         )
-        changed = (
-            before_count != after_count
-            or progress_changed
-            or _inventory_signature(before) != _inventory_signature(after)
-        )
+        changed = before_count != after_count or progress_changed
         refs = (_refs_for(transitions[index - 1]) if index > 0 else []) + _refs_for(
             transition, include_event=True
         )

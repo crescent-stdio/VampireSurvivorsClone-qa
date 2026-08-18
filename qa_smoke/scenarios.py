@@ -94,6 +94,7 @@ class ScenarioLimits(StrictModel):
 class GroundTruthDefinition(StrictModel):
     bug_id: str | None
     fault_id: str | None
+    difficulty: Literal["easy", "medium", "hard"]
     expected_behavior: str
     reproduction_steps: list[str]
     review_status: Literal["pending", "approved"] = "pending"
@@ -124,6 +125,8 @@ class Scenario(StrictModel):
             raise ValueError(f"unregistered coverage target: {self.coverage_target}")
         if self.oracle not in REGISTERED_ORACLES:
             raise ValueError(f"unregistered oracle: {self.oracle}")
+        if self.ground_truth.difficulty != self.difficulty:
+            raise ValueError("ground_truth difficulty must match scenario difficulty")
         return self
 
     @property

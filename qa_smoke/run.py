@@ -538,6 +538,7 @@ def run_session(args: argparse.Namespace) -> int:
         run_id=run_id,
         scenario_id=scenario_id,
         preset=getattr(args, "preset", ""),
+        fault_id=scenario.ground_truth.fault_id if scenario is not None else "",
     )
     restarts_used = 0
     stalled_steps = 0

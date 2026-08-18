@@ -9,6 +9,13 @@ namespace Vampire.QA
         private static void CreateBridge()
         {
             string[] args = Environment.GetCommandLineArgs();
+            QaFaultOptions faultOptions = QaFaultOptions.Parse(args);
+            if (!faultOptions.IsValid)
+            {
+                Debug.LogError(faultOptions.FailureReason);
+                Application.Quit(2);
+                return;
+            }
             QABridgeLaunchOptions options = QABridgeLaunchOptions.Parse(args);
             if (!options.IsRequested || UnityEngine.Object.FindObjectOfType<QABridge>() != null)
                 return;

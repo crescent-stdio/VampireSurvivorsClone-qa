@@ -15,7 +15,8 @@
       "oracle": "health_ratio_consistency",
       "ground_truth": {
         "bug_id": "health_ratio_out_of_range",
-        "fault_id": null,
+        "fault_id": "health_ratio_out_of_range",
+        "difficulty": "easy",
         "expected_behavior": "Reported health values remain internally consistent.",
         "reproduction_steps": ["Enter gameplay.", "Observe player health values."],
         "review_status": "pending"
@@ -35,7 +36,8 @@
       "oracle": "relative_position_consistency",
       "ground_truth": {
         "bug_id": "relative_position_mismatch",
-        "fault_id": null,
+        "fault_id": "relative_position_mismatch",
+        "difficulty": "easy",
         "expected_behavior": "Entity relative positions equal world position minus player position.",
         "reproduction_steps": ["Enter gameplay.", "Observe the player and a visible entity."],
         "review_status": "pending"
@@ -55,7 +57,8 @@
       "oracle": "upgrade_effect",
       "ground_truth": {
         "bug_id": "upgrade_ack_without_effect",
-        "fault_id": null,
+        "fault_id": "upgrade_ack_without_effect",
+        "difficulty": "medium",
         "expected_behavior": "An acknowledged upgrade selection changes inventory state.",
         "reproduction_steps": ["Reach an upgrade dialog.", "Select an upgrade.", "Observe inventory state."],
         "review_status": "pending"
@@ -75,7 +78,8 @@
       "oracle": "chest_state_transition",
       "ground_truth": {
         "bug_id": "chest_collected_without_state_transition",
-        "fault_id": null,
+        "fault_id": "chest_collected_without_state_transition",
+        "difficulty": "medium",
         "expected_behavior": "A chest collection event corresponds to observable chest or progress state change.",
         "reproduction_steps": ["Enter gameplay.", "Collect a chest.", "Observe the resulting state."],
         "review_status": "pending"
@@ -95,7 +99,8 @@
       "oracle": "experience_conservation",
       "ground_truth": {
         "bug_id": "experience_level_drift",
-        "fault_id": null,
+        "fault_id": "experience_level_drift",
+        "difficulty": "hard",
         "expected_behavior": "Experience accounting remains consistent across multiple level transitions.",
         "reproduction_steps": ["Enter gameplay.", "Gain multiple levels.", "Compare experience transitions."],
         "review_status": "pending"
@@ -116,7 +121,8 @@
       "oracle": "restart_currency_isolation",
       "ground_truth": {
         "bug_id": "currency_leak_across_restart",
-        "fault_id": null,
+        "fault_id": "currency_leak_across_restart",
+        "difficulty": "hard",
         "expected_behavior": "Run-scoped currency resets when gameplay restarts.",
         "reproduction_steps": ["Accumulate run currency.", "Reach game over.", "Restart gameplay.", "Observe currency state."],
         "review_status": "pending"
@@ -137,6 +143,7 @@
       "ground_truth": {
         "bug_id": null,
         "fault_id": null,
+        "difficulty": "easy",
         "expected_behavior": "The observation remains internally consistent.",
         "reproduction_steps": ["Enter gameplay.", "Observe the current state."],
         "review_status": "pending"
@@ -157,6 +164,7 @@
       "ground_truth": {
         "bug_id": null,
         "fault_id": null,
+        "difficulty": "medium",
         "expected_behavior": "Normal chest and upgrade transitions update state after acknowledgement.",
         "reproduction_steps": ["Collect a chest.", "Select an upgrade.", "Observe both state transitions."],
         "review_status": "pending"
@@ -177,6 +185,7 @@
       "ground_truth": {
         "bug_id": null,
         "fault_id": null,
+        "difficulty": "hard",
         "expected_behavior": "Long-running progression preserves experience and restart invariants.",
         "reproduction_steps": ["Sustain gameplay through multiple progression events.", "Observe cumulative state."],
         "review_status": "pending"

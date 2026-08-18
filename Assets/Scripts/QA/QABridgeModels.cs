@@ -205,6 +205,16 @@ namespace Vampire.QA
     public class InventoryState
     {
         public InventorySlotState[] slots;
+        public AbilityInventoryState[] abilities;
+    }
+
+    [Serializable]
+    public class AbilityInventoryState
+    {
+        public string type;
+        public string name;
+        public int level;
+        public bool owned;
     }
 
     [Serializable]

@@ -34,6 +34,7 @@ class BridgeClient:
         run_id: str | None = None,
         scenario_id: str = "",
         preset: str = "",
+        fault_id: str = "",
     ) -> None:
         self.game_exe = game_exe.resolve()
         self.session_dir = session_dir.resolve()
@@ -46,6 +47,7 @@ class BridgeClient:
         self.run_id = run_id or uuid.uuid4().hex
         self.scenario_id = scenario_id
         self.preset = preset
+        self.fault_id = fault_id
         self.process: subprocess.Popen[bytes] | None = None
         self._stdout = None
         self._issued_command_ids: set[str] = set()
@@ -97,6 +99,8 @@ class BridgeClient:
         ]
         if self.preset:
             args.append(f"-qaPreset={self.preset}")
+        if self.fault_id:
+            args.append(f"-qaFault={self.fault_id}")
         if self.headless:
             args.extend(["-batchmode", "-nographics"])
         self.process = subprocess.Popen(args, stdout=self._stdout, stderr=subprocess.STDOUT)

@@ -28,6 +28,7 @@ namespace Vampire.QA
         private string readyPath;
         private string runId;
         private string scenarioId;
+        private string activeFaultId = "";
         private string mode = "player";
         private string lastCommandId = "";
         private int seed = 1337;
@@ -68,6 +69,8 @@ namespace Vampire.QA
         private string eventCausedByCommandId = "";
         private float eventLevelTime;
         private int observationSequence;
+        private ProgressState chestProgressBeforeFault = new ProgressState();
+        private int restartCoinsBeforeFault;
 
         private void Awake()
         {
@@ -78,6 +81,10 @@ namespace Vampire.QA
             bridgeDirectory = launchOptions.BridgeDirectory;
             runId = launchOptions.RunId;
             scenarioId = launchOptions.ScenarioId;
+            QaFaultOptions faultOptions = QaFaultOptions.Parse(Environment.GetCommandLineArgs());
+            if (!faultOptions.IsValid)
+                throw new InvalidOperationException(faultOptions.FailureReason);
+            activeFaultId = faultOptions.FaultId;
             mode = ReadArgument("-qaMode", "player").ToLowerInvariant();
             int.TryParse(ReadArgument("-qaSeed", "1337"), out seed);
             float parsedScale;
@@ -322,6 +329,7 @@ namespace Vampire.QA
             steeringTargetDistance = -1f;
             currentSteering = steeringHeading;
             steeringInitialChestCount = entities.chests != null ? entities.chests.Count : 0;
+            chestProgressBeforeFault = CaptureProgress(level, FindObjectOfType<StatsManager>());
             steeringInitialHealthRatio = HealthRatio(player);
             steeringInitialDangerScore = CalculateDanger(player, entities, EffectiveThreatRadius(command), out _);
             steeringCheckpointPosition = player.Position;
@@ -363,6 +371,7 @@ namespace Vampire.QA
             steeringTargetKind = "llm_direction";
             steeringTargetDistance = -1f;
             steeringInitialChestCount = entities.chests != null ? entities.chests.Count : 0;
+            chestProgressBeforeFault = CaptureProgress(level, FindObjectOfType<StatsManager>());
             steeringInitialHealthRatio = HealthRatio(player);
             steeringInitialDangerScore = CalculateDanger(player, entities, EffectiveThreatRadius(command), out _);
             Chest nearestChest = NearestChest(player, entities, out _, out float nearestChestDistance);
@@ -460,11 +469,16 @@ namespace Vampire.QA
                 Complete(command, false, "Upgrade dialog is not open");
                 return;
             }
-            if (!dialog.TrySelectOption(command.index))
+            bool validIndex = command.index >= 0 && command.index < dialog.DisplayedAbilities.Count;
+            if (!validIndex)
             {
                 Complete(command, false, "Invalid upgrade index: " + command.index);
                 return;
             }
+            if (QaFaultInjection.ShouldApplyUpgrade(activeFaultId))
+                dialog.TrySelectOption(command.index);
+            else
+                dialog.Close();
 
             BeginSettleOperation(command, 3, "Selected upgrade " + command.index);
         }
@@ -492,6 +506,10 @@ namespace Vampire.QA
             }
 
             string scene = SceneManager.GetActiveScene().name;
+            StatsManager stats = FindObjectOfType<StatsManager>();
+            restartCoinsBeforeFault = activeFaultId == QaFaultInjection.CurrencyLeakAcrossRestart
+                ? Math.Max(1, stats != null ? stats.CoinsGained : 0)
+                : 0;
             level.Restart();
             BeginSceneOperation(command, scene, "Level restarted");
         }
@@ -709,6 +727,7 @@ namespace Vampire.QA
             if (player != null && entities != null)
             {
                 steeringInitialChestCount = entities.chests != null ? entities.chests.Count : 0;
+                chestProgressBeforeFault = CaptureProgress(level, FindObjectOfType<StatsManager>());
                 steeringInitialHealthRatio = HealthRatio(player);
                 steeringInitialDangerScore = CalculateDanger(player, entities, EffectiveThreatRadius(command), out _);
                 Chest nearestChest = NearestChest(player, entities, out _, out float nearestChestDistance);
@@ -932,6 +951,12 @@ namespace Vampire.QA
             state.exp = player.CurrentExperience;
             state.next_level_exp = player.NextExperience;
             state.exp_ratio = state.next_level_exp > 0 ? state.exp / state.next_level_exp : 0;
+            state.health_ratio = QaFaultInjection.HealthRatio(
+                activeFaultId,
+                state.health,
+                state.max_health,
+                state.health_ratio);
+            state.exp = QaFaultInjection.Experience(activeFaultId, state.level, state.exp);
             return state;
         }
 
@@ -1003,7 +1028,7 @@ namespace Vampire.QA
                             kind = monster.GetType().Name,
                             x = monster.transform.position.x,
                             y = monster.transform.position.y,
-                            relative_x = relative.x,
+                            relative_x = QaFaultInjection.RelativeX(activeFaultId, relative.x),
                             relative_y = relative.y,
                             distance = distance
                         });
@@ -1058,6 +1083,13 @@ namespace Vampire.QA
                 escape.Normalize();
             state.escape_vector = new VectorState(escape.x, escape.y);
             state.qa_entities = details.ToArray();
+            if (eventType == "chest_collected")
+            {
+                state.chest_count = QaFaultInjection.ChestCount(
+                    activeFaultId,
+                    state.chest_count,
+                    steeringInitialChestCount);
+            }
             return state;
         }
 
@@ -1193,13 +1225,30 @@ namespace Vampire.QA
 
         private ProgressState CaptureProgress(LevelManager level, StatsManager stats)
         {
+            if (
+                activeFaultId == QaFaultInjection.ChestCollectedWithoutStateTransition &&
+                eventType == "chest_collected")
+            {
+                return new ProgressState
+                {
+                    level_time = chestProgressBeforeFault.level_time,
+                    monsters_killed = chestProgressBeforeFault.monsters_killed,
+                    damage_dealt = chestProgressBeforeFault.damage_dealt,
+                    damage_taken = chestProgressBeforeFault.damage_taken,
+                    coins_gained = chestProgressBeforeFault.coins_gained
+                };
+            }
+            int coins = stats != null ? stats.CoinsGained : 0;
             return new ProgressState
             {
                 level_time = level != null ? level.LevelTime : 0,
                 monsters_killed = stats != null ? stats.MonstersKilled : 0,
                 damage_dealt = stats != null ? stats.DamageDealt : 0,
                 damage_taken = stats != null ? stats.DamageTaken : 0,
-                coins_gained = stats != null ? stats.CoinsGained : 0
+                coins_gained = QaFaultInjection.RestartCoins(
+                    activeFaultId,
+                    coins,
+                    restartCoinsBeforeFault)
             };
         }
 
@@ -1234,7 +1283,11 @@ namespace Vampire.QA
         private InventoryState CaptureInventory(Inventory inventory)
         {
             if (inventory == null)
-                return new InventoryState { slots = new InventorySlotState[0] };
+                return new InventoryState
+                {
+                    slots = new InventorySlotState[0],
+                    abilities = new AbilityInventoryState[0]
+                };
 
             InventorySlotState[] slots = new InventorySlotState[inventory.SlotCount];
             for (int i = 0; i < inventory.SlotCount; i++)
@@ -1248,7 +1301,17 @@ namespace Vampire.QA
                     pending_count = slot != null ? slot.PendingCount : 0
                 };
             }
-            return new InventoryState { slots = slots };
+            AbilityInventoryState[] abilities = FindObjectsOfType<Ability>(true)
+                .OrderBy(ability => ability.GetType().FullName)
+                .Select(ability => new AbilityInventoryState
+                {
+                    type = ability.GetType().Name,
+                    name = ability.Name,
+                    level = ability.Level,
+                    owned = ability.Owned
+                })
+                .ToArray();
+            return new InventoryState { slots = slots, abilities = abilities };
         }
 
         private string[] AvailableActions(Character player, AbilitySelectionDialog dialog, CharacterSelector selector)

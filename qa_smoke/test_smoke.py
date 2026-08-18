@@ -106,7 +106,14 @@ class BridgeClientTests(unittest.TestCase):
 
         session = TEST_TEMP_ROOT / "session"
         client = BridgeClient(
-            bundle, session, "qa", 42, 1.0, run_id="run-mac", scenario_id=""
+            bundle,
+            session,
+            "qa",
+            42,
+            1.0,
+            run_id="run-mac",
+            scenario_id="easy-health-ratio",
+            fault_id="health_ratio_out_of_range",
         )
         self.write_ready(client)
 
@@ -123,7 +130,8 @@ class BridgeClientTests(unittest.TestCase):
         launch_arguments = popen.call_args.args[0]
         self.assertEqual(str(executable.resolve()), launch_arguments[0])
         self.assertIn("-qaRunId=run-mac", launch_arguments)
-        self.assertIn("-qaScenarioId=", launch_arguments)
+        self.assertIn("-qaScenarioId=easy-health-ratio", launch_arguments)
+        self.assertIn("-qaFault=health_ratio_out_of_range", launch_arguments)
 
     def test_launch_rejects_unknown_protocol_version(self) -> None:
         client = self.make_plain_client("unknown-protocol")
@@ -1133,6 +1141,22 @@ class BridgeProtocolTests(unittest.TestCase):
 
 
 class ScenarioContractTests(unittest.TestCase):
+    def test_fault_scenarios_declare_their_evaluator_private_fault_ids(self) -> None:
+        expected = {
+            "easy-health-ratio": "health_ratio_out_of_range",
+            "easy-relative-position": "relative_position_mismatch",
+            "medium-upgrade-effect": "upgrade_ack_without_effect",
+            "medium-chest-transition": "chest_collected_without_state_transition",
+            "hard-experience-drift": "experience_level_drift",
+            "hard-restart-currency": "currency_leak_across_restart",
+        }
+
+        for scenario_id, fault_id in expected.items():
+            self.assertEqual(fault_id, load_scenario(scenario_id).ground_truth.fault_id)
+        self.assertIsNone(
+            load_scenario("control-valid-observation").ground_truth.fault_id
+        )
+
     def test_scenario_exit_code_uses_execution_axis_instead_of_legacy_smoke_checks(self) -> None:
         scenario_args = type("Args", (), {"scenario_definition": object()})()
         ad_hoc_args = type("Args", (), {"scenario_definition": None})()
@@ -1165,6 +1189,7 @@ class ScenarioContractTests(unittest.TestCase):
             "ground_truth": {
                 "bug_id": "health_ratio_out_of_range",
                 "fault_id": None,
+                "difficulty": "easy",
                 "expected_behavior": "Reported health values remain internally consistent.",
                 "reproduction_steps": ["Observe player health."],
                 "review_status": "pending",
@@ -1188,6 +1213,7 @@ class ScenarioContractTests(unittest.TestCase):
             "ground_truth": {
                 "bug_id": None,
                 "fault_id": None,
+                "difficulty": "easy",
                 "expected_behavior": "The run remains valid.",
                 "reproduction_steps": ["Observe gameplay."],
                 "review_status": "pending",
@@ -1195,6 +1221,29 @@ class ScenarioContractTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(Exception, "unregistered oracle"):
+            Scenario.model_validate(payload)
+
+    def test_ground_truth_difficulty_must_match_scenario(self) -> None:
+        payload = {
+            "id": "invalid-ground-truth-difficulty",
+            "difficulty": "easy",
+            "preset": "smoke",
+            "charter": {"objective": "Exercise ground-truth validation."},
+            "seed_set": [9101, 9102, 9103],
+            "limits": {"max_simulation_seconds": 60.0, "max_steps": 20},
+            "coverage_target": "observe_player_state",
+            "oracle": "health_ratio_consistency",
+            "ground_truth": {
+                "bug_id": "health_ratio_out_of_range",
+                "fault_id": "health_ratio_out_of_range",
+                "difficulty": "hard",
+                "expected_behavior": "Reported health values remain internally consistent.",
+                "reproduction_steps": ["Observe player health."],
+                "review_status": "pending",
+            },
+        }
+
+        with self.assertRaisesRegex(Exception, "difficulty must match"):
             Scenario.model_validate(payload)
 
     def test_scenario_rejects_charter_override(self) -> None:
@@ -1286,17 +1335,20 @@ class EvaluationTests(unittest.TestCase):
         action: str = "observe",
         player: dict[str, object] | None = None,
         event_state: dict[str, object] | None = None,
+        **observation_overrides: object,
     ) -> dict[str, object]:
+        observation = {
+            "observation_id": observation_id,
+            "player": player or {},
+            "world": {},
+            "progress": {},
+            "inventory": {},
+            "event_state": event_state or {},
+        }
+        observation.update(observation_overrides)
         return {
             "decision": {"action": action},
-            "observation": {
-                "observation_id": observation_id,
-                "player": player or {},
-                "world": {},
-                "progress": {},
-                "inventory": {},
-                "event_state": event_state or {},
-            },
+            "observation": observation,
         }
 
     def test_evaluation_rejects_an_unregistered_identifier(self) -> None:
@@ -1348,6 +1400,93 @@ class EvaluationTests(unittest.TestCase):
             CoverageResult(status="reached", evidence_refs=[])
         with self.assertRaisesRegex(Exception, "evidence_refs"):
             OracleResult(verdict="pass", evidence_refs=[])
+
+    def test_six_injected_fault_signals_are_detected_by_their_oracles(self) -> None:
+        cases = {
+            "easy-health-ratio": [
+                self.transition(
+                    "obs-health",
+                    player={
+                        "present": True,
+                        "health": 50.0,
+                        "max_health": 100.0,
+                        "health_ratio": 1.25,
+                    },
+                )
+            ],
+            "easy-relative-position": [
+                self.transition(
+                    "obs-position",
+                    player={"present": True, "position": {"x": 10.0, "y": 5.0}},
+                    world={
+                        "qa_entities": [
+                            {
+                                "x": 13.0,
+                                "y": 8.0,
+                                "relative_x": 10.0,
+                                "relative_y": 3.0,
+                            }
+                        ]
+                    },
+                )
+            ],
+            "medium-upgrade-effect": [
+                self.transition(
+                    "obs-upgrade-before",
+                    inventory={"abilities": [{"type": "Axe", "level": 0, "owned": False}]},
+                ),
+                self.transition(
+                    "obs-upgrade-after",
+                    action="select_upgrade",
+                    inventory={"abilities": [{"type": "Axe", "level": 0, "owned": False}]},
+                ),
+            ],
+            "medium-chest-transition": [
+                self.transition(
+                    "obs-chest-before",
+                    world={"chest_count": 1},
+                    progress={"coins_gained": 0, "damage_dealt": 0.0, "damage_taken": 0.0},
+                ),
+                self.transition(
+                    "obs-chest-after",
+                    world={"chest_count": 1},
+                    progress={"coins_gained": 0, "damage_dealt": 0.0, "damage_taken": 0.0},
+                    event_state={
+                        "type": "chest_collected",
+                        "event_id": "event-chest",
+                    },
+                ),
+            ],
+            "hard-experience-drift": [
+                self.transition(
+                    "obs-exp",
+                    player={
+                        "present": True,
+                        "level": 3,
+                        "exp": 13.0,
+                        "next_level_exp": 20.0,
+                        "exp_ratio": 0.5,
+                    },
+                )
+            ],
+            "hard-restart-currency": [
+                self.transition(
+                    "obs-restart-before",
+                    progress={"level_time": 30.0, "coins_gained": 7},
+                ),
+                self.transition(
+                    "obs-restart-after",
+                    action="restart",
+                    progress={"level_time": 0.0, "coins_gained": 7},
+                ),
+            ],
+        }
+
+        for scenario_id, transitions in cases.items():
+            with self.subTest(scenario=scenario_id):
+                result = evaluate_oracle(load_scenario(scenario_id), transitions)
+                self.assertEqual("fail", result.verdict)
+                self.assertTrue(result.evidence_refs)
 
 
 if __name__ == "__main__":
