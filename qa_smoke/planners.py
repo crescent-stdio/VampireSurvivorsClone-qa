@@ -1305,11 +1305,12 @@ If the computed value and the reported value disagree, or a fraction falls outsi
         return response_body
 
     def _response_format(self, response_schema: dict[str, Any] | None) -> dict[str, Any]:
-        if (
-            response_schema is not None
-            and self.api_url.startswith("https://api.openai.com/")
-            and self.model.startswith("gpt-4o-mini")
-        ):
+        # Structured Outputs is an endpoint capability, not a gpt-4o-mini one. Pinning
+        # it to that model silently dropped every other OpenAI model to json_object,
+        # so swapping models changed schema enforcement at the same time as capability
+        # and made the two impossible to tell apart. A model that cannot do it returns
+        # a 400, which is loud and deliberately not retried.
+        if response_schema is not None and self.api_url.startswith("https://api.openai.com/"):
             return {
                 "type": "json_schema",
                 "json_schema": {

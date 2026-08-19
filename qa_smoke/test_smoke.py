@@ -947,6 +947,19 @@ class LLMPlannerTests(unittest.TestCase):
         )
         self.assertEqual({"type": "json_object"}, compatible._response_format(schema))
 
+    def test_every_openai_model_gets_strict_structured_output(self) -> None:
+        """Schema enforcement must not change when the model does.
+
+        Gating it on gpt-4o-mini meant swapping models moved capability and
+        structural enforcement at once, so neither could be measured alone.
+        """
+        schema = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+        for model in ("gpt-4o", "gpt-4.1", "o4-mini"):
+            with self.subTest(model=model):
+                planner = LLMPlanner("qa", model, TestCharter(), 5.0, api_key="test-key")
+
+                self.assertEqual("json_schema", planner._response_format(schema)["type"])
+
     def test_argument_syntax_normalization_preserves_llm_selected_upgrade(self) -> None:
         encoded = canonicalize_decision_arguments({
             "tool": "game", "action": "select_upgrade", "arguments": "{\"index\": 2}"
