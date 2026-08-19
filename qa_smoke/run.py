@@ -13,6 +13,7 @@ from typing import Any, Sequence
 from .adapters import VampireSurvivorsAdapter
 from .charter import DEFAULT_OBJECTIVE, TestCharter
 from .detection import DetectionResult, score_agent_detection
+from .inspector import build_inspection_payload, inspect_trace
 from .evaluation import fault_evidence_refs, scenario_verdict_axes
 from .hypotheses import HypothesisTracker
 from .planners import (
@@ -123,6 +124,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Weight of the per-frame bridge avoidance blend. Only --policy hybrid uses it; "
             "passing it with any other policy is an error rather than a silent no-op."
         ),
+    )
+    parser.add_argument(
+        "--inspector-model",
+        default=os.environ.get("QA_INSPECTOR_MODEL", ""),
+        help=(
+            "Model for the post-run bug-detection pass. Orthogonal to --policy: any "
+            "policy may run with or without it."
+        ),
+    )
+    parser.add_argument(
+        "--inspector-effort",
+        default=None,
+        help="reasoning_effort for the inspector when it is a reasoning model.",
     )
     parser.add_argument(
         "--llm-max-attempts",
@@ -485,8 +499,10 @@ def observation_made_progress(before: dict[str, Any], after: dict[str, Any]) -> 
     return (before.get("menu") or {}) != (after.get("menu") or {})
 
 
-def record_contract_event(output_dir: Path, event: dict[str, Any]) -> None:
-    with (output_dir / "llm-contract-events.jsonl").open("a", encoding="utf-8") as handle:
+def record_contract_event(
+    output_dir: Path, event: dict[str, Any], name: str = "llm-contract-events.jsonl"
+) -> None:
+    with (output_dir / name).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
@@ -531,6 +547,7 @@ def build_session_verdict(
     *,
     llm_assessment: dict[str, Any] | None = None,
     hypotheses: list[dict[str, Any]] | None = None,
+    inspection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if fatal_error is None:
         execution_status = "completed"
@@ -564,6 +581,11 @@ def build_session_verdict(
         detection = score_agent_detection(
             fault_id=recorder.fault_id,
             policy=recorder.policy,
+            # An inspector supplies agent text even when a heuristic drove the game.
+            has_agent_text_channel=(
+                recorder.policy in ("llm", "hybrid") or inspection is not None
+            ),
+            inspection=inspection,
             trace_completeness=trace_completeness,
             oracle_verdict=oracle_verdict,
             transitions=recorder.steps,
@@ -1019,6 +1041,48 @@ def run_session(args: argparse.Namespace) -> int:
                 drain_planner_usage(recorder, planner, "final_assessment")
         except Exception as error:
             recorder.anomalies.append({"step": len(recorder.steps), "kind": "llm_report_failed", "severity": "medium", "evidence": str(error)})
+    inspection = None
+    if args.inspector_model and recorder.steps:
+        try:
+            inspector = LLMPlanner(
+                args.mode,
+                args.inspector_model,
+                charter,
+                args.plan_horizon_seconds,
+                args.api_url,
+                max_attempts=args.llm_max_attempts,
+                retry_budget_seconds=args.llm_retry_budget_seconds,
+                reasoning_effort=args.inspector_effort,
+            )
+            # Named to match the deterministic gate's *request*.jsonl glob on purpose:
+            # that turns the leak scan into a free assertion that the inspector prompt
+            # carried no evaluator state. The response goes to a different file, since
+            # an inspector describing the fault correctly may write words near its id.
+            record_contract_event(
+                output_dir,
+                {"kind": "inspection_request", "payload": build_inspection_payload(recorder.steps)},
+                name="inspector-request.jsonl",
+            )
+            try:
+                inspection = inspect_trace(inspector, recorder.steps)
+            finally:
+                drain_planner_usage(recorder, inspector, "inspection_request")
+            record_contract_event(
+                output_dir,
+                {"kind": "inspection", "findings": inspection.get("findings") or []},
+                name="inspector-response.jsonl",
+            )
+        except Exception as error:
+            # Never fatal: an inspector failure must not turn a completed run into an
+            # infrastructure_error and fail a nine-scenario gate over a network blip.
+            recorder.anomalies.append(
+                {
+                    "step": len(recorder.steps),
+                    "kind": "llm_inspection_failed",
+                    "severity": "medium",
+                    "evidence": str(error),
+                }
+            )
     try:
         verdict = build_session_verdict(
             args,
@@ -1026,6 +1090,7 @@ def run_session(args: argparse.Namespace) -> int:
             fatal_error,
             last_observation,
             llm_assessment=llm_assessment,
+            inspection=inspection,
             # snapshot(), not confirmed(): a later `matched` on the same candidate_id
             # demotes a candidate to rejected, which would erase a real find.
             hypotheses=hypothesis_tracker.snapshot(),

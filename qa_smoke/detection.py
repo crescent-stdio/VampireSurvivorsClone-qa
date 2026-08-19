@@ -163,6 +163,37 @@ def agent_claims(
     return claims
 
 
+def scored_inspection_findings(
+    inspection: dict[str, Any] | None, fault_refs: list[str], tolerance: float = 1e-6
+) -> list[dict[str, Any]]:
+    """Findings whose own numbers disagree, on a transition the oracle rejects.
+
+    Scored numerically rather than by keyword. The rubric undercounted real finds three
+    separate times on wording alone -- "exceed" against "exceeds", "inconsistency"
+    against "inconsistent", "disagree" against "does not match" -- and every fix was
+    another synonym nudging the score upward. A model cannot earn a match here by
+    phrasing, only by producing two values that differ.
+    """
+    flagged = set(fault_refs)
+    scored: list[dict[str, Any]] = []
+    for finding in (inspection or {}).get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        try:
+            computed = float(finding["computed_value"])
+            reported = float(finding["reported_value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if abs(computed - reported) <= tolerance:
+            continue  # the agent checked and the numbers agreed; that is not a finding
+        cited = [
+            str(ref) for ref in finding.get("evidence_refs") or [] if str(ref) in flagged
+        ]
+        if cited:
+            scored.append({**finding, "cited_evidence_refs": cited})
+    return scored
+
+
 def _terms_hit(text: str, terms: list[str]) -> list[str]:
     """Match on word boundaries, not raw substrings.
 
@@ -179,7 +210,9 @@ def _terms_hit(text: str, terms: list[str]) -> list[str]:
 
 
 def has_strong_claim(
-    hypotheses: list[dict[str, Any]] | None, llm_assessment: dict[str, Any] | None
+    hypotheses: list[dict[str, Any]] | None,
+    llm_assessment: dict[str, Any] | None,
+    inspection: dict[str, Any] | None = None,
 ) -> bool:
     """A confirmed hypothesis or a reported bug candidate.
 
@@ -188,6 +221,8 @@ def has_strong_claim(
     control runs would train the agent back into silence.
     """
     if any(str(state.get("status") or "") == "confirmed" for state in hypotheses or []):
+        return True
+    if scored_inspection_findings(inspection, []) or (inspection or {}).get("findings"):
         return True
     candidates = (llm_assessment or {}).get("bug_candidates")
     return bool(isinstance(candidates, list) and candidates)
@@ -199,6 +234,7 @@ def score_agent_detection(
     policy: str,
     trace_completeness: str,
     has_agent_text_channel: bool | None = None,
+    inspection: dict[str, Any] | None = None,
     oracle_verdict: str,
     transitions: list[dict[str, Any]],
     fault_refs: list[str],
@@ -213,6 +249,7 @@ def score_agent_detection(
             policy=policy,
             trace_completeness=trace_completeness,
             has_agent_text_channel=has_agent_text_channel,
+            inspection=inspection,
             oracle_verdict=oracle_verdict,
             transitions=transitions,
             fault_refs=fault_refs,
@@ -230,6 +267,7 @@ def _score(
     policy: str,
     trace_completeness: str,
     has_agent_text_channel: bool | None,
+    inspection: dict[str, Any] | None,
     oracle_verdict: str,
     transitions: list[dict[str, Any]],
     fault_refs: list[str],
@@ -254,7 +292,7 @@ def _score(
             rubric_version=version,
         )
 
-    strong = has_strong_claim(hypotheses, llm_assessment)
+    strong = has_strong_claim(hypotheses, llm_assessment, inspection)
     if not fault_id:
         if strong:
             return DetectionResult(
@@ -285,6 +323,22 @@ def _score(
         return DetectionResult(
             status="not_evaluated",
             reason="the fault never became observable in this trace",
+            rubric_version=version,
+        )
+
+    # Structured findings first: they carry their own evidence and need no vocabulary.
+    inspected = scored_inspection_findings(inspection, fault_refs)
+    if inspected:
+        first = inspected[0]
+        return DetectionResult(
+            status="match",
+            reason=(
+                f"the inspector computed {first['computed_value']} for {first['field']} "
+                f"where the observation reported {first['reported_value']}"
+            ),
+            matched_terms=[str(first.get("field") or "")],
+            matched_surfaces=["inspection"],
+            cited_evidence_refs=list(first["cited_evidence_refs"]),
             rubric_version=version,
         )
 

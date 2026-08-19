@@ -49,6 +49,7 @@ from .run import (
 from .evaluation import evaluate_oracle, fault_evidence_refs, scenario_verdict_axes
 from . import reevaluate as reevaluate_module
 from . import detection as detection_module
+from . import inspector as inspector_module
 from .scenarios import (
     Scenario,
     ScenarioContractError,
@@ -2557,6 +2558,158 @@ class AgentDetectionVerdictTests(unittest.TestCase):
         self.assertEqual(base["final_verdict"], detected["final_verdict"])
 
 
+LUNA_ANSWERS = [
+    {"field": "player.health_ratio", "computed_value": 1.0, "reported_value": 1.25,
+     "statement": "This exceeds the valid fraction range and is a QA finding.",
+     "evidence_refs": ["run-obs-00000003"]},
+    {"field": "player.health_ratio", "computed_value": 0.96, "reported_value": 1.25,
+     "statement": "This is an internal state inconsistency requiring recheck.",
+     "evidence_refs": ["run-obs-00000003"]},
+    {"field": "player.health_ratio", "computed_value": 0.96, "reported_value": 1.25,
+     "statement": "These disagree, indicating a health-ratio consistency anomaly.",
+     "evidence_refs": ["run-obs-00000003"]},
+]
+
+
+class InspectorPayloadTests(unittest.TestCase):
+    """The inspector must never be handed the answer."""
+
+    EVALUATOR_KEYS = (
+        "fault_id", "ground_truth", "player_view", "oracle", "oracle_verdict",
+        "coverage_status", "verdict", "manifest", "bug_id", "expected_behavior",
+    )
+
+    def raw_transition(self) -> dict[str, object]:
+        """A transition shaped like the real recorder output, evaluator state included."""
+        return {
+            "observation": {
+                "observation_id": "run-obs-00000003",
+                "phase": "active_gameplay",
+                "fault_id": "health_ratio_out_of_range",
+                "ground_truth": {"bug_id": "BUG-X", "expected_behavior": "should be consistent"},
+                "player_view": {"health_ratio": 0.96},
+                "oracle": {"oracle_verdict": "fail"},
+                "player": {"present": True, "alive": True, "health": 96.0,
+                           "max_health": 100.0, "health_ratio": 1.25},
+                "world": {"enemy_count": 3, "danger_score": 1.0},
+                "progress": {"level_time": 12.0},
+            }
+        }
+
+    def test_no_evaluator_state_survives_into_the_payload(self) -> None:
+        blob = json.dumps(
+            inspector_module.build_inspection_payload([self.raw_transition()]),
+            ensure_ascii=False,
+        )
+
+        for key in self.EVALUATOR_KEYS:
+            with self.subTest(key=key):
+                self.assertNotIn(f'"{key}"', blob)
+        self.assertNotIn("BUG-X", blob)
+
+    def test_the_fields_needed_to_find_the_bug_do_survive(self) -> None:
+        payload = inspector_module.build_inspection_payload([self.raw_transition()])
+        player = payload["observations"][0]["player"]
+
+        self.assertEqual(96.0, player["health"])
+        self.assertEqual(100.0, player["max_health"])
+        self.assertEqual(1.25, player["health_ratio"])
+        self.assertEqual("run-obs-00000003", payload["observations"][0]["observation_id"])
+
+    def test_an_empty_trace_needs_no_api_call(self) -> None:
+        self.assertEqual({"findings": []}, inspector_module.inspect_trace(None, []))
+
+    def test_malformed_model_output_is_dropped_not_raised(self) -> None:
+        cases = (None, {"findings": "nope"}, {"findings": [{"field": "x"}]},
+                 {"findings": [{"field": "x", "computed_value": "a", "reported_value": 1}]})
+        for payload in cases:
+            with self.subTest(payload=payload):
+                self.assertEqual([], inspector_module.normalize_findings(payload))
+
+
+class InspectorScoringTests(unittest.TestCase):
+    """Structured findings are scored by their numbers, not their adjectives."""
+
+    def score(self, **overrides: object) -> object:
+        kwargs: dict[str, object] = {
+            "fault_id": "health_ratio_out_of_range",
+            "policy": "heuristic",
+            "has_agent_text_channel": True,
+            "trace_completeness": "complete",
+            "oracle_verdict": "fail",
+            "transitions": [],
+            "fault_refs": ["run-obs-00000003"],
+            "hypotheses": [],
+            "llm_assessment": None,
+            "inspection": None,
+        }
+        kwargs.update(overrides)
+        return detection_module.score_agent_detection(**kwargs)
+
+    def test_every_real_luna_answer_scores_a_match(self) -> None:
+        """The keyword rubric scored only one of these three; that is why this path exists."""
+        for index, finding in enumerate(LUNA_ANSWERS):
+            with self.subTest(answer=index):
+                result = self.score(inspection={"findings": [finding]})
+
+                self.assertEqual("match", result.status)
+                self.assertEqual(["inspection"], result.matched_surfaces)
+                self.assertEqual(["run-obs-00000003"], result.cited_evidence_refs)
+
+    def test_the_keyword_rubric_scores_fewer_of_them_than_the_numbers_do(self) -> None:
+        """The whole reason the numeric path exists.
+
+        Judged on wording, these statements score 0 of 3 -- they say "exceeds",
+        "inconsistency" and "disagree", and the rubric lists "exceeds" only alongside a
+        topic term that lives in the field name rather than the sentence. Judged on
+        their numbers, all three are unambiguous.
+        """
+        entry = detection_module.load_rubric().faults["health_ratio_out_of_range"]
+        by_words = sum(
+            bool(
+                detection_module._terms_hit(answer["statement"], entry.topic_terms)
+                and detection_module._terms_hit(answer["statement"], entry.symptom_terms)
+            )
+            for answer in LUNA_ANSWERS
+        )
+        by_numbers = sum(
+            self.score(inspection={"findings": [answer]}).status == "match"
+            for answer in LUNA_ANSWERS
+        )
+
+        self.assertEqual(3, by_numbers)
+        self.assertLess(by_words, by_numbers)
+
+    def test_agreeing_values_are_not_a_finding_however_it_is_worded(self) -> None:
+        alarmed = {
+            "field": "player.health_ratio", "computed_value": 0.96, "reported_value": 0.96,
+            "statement": "ALARMING mismatch, inconsistent, exceeds, does not match!",
+            "evidence_refs": ["run-obs-00000003"],
+        }
+
+        self.assertEqual("miss", self.score(inspection={"findings": [alarmed]}).status)
+
+    def test_a_finding_citing_an_unrejected_transition_is_not_a_match(self) -> None:
+        elsewhere = {**LUNA_ANSWERS[1], "evidence_refs": ["run-obs-00000099"]}
+
+        self.assertEqual("miss", self.score(inspection={"findings": [elsewhere]}).status)
+
+    def test_an_inspector_finding_on_a_control_run_is_a_false_positive(self) -> None:
+        result = self.score(fault_id=None, inspection={"findings": [LUNA_ANSWERS[0]]})
+
+        self.assertEqual("false_positive", result.status)
+
+    def test_a_silent_inspector_on_a_control_run_is_not_a_false_positive(self) -> None:
+        result = self.score(fault_id=None, inspection={"findings": []})
+
+        self.assertEqual("not_evaluated", result.status)
+
+    def test_malformed_findings_do_not_crash_the_scorer(self) -> None:
+        for payload in ({"findings": "nope"}, {"findings": [{"field": "x"}]}, {}):
+            with self.subTest(payload=payload):
+                self.assertIn(self.score(inspection=payload).status, {"miss", "not_evaluated"})
+
+
 class AgentDetectionScoringTests(unittest.TestCase):
     def score(self, **overrides: object) -> object:
         kwargs: dict[str, object] = {
@@ -2569,6 +2722,7 @@ class AgentDetectionScoringTests(unittest.TestCase):
             "hypotheses": [],
             "llm_assessment": None,
             "has_agent_text_channel": None,
+            "inspection": None,
         }
         kwargs.update(overrides)
         return detection_module.score_agent_detection(**kwargs)
