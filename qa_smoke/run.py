@@ -23,6 +23,7 @@ from .planners import (
     canonicalize_decision_arguments,
     compact_observation,
     compute_observed_delta,
+    inject_reflection_evidence_refs,
     observation_phase,
     validate_decision_against_contract,
 )
@@ -625,8 +626,12 @@ def run_session(args: argparse.Namespace) -> int:
                     reflection_contract["has_previous_transition"]
                 )
                 contract["reflection_contract"] = reflection_contract
+                raw_decision = inject_reflection_evidence_refs(
+                    raw_decision, reflection_contract
+                )
                 contract_error = validate_decision_against_contract(raw_decision, contract)
                 if contract_error:
+                    recorder.initial_contract_rejections += 1
                     record_contract_event(
                         output_dir,
                         {
@@ -664,9 +669,21 @@ def run_session(args: argparse.Namespace) -> int:
                                 "decision": repaired_decision,
                             },
                         )
-                    planning_usage = merge_api_usage(planning_usage, planner.take_last_usage())
+                    repaired_decision = inject_reflection_evidence_refs(
+                        repaired_decision, reflection_contract
+                    )
+                    repair_usage = planner.take_last_usage()
+                    repair_cache_boundary = bool(repair_usage.pop("cache_boundary", 0))
+                    recorder.add_api_usage(
+                        "repair_request",
+                        repair_usage,
+                        step,
+                        cache_boundary=repair_cache_boundary,
+                    )
+                    planning_usage = merge_api_usage(planning_usage, repair_usage)
                     repair_error = validate_decision_against_contract(repaired_decision, contract)
                     if repair_error:
+                        recorder.repair_contract_rejections += 1
                         record_contract_event(
                             output_dir,
                             {

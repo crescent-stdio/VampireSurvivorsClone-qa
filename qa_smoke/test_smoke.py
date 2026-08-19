@@ -417,7 +417,7 @@ class LLMPlannerTests(unittest.TestCase):
         )
         self.assertEqual(
             ["matched", "unexpected", "uncertain"],
-            payload["action_contract"]["reflection_contract"]["allowed_statuses"],
+            payload["reflection_contract"]["allowed_statuses"],
         )
 
     def test_response_schema_limits_reflection_status_to_transition_phase(self) -> None:
@@ -471,7 +471,10 @@ class LLMPlannerTests(unittest.TestCase):
 
         system_prompt = request.call_args.args[0]
         self.assertIn("has_previous_transition", system_prompt)
-        self.assertIn("Do not invent evidence IDs", system_prompt)
+        self.assertIn(
+            "Do not invent evidence IDs",
+            request.call_args.kwargs["messages"][-1]["content"],
+        )
 
     def test_active_gameplay_contract_rejects_unpause_loop_without_choosing_vector(self) -> None:
         observation = {

@@ -320,6 +320,14 @@ def build_reflection_contract(
         event_id = str(event.get("event_id") or "").strip()
         if event_id and event_id not in allowed_evidence_refs:
             allowed_evidence_refs.append(event_id)
+        if not observation_id:
+            observed_delta = previous_transition.get("observed_delta") or {}
+            if isinstance(observed_delta, dict):
+                fallback_id = str(
+                    observed_delta.get("after_observation_id") or ""
+                ).strip()
+                if fallback_id and fallback_id not in allowed_evidence_refs:
+                    allowed_evidence_refs.insert(0, fallback_id)
 
     return {
         "has_previous_transition": has_previous_transition,
@@ -332,6 +340,23 @@ def build_reflection_contract(
         "candidate_id_required_for": ["unexpected"],
         "allowed_evidence_refs": allowed_evidence_refs,
     }
+
+
+def inject_reflection_evidence_refs(
+    decision: dict[str, Any],
+    reflection_contract: dict[str, Any],
+) -> dict[str, Any]:
+    """Replace model-selected evidence with the deterministic latest transition IDs."""
+    injected = dict(decision)
+    reflection = decision.get("reflection")
+    if not isinstance(reflection, dict):
+        return injected
+    injected_reflection = dict(reflection)
+    injected_reflection["evidence_refs"] = list(
+        reflection_contract.get("allowed_evidence_refs") or []
+    )
+    injected["reflection"] = injected_reflection
+    return injected
 
 
 def canonicalize_decision_arguments(decision: dict[str, Any]) -> dict[str, Any]:
@@ -818,32 +843,35 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
         tool_context: list[dict[str, Any]],
         source_steps_remaining: int,
     ) -> dict[str, Any]:
-        memory = SessionMemory.from_transitions(tool_context)
-        recent_transitions = memory.recent_transitions()
         action_contract = build_action_contract(
             observation, self.mode, self.charter, source_steps_remaining
         )
-        previous_transition = recent_transitions[-1] if recent_transitions else None
+        previous_transition = tool_context[-1] if tool_context else None
         reflection_contract = build_reflection_contract(previous_transition)
         action_contract["has_previous_transition"] = (
             reflection_contract["has_previous_transition"]
         )
-        action_contract["reflection_contract"] = reflection_contract
-        return {
+        prior_outcome = (
+            compact_planning_transition(
+                previous_transition,
+                include_latest_details=True,
+            )
+            if previous_transition
+            else None
+        )
+        source_tool_result = None
+        if isinstance(prior_outcome, dict):
+            source_tool_result = prior_outcome.pop("source_tool_result", None)
+        payload = {
             "step": step,
-            "test_charter": self.charter.as_dict(),
             "observation": compact_observation(observation),
             "action_contract": action_contract,
             "reflection_contract": reflection_contract,
-            "previous_transition": previous_transition,
-            "recent_transitions": recent_transitions,
-            "session_memory": memory.summary(),
-            "observed_delta": (
-                previous_transition.get("observed_delta")
-                if isinstance(previous_transition, dict)
-                else None
-            ),
+            "prior_outcome": prior_outcome,
         }
+        if source_tool_result is not None:
+            payload["source_tool_result"] = source_tool_result
+        return payload
 
     def final_assessment(self, context: dict[str, Any]) -> dict[str, Any] | None:
         system = """You are a senior game QA engineer. Report only the agent's confirmed hypotheses from its own reproduction attempts. Return a JSON object with keys executive_summary, bug_candidates, coverage_gaps. Do not infer bugs from evaluator data, hidden fault identities, rule-based anomaly output, or normal gameplay outcomes."""
