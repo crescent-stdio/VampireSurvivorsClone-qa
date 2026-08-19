@@ -2490,15 +2490,151 @@ class PartialTraceVerdictTests(unittest.TestCase):
             )
 
 
+def rate_limited(retry_after: str | None = None, body: str = "{}"):
+    """An opener that 429s a fixed number of times, then returns a valid plan."""
+
+    def build(failures: int):
+        state = {"calls": 0}
+
+        def opener(*_args, **_kwargs):
+            state["calls"] += 1
+            if state["calls"] <= failures:
+                headers = {"Retry-After": retry_after} if retry_after else {}
+                raise urllib.error.HTTPError(
+                    "https://example.invalid", 429, "Too Many Requests", headers,
+                    io.BytesIO(body.encode("utf-8")),
+                )
+            return fake_opener(
+                json.dumps({"choices": [{"message": {"content": "{\"ok\": true}"}}], "usage": {}})
+            )()
+
+        return opener
+
+    return build
+
+
+class LLMRetryTests(unittest.TestCase):
+    """Transient provider failures must not end an episode."""
+
+    def planner(self, opener, sleeps: list[float], **kwargs) -> LLMPlanner:
+        return LLMPlanner(
+            "qa", "test-model", TestCharter(), 5.0,
+            api_key="test-key", urlopen=opener, sleep=sleeps.append, **kwargs
+        )
+
+    def send(self, planner: LLMPlanner):
+        return planner._send_with_retries(urllib.request.Request("https://example.invalid"))
+
+    def test_rate_limited_request_retries_then_succeeds(self) -> None:
+        sleeps: list[float] = []
+        planner = self.planner(rate_limited()(2), sleeps)
+
+        body = self.send(planner)
+
+        self.assertTrue(body["choices"])
+        self.assertEqual([1.0, 2.0], sleeps)
+        self.assertEqual(2, planner._retry_count)
+        self.assertEqual(3, planner._http_attempts)
+
+    def test_retry_after_header_overrides_exponential_backoff(self) -> None:
+        sleeps: list[float] = []
+        self.send(self.planner(rate_limited(retry_after="11.169")(1), sleeps))
+
+        self.assertEqual([11.169], sleeps)
+
+    def test_retry_delay_is_recovered_from_the_error_body(self) -> None:
+        """Every real 429 this harness recorded carried the delay only in the text."""
+        sleeps: list[float] = []
+        body = '{"error": {"message": "Rate limit reached. Please try again in 1.531s."}}'
+        self.send(self.planner(rate_limited(body=body)(1), sleeps))
+
+        self.assertEqual([1.531], sleeps)
+
+    def test_a_single_absurd_hint_cannot_stall_the_run(self) -> None:
+        sleeps: list[float] = []
+        self.send(self.planner(rate_limited(retry_after="600")(1), sleeps))
+
+        self.assertEqual([20.0], sleeps)
+
+    def test_retry_budget_bounds_total_added_wall_time(self) -> None:
+        sleeps: list[float] = []
+        planner = self.planner(
+            rate_limited(retry_after="4")(5), sleeps, max_attempts=5, retry_budget_seconds=5.0
+        )
+
+        with self.assertRaisesRegex(planners_module.LLMTransportError, "budget"):
+            self.send(planner)
+        self.assertEqual([4.0], sleeps)
+
+    def test_authentication_failure_is_not_retried(self) -> None:
+        """Quota lock: a bad key must fail fast, not burn attempts."""
+        sleeps: list[float] = []
+
+        def opener(*_args, **_kwargs):
+            raise urllib.error.HTTPError(
+                "https://example.invalid", 401, "Unauthorized", {}, io.BytesIO(b"{}")
+            )
+
+        with self.assertRaises(planners_module.LLMTransportError):
+            self.send(self.planner(opener, sleeps))
+        self.assertEqual([], sleeps)
+
+    def test_bad_request_is_not_retried(self) -> None:
+        sleeps: list[float] = []
+
+        def opener(*_args, **_kwargs):
+            raise urllib.error.HTTPError(
+                "https://example.invalid", 400, "Bad Request", {}, io.BytesIO(b"{}")
+            )
+
+        with self.assertRaises(planners_module.LLMTransportError):
+            self.send(self.planner(opener, sleeps))
+        self.assertEqual([], sleeps)
+
+    def test_max_attempts_one_restores_the_previous_behavior(self) -> None:
+        sleeps: list[float] = []
+        planner = self.planner(rate_limited()(1), sleeps, max_attempts=1)
+
+        with self.assertRaises(planners_module.LLMTransportError):
+            self.send(planner)
+        self.assertEqual([], sleeps)
+
+    def test_exhaustion_message_records_the_attempts(self) -> None:
+        sleeps: list[float] = []
+
+        with self.assertRaisesRegex(planners_module.LLMTransportError, r"attempts=3.*retries=2"):
+            self.send(self.planner(rate_limited()(9), sleeps))
+
+    def test_retry_counters_reach_api_usage_totals(self) -> None:
+        recorder = RunRecorder(TEST_TEMP_ROOT / "retry-usage", "qa", "llm", 9101)
+        for _ in range(2):
+            recorder.add_api_usage(
+                "planning_request",
+                {"request_count": 1, "llm_retries": 2, "llm_http_attempts": 3, "llm_retry_wait_ms": 3000},
+            )
+
+        totals = recorder.api_usage_totals()
+
+        self.assertEqual(4, totals["llm_retries"])
+        self.assertEqual(6, totals["llm_http_attempts"])
+        self.assertEqual(6000, totals["llm_retry_wait_ms"])
+        self.assertEqual(2, totals["calls"])
+
+    def test_invalid_retry_configuration_is_rejected(self) -> None:
+        for kwargs in ({"max_attempts": 0}, {"retry_budget_seconds": -1.0}):
+            with self.subTest(**kwargs):
+                with self.assertRaises(ValueError):
+                    LLMPlanner("qa", "m", TestCharter(), 5.0, api_key="k", **kwargs)
+
+
 class LLMTransportLabelTests(unittest.TestCase):
     """Every way a request can fail must be labelled and stay infrastructure."""
 
-    def planner(self) -> LLMPlanner:
-        return LLMPlanner("qa", "test-model", TestCharter(), 5.0, api_key="test-key")
-
-    def send(self, planner: LLMPlanner, opener) -> None:
-        with patch("urllib.request.urlopen", opener):
-            planner._send_once(urllib.request.Request("https://example.invalid"))
+    def send(self, opener) -> None:
+        planner = LLMPlanner(
+            "qa", "test-model", TestCharter(), 5.0, api_key="test-key", urlopen=opener
+        )
+        planner._send_once(urllib.request.Request("https://example.invalid"))
 
     def test_http_error_is_labelled_a_transport_error(self) -> None:
         def opener(*_args, **_kwargs):
@@ -2508,29 +2644,29 @@ class LLMTransportLabelTests(unittest.TestCase):
             )
 
         with self.assertRaisesRegex(planners_module.LLMTransportError, "HTTP 429"):
-            self.send(self.planner(), opener)
+            self.send(opener)
 
     def test_connection_error_is_labelled_a_transport_error(self) -> None:
         def opener(*_args, **_kwargs):
             raise urllib.error.URLError("connection reset")
 
         with self.assertRaises(planners_module.LLMTransportError):
-            self.send(self.planner(), opener)
+            self.send(opener)
 
     def test_timeout_is_labelled_a_transport_error(self) -> None:
         def opener(*_args, **_kwargs):
             raise TimeoutError()
 
         with self.assertRaisesRegex(planners_module.LLMTransportError, "timed out"):
-            self.send(self.planner(), opener)
+            self.send(opener)
 
     def test_non_json_body_is_labelled_a_response_error(self) -> None:
         with self.assertRaisesRegex(planners_module.LLMResponseError, "non-JSON"):
-            self.send(self.planner(), fake_opener("<html>gateway</html>"))
+            self.send(fake_opener("<html>gateway</html>"))
 
     def test_envelope_without_choices_is_labelled_a_response_error(self) -> None:
         with self.assertRaisesRegex(planners_module.LLMResponseError, "no choices"):
-            self.send(self.planner(), fake_opener(json.dumps({"usage": {}})))
+            self.send(fake_opener(json.dumps({"usage": {}})))
 
     def test_transport_failures_are_classified_as_infrastructure_errors(self) -> None:
         """Guards the name-prefix coupling in build_session_verdict.

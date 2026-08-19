@@ -319,6 +319,7 @@ class RunRecorder:
         keys = (
             "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens",
             "uncached_prompt_tokens", "cache_write_tokens", "reasoning_tokens", "latency_ms",
+            "llm_retries", "llm_retry_wait_ms", "llm_http_attempts",
         )
         totals = {key: sum(int(event.get(key, 0) or 0) for event in self.api_usage_events) for key in keys}
         totals["calls"] = sum(

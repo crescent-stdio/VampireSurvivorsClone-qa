@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+from datetime import datetime
 import urllib.error
 import urllib.request
 import time
@@ -670,6 +671,79 @@ def compact_observation(observation: dict[str, Any], max_threats: int = 8, max_c
     }
 
 
+# Statuses worth another attempt. 400/401/403/404/413/422 are deliberately
+# absent: they are deterministic misconfigurations, and retrying one only turns
+# a fast failure into a slow one while burning quota.
+RETRYABLE_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+MAX_RETRY_WAIT_SECONDS = 20.0
+_DURATION_PATTERN = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)")
+_BODY_RETRY_PATTERN = re.compile(
+    r"try again in\s+([0-9]+(?:\.[0-9]+)?)\s*(ms|s)", re.IGNORECASE
+)
+_DURATION_SCALE = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+
+
+def _parse_duration(text: str) -> float | None:
+    """Parse an OpenAI-style duration such as "11.169s", "250ms" or "1m30s"."""
+    matches = _DURATION_PATTERN.findall(text.strip())
+    if not matches:
+        return None
+    return sum(float(value) * _DURATION_SCALE[unit] for value, unit in matches)
+
+
+def parse_retry_after(headers: Any, body: str) -> float | None:
+    """Recover the provider's own "wait this long" hint.
+
+    Checked in descending order of authority. The body regex is last but is not
+    a fallback of last resort in practice: every rate-limited run this harness
+    has recorded carried the delay only in the message text.
+    """
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        raw = getter("Retry-After")
+        if raw:
+            try:
+                return max(0.0, float(str(raw).strip()))
+            except ValueError:
+                try:
+                    from email.utils import parsedate_to_datetime
+
+                    target = parsedate_to_datetime(str(raw))
+                    return max(0.0, (target - datetime.now(target.tzinfo)).total_seconds())
+                except (TypeError, ValueError):
+                    pass
+        for name in ("x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"):
+            raw = getter(name)
+            if raw:
+                parsed = _parse_duration(str(raw))
+                if parsed is not None:
+                    return parsed
+    match = _BODY_RETRY_PATTERN.search(body or "")
+    if match:
+        return float(match.group(1)) * _DURATION_SCALE[match.group(2).lower()]
+    return None
+
+
+def _is_retryable(error: Exception) -> bool:
+    return bool(getattr(error, "retryable", False))
+
+
+def _transport_error(
+    message: str, *, retryable: bool, retry_after: float | None = None
+) -> "LLMTransportError":
+    error = LLMTransportError(message)
+    error.retryable = retryable
+    error.retry_after = retry_after
+    return error
+
+
+def _response_error(message: str, *, retryable: bool) -> "LLMResponseError":
+    error = LLMResponseError(message)
+    error.retryable = retryable
+    error.retry_after = None
+    return error
+
+
 class LLMTransportError(RuntimeError):
     """The request never produced a usable HTTP response.
 
@@ -777,6 +851,12 @@ class LLMPlanner:
         plan_horizon_seconds: float,
         api_url: str | None = None,
         api_key: str | None = None,
+        *,
+        max_attempts: int = 3,
+        retry_budget_seconds: float = 45.0,
+        sleep: Any = time.sleep,
+        monotonic: Any = time.monotonic,
+        urlopen: Any = None,
     ) -> None:
         self.mode = mode
         self.model = model
@@ -788,7 +868,19 @@ class LLMPlanner:
             raise ValueError("LLM policy requires --model or QA_MODEL")
         if not self.api_key:
             raise ValueError("LLM policy requires QA_API_KEY or OPENAI_API_KEY")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        if retry_budget_seconds < 0:
+            raise ValueError("retry_budget_seconds must be zero or greater")
+        self.max_attempts = max_attempts
+        self.retry_budget_seconds = retry_budget_seconds
+        self.sleep = sleep
+        self.monotonic = monotonic
+        self._urlopen = urlopen or urllib.request.urlopen
         self.last_usage: dict[str, int] = {}
+        self._retry_count = 0
+        self._retry_wait_seconds = 0.0
+        self._http_attempts = 0
         self._planning_history = PlanningHistory()
         self._pending_user_content: str | None = None
         self._pending_tool_context: list[dict[str, Any]] | None = None
@@ -1038,12 +1130,17 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
             method="POST",
         )
-        request_started = time.monotonic()
-        response_body = self._send_once(request)
+        request_started = self.monotonic()
+        response_body = self._send_with_retries(request)
         self.last_usage = self._normalize_usage(response_body.get("usage") or {})
         self.last_usage["latency_ms"] = max(0, round((time.monotonic() - request_started) * 1000))
+        # request_count stays 1: one logical planning call, however many HTTP
+        # round trips it took, so calls/mean_latency stay comparable across runs.
         self.last_usage["request_count"] = 1
         self.last_usage["cache_boundary"] = int(bool(cache_boundary))
+        self.last_usage["llm_retries"] = self._retry_count
+        self.last_usage["llm_retry_wait_ms"] = round(self._retry_wait_seconds * 1000)
+        self.last_usage["llm_http_attempts"] = self._http_attempts
         choice = response_body["choices"][0]
         if choice.get("finish_reason") == "length":
             raise RuntimeError("LLM response was truncated at the output token limit")
@@ -1052,6 +1149,54 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
             content = "".join(item.get("text", "") for item in content if isinstance(item, dict))
         return self._parse_json(str(content))
 
+    def _send_with_retries(self, request: urllib.request.Request) -> dict[str, Any]:
+        """Retry a transient failure, honoring the provider's own delay hint.
+
+        Planning requests are side-effect-free until commit_plan(), so replaying
+        the HTTP call is safe. Three separate bounds apply, and all three are
+        needed: an attempt cap, a per-wait ceiling so one absurd hint cannot
+        stall the run, and a cumulative budget so repeated hints cannot either.
+        The per-wait ceiling must exceed the observed rate-limit windows -- the
+        real 429s asked for up to 11.2s, and clamping below that would guarantee
+        an immediate second rejection.
+        """
+        self._retry_count = 0
+        self._retry_wait_seconds = 0.0
+        self._http_attempts = 0
+        budget_remaining = self.retry_budget_seconds
+        for attempt in range(self.max_attempts):
+            self._http_attempts += 1
+            try:
+                return self._send_once(request)
+            except (LLMTransportError, LLMResponseError) as error:
+                last_attempt = attempt >= self.max_attempts - 1
+                if last_attempt or not _is_retryable(error):
+                    raise self._describe_exhaustion(error)
+                wait = min(
+                    max(getattr(error, "retry_after", None) or 0.0, float(2**attempt)),
+                    MAX_RETRY_WAIT_SECONDS,
+                )
+                if wait > budget_remaining:
+                    raise self._describe_exhaustion(
+                        error,
+                        f"retry budget of {self.retry_budget_seconds:g}s exhausted; "
+                        f"the provider asked for {wait:g}s more",
+                    )
+                budget_remaining -= wait
+                self._retry_count += 1
+                self._retry_wait_seconds += wait
+                self.sleep(wait)
+        raise LLMTransportError("LLM retry loop terminated unexpectedly")
+
+    def _describe_exhaustion(self, error: Exception, extra: str = "") -> Exception:
+        suffix = (
+            f" [attempts={self._http_attempts}, retries={self._retry_count}, "
+            f"slept={self._retry_wait_seconds:.1f}s]"
+        )
+        if extra:
+            suffix = f" [{extra}]{suffix}"
+        return type(error)(f"{error}{suffix}")
+
     def _send_once(self, request: urllib.request.Request) -> dict[str, Any]:
         """Perform one round trip, labelling every way it can fail.
 
@@ -1059,25 +1204,37 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
         read timeout, or a truncated body surfaced as a bare unlabelled error.
         """
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with self._urlopen(request, timeout=120) as response:
                 payload = response.read().decode("utf-8")
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
-            raise LLMTransportError(f"LLM API HTTP {error.code}: {detail[:1000]}") from error
+            raise _transport_error(
+                f"LLM API HTTP {error.code}: {detail[:1000]}",
+                retryable=error.code in RETRYABLE_HTTP_STATUSES,
+                retry_after=parse_retry_after(getattr(error, "headers", None), detail),
+            ) from error
         except urllib.error.URLError as error:
             # URLError is HTTPError's base class, so this must stay second.
-            raise LLMTransportError(f"LLM API request failed: {error.reason}") from error
+            raise _transport_error(
+                f"LLM API request failed: {error.reason}", retryable=True
+            ) from error
         except TimeoutError as error:
-            raise LLMTransportError("LLM API request timed out after 120s") from error
+            raise _transport_error(
+                "LLM API request timed out after 120s", retryable=True
+            ) from error
         try:
             response_body = json.loads(payload)
         except json.JSONDecodeError as error:
-            raise LLMResponseError(
-                f"LLM API returned a non-JSON body ({len(payload)} bytes): {payload[:200]}"
+            # A mangled envelope is usually a truncated transfer, so allow a retry.
+            raise _response_error(
+                f"LLM API returned a non-JSON body ({len(payload)} bytes): {payload[:200]}",
+                retryable=True,
             ) from error
         if not isinstance(response_body, dict) or not response_body.get("choices"):
-            raise LLMResponseError(
-                f"LLM API response carried no choices: {payload[:200]}"
+            # A well-formed envelope with no choices is a real provider answer,
+            # not a glitch; repeating the request would repeat the answer.
+            raise _response_error(
+                f"LLM API response carried no choices: {payload[:200]}", retryable=False
             )
         return response_body
 
