@@ -32,6 +32,9 @@ from .scenarios import ScenarioContractError, load_scenario, scenario_fingerprin
 from .source_tools import SourceTools
 
 
+# Halved from the steer path's 1.4 so the assist deflects without overriding intent.
+DEFAULT_ASSIST_SURVIVAL_WEIGHT = 0.6
+
 SCENARIO_OWNED_ARGUMENTS = {
     "objective": "--objective",
     "movement_constraint": "--movement-constraint",
@@ -76,7 +79,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mode", choices=("player", "qa"), default="player")
-    parser.add_argument("--policy", choices=("heuristic", "llm"), default="heuristic")
+    parser.add_argument("--policy", choices=("heuristic", "llm", "hybrid"), default="heuristic")
     parser.add_argument("--model", default=os.environ.get("QA_MODEL", ""))
     parser.add_argument("--api-url", default=os.environ.get("QA_API_URL"))
     parser.add_argument("--scenario")
@@ -99,6 +102,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--pause-during-planning",
         action="store_true",
         help="Pause after each horizon instead of holding the previous LLM vector while the next plan is pending.",
+    )
+    parser.add_argument(
+        "--assist-survival-weight",
+        type=float,
+        default=DEFAULT_ASSIST_SURVIVAL_WEIGHT,
+        help=(
+            "Weight of the per-frame bridge avoidance blend. Only --policy hybrid uses it; "
+            "passing it with any other policy is an error rather than a silent no-op."
+        ),
     )
     parser.add_argument("--min-forward-component", type=float, default=None)
     chest_group = parser.add_mutually_exclusive_group()
@@ -127,6 +139,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def resolve_run_arguments(args: argparse.Namespace) -> argparse.Namespace:
     args.scenario_definition = None
     args.preset = ""
+    # hybrid is llm planning plus a per-frame bridge assist, so it shares every
+    # llm-only code path. --policy is not scenario-owned, so this holds for both branches.
+    args.uses_llm_planner = args.policy in ("llm", "hybrid")
+    args.bridge_assist = args.policy == "hybrid"
+    if not args.bridge_assist and args.assist_survival_weight != DEFAULT_ASSIST_SURVIVAL_WEIGHT:
+        raise ScenarioContractError(
+            "--assist-survival-weight only applies to --policy hybrid"
+        )
     if args.scenario:
         conflicting = [
             flag
@@ -168,6 +188,8 @@ def charter_from_args(args: argparse.Namespace) -> TestCharter:
         survival_weight=args.survival_weight,
         interrupt_health_ratio=args.interrupt_health_ratio,
         interrupt_danger_score=args.interrupt_danger_score,
+        bridge_assist=args.bridge_assist,
+        assist_survival_weight=args.assist_survival_weight,
     )
 
 
@@ -237,6 +259,15 @@ def normalize_decision(
                     "interrupt_danger_score": charter.interrupt_danger_score,
                     "interrupt_chest_distance": 2.5,
                     "continue_during_planning": bool(llm_direct_control and continue_during_planning),
+                    # Sourced from the charter, never from the model. This is not recorded
+                    # as a constraint_enforcement: that list means "the agent asked for
+                    # something the charter disallowed", whereas the assist is declared
+                    # bridge behavior. It is attributable via test_charter.control_policy,
+                    # metrics.bridge_assist, and controller.commanded vs controller.steering.
+                    "assist_avoidance": bool(charter.bridge_assist),
+                    "assist_survival_weight": (
+                        float(charter.assist_survival_weight) if charter.bridge_assist else 0.0
+                    ),
                 }
             elif action in ("steer", "move"):
                 arguments = {
@@ -510,7 +541,7 @@ def run_session(args: argparse.Namespace) -> int:
         args.seed,
         run_id=run_id,
         charter=charter.as_dict(),
-        model=args.model if args.policy == "llm" else None,
+        model=args.model if args.uses_llm_planner else None,
         game_window_visible=not args.headless,
         scenario_id=scenario_id,
         preset=getattr(args, "preset", ""),
@@ -519,7 +550,7 @@ def run_session(args: argparse.Namespace) -> int:
     )
     planner: Planner
     try:
-        if args.policy == "llm":
+        if args.uses_llm_planner:
             planner = LLMPlanner(args.mode, args.model, charter, args.plan_horizon_seconds, args.api_url)
         else:
             planner = HeuristicPlanner(args.plan_horizon_seconds, charter)
@@ -560,7 +591,8 @@ def run_session(args: argparse.Namespace) -> int:
             print(
                 f"[charter targets] heading={charter.movement_constraint}, requested_min_forward={charter.min_forward_component}, "
                 f"collect_chests={charter.collect_chests}, max_restarts={charter.max_restarts}; "
-                f"llm_direction_correction={'disabled' if args.policy == 'llm' else 'baseline-specific'}",
+                f"policy={args.policy}, bridge_assist="
+                f"{f'{charter.assist_survival_weight} per frame' if charter.bridge_assist else 'disabled'}",
                 flush=True,
             )
         ready = client.launch()
@@ -599,17 +631,17 @@ def run_session(args: argparse.Namespace) -> int:
                 if not args.quiet:
                     print(f"[terminal] {stop_reason}", flush=True)
                 break
-            if not args.quiet and args.policy == "llm":
+            if not args.quiet and args.uses_llm_planner:
                 print(f"[step {step:02d}] Waiting for LLM plan...", flush=True)
             source_steps_remaining = max(0, args.max_source_steps - source_steps)
-            if args.policy == "llm" and planning_window_started is None:
+            if args.uses_llm_planner and planning_window_started is None:
                 planning_window_started = time.monotonic()
             raw_decision = canonicalize_decision_arguments(
                 planner.plan(last_observation, step, tool_context, source_steps_remaining)
             )
             planning_usage = planner.take_last_usage()
             initial_cache_boundary = bool(planning_usage.pop("cache_boundary", 0))
-            if args.policy == "llm":
+            if args.uses_llm_planner:
                 recorder.add_api_usage(
                     "planning_request",
                     planning_usage,
@@ -626,7 +658,7 @@ def run_session(args: argparse.Namespace) -> int:
                         "decision": raw_decision,
                     },
                 )
-            if args.policy == "llm":
+            if args.uses_llm_planner:
                 contract = build_action_contract(
                     last_observation, args.mode, charter, source_steps_remaining
                 )
@@ -726,7 +758,7 @@ def run_session(args: argparse.Namespace) -> int:
                 charter,
                 args.plan_horizon_seconds,
                 restarts_used,
-                args.policy == "llm",
+                args.uses_llm_planner,
                 not args.pause_during_planning,
             )
             decision = attach_decision_identity(decision, run_id, step)
@@ -784,7 +816,7 @@ def run_session(args: argparse.Namespace) -> int:
             if decision["action"] == "restart" and last_observation.get("ok"):
                 restarts_used += 1
             recorder.record(step, decision, last_observation, time.monotonic() - started, planning_usage)
-            if args.policy == "llm" and observation_phase(previous_observation) == "active_gameplay":
+            if args.uses_llm_planner and observation_phase(previous_observation) == "active_gameplay":
                 if observation_made_progress(previous_observation, last_observation):
                     stalled_steps = 0
                 else:
@@ -876,7 +908,7 @@ def run_session(args: argparse.Namespace) -> int:
         "fatal_error": fatal_error,
     }
     llm_assessment = None
-    if fatal_error is None and args.policy == "llm":
+    if fatal_error is None and args.uses_llm_planner:
         try:
             llm_assessment = planner.final_assessment(assessment_context)
             recorder.add_api_usage("final_assessment", planner.take_last_usage())

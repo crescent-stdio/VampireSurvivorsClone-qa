@@ -2347,6 +2347,116 @@ class BridgeAssistGuardTests(unittest.TestCase):
                     expected, scenario_fingerprint(load_scenario(scenario_id))
                 )
 
+    def test_llm_policy_never_requests_bridge_assist(self) -> None:
+        """The regression lock: --policy llm must stay a pure raw-vector arm."""
+        decision = normalize_decision(
+            {
+                "tool": "game",
+                "action": "direct_steer",
+                "arguments": {"x": 1.0, "y": 0.0, "duration": 5},
+            },
+            "qa",
+            TestCharter(),
+            llm_direct_control=True,
+        )
+
+        self.assertFalse(decision["arguments"]["assist_avoidance"])
+        self.assertEqual(0.0, decision["arguments"]["assist_survival_weight"])
+
+    def test_hybrid_policy_injects_bridge_assist_into_direct_steer(self) -> None:
+        decision = normalize_decision(
+            {
+                "tool": "game",
+                "action": "direct_steer",
+                "arguments": {"x": 0.6, "y": -0.8, "duration": 5},
+            },
+            "qa",
+            TestCharter(bridge_assist=True, assist_survival_weight=0.6),
+            llm_direct_control=True,
+        )
+
+        self.assertTrue(decision["arguments"]["assist_avoidance"])
+        self.assertEqual(0.6, decision["arguments"]["assist_survival_weight"])
+        # The bridge blends; it must never rewrite the requested vector host-side.
+        self.assertEqual(0.6, decision["arguments"]["x"])
+        self.assertEqual(-0.8, decision["arguments"]["y"])
+
+    def test_bridge_assist_is_not_recorded_as_a_constraint_enforcement(self) -> None:
+        """constraint_enforcements means the agent violated the charter.
+
+        The assist is declared bridge behavior, so logging it there would both
+        inflate a headline A/B metric and overload the field's meaning.
+        """
+        decision = normalize_decision(
+            {
+                "tool": "game",
+                "action": "direct_steer",
+                "arguments": {"x": 1.0, "y": 0.0, "duration": 5},
+            },
+            "qa",
+            TestCharter(bridge_assist=True),
+            llm_direct_control=True,
+        )
+
+        self.assertEqual([], decision["constraint_enforcements"])
+
+    def test_hybrid_policy_selects_the_llm_planner(self) -> None:
+        args = run_module.parse_args(
+            [
+                    "--game-exe", "player.app",
+                    "--output", "artifacts",
+                    "--mode", "qa",
+                "--policy", "hybrid",
+            ]
+        )
+
+        self.assertTrue(args.uses_llm_planner)
+        self.assertTrue(args.bridge_assist)
+        self.assertTrue(run_module.charter_from_args(args).bridge_assist)
+
+    def test_llm_policy_does_not_enable_the_bridge_assist(self) -> None:
+        args = run_module.parse_args(
+            [
+                    "--game-exe", "player.app",
+                    "--output", "artifacts",
+                    "--mode", "qa",
+                "--policy", "llm",
+            ]
+        )
+
+        self.assertTrue(args.uses_llm_planner)
+        self.assertFalse(args.bridge_assist)
+        self.assertFalse(run_module.charter_from_args(args).bridge_assist)
+
+    def test_assist_weight_is_rejected_without_the_hybrid_policy(self) -> None:
+        with self.assertRaisesRegex(ScenarioContractError, "only applies to --policy hybrid"):
+            run_module.parse_args(
+                [
+                    "--game-exe", "player.app",
+                    "--output", "artifacts",
+                    "--policy", "llm",
+                    "--assist-survival-weight", "0.9",
+                ]
+            )
+
+    def test_scenario_run_accepts_the_hybrid_policy(self) -> None:
+        """--policy is not scenario-owned, so it must not trip the charter conflict."""
+        args = run_module.parse_args(
+            [
+                    "--game-exe", "player.app",
+                    "--output", "artifacts",
+                    "--project-root", str(Path(__file__).resolve().parent.parent),
+                    "--mode", "qa",
+                    "--policy", "hybrid",
+                    "--scenario", "easy-health-ratio",
+                "--seed", "9102",
+            ]
+        )
+
+        self.assertTrue(args.bridge_assist)
+        self.assertEqual(9102, args.seed)
+        self.assertTrue(run_module.charter_from_args(args).as_dict()["control_policy"]["automatic_enemy_avoidance"])
+
     def test_hybrid_charter_declares_the_automatic_avoidance(self) -> None:
         control = TestCharter(bridge_assist=True).as_dict()["control_policy"]
 

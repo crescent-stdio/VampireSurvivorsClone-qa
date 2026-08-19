@@ -357,7 +357,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--scenario", action="append", default=[])
     parser.add_argument("--seed", type=int, action="append")
     parser.add_argument("--mode", choices=("player", "qa"), default="qa")
-    parser.add_argument("--policy", choices=("heuristic", "llm"), default="heuristic")
+    parser.add_argument("--policy", choices=("heuristic", "llm", "hybrid"), default="heuristic")
     parser.add_argument("--model", default=os.environ.get("QA_MODEL", ""))
     parser.add_argument("--api-url", default=os.environ.get("QA_API_URL"))
     parser.add_argument("--headless", action="store_true")
