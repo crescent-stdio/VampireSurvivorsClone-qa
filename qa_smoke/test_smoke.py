@@ -2626,6 +2626,27 @@ class AgentDetectionScoringTests(unittest.TestCase):
             [], detection_module._terms_hit("exp does not match exp ratio", entry.topic_terms)
         )
 
+    def test_inflected_symptom_forms_are_recognized(self) -> None:
+        """Word-boundary matching makes each verb form a distinct token.
+
+        gpt-4o wrote "should not exceed 1.0 ... indicating a QA finding" and was
+        scored a miss because the rubric only listed "exceeds". Undercounting makes
+        a capable agent look incapable, which is as damaging as overcounting.
+        """
+        entry = detection_module.load_rubric().faults["health_ratio_out_of_range"]
+        found = "health_ratio was 1.25 and should not exceed 1.0, indicating a QA finding"
+
+        self.assertNotEqual([], detection_module._terms_hit(found, entry.topic_terms))
+        self.assertNotEqual([], detection_module._terms_hit(found, entry.symptom_terms))
+
+    def test_computing_a_value_without_comparing_it_is_not_a_finding(self) -> None:
+        """gpt-4o-mini computed 96/100 = 0.96 and called it valid, never comparing
+        against the reported 1.25. Doing the arithmetic is not noticing."""
+        entry = detection_module.load_rubric().faults["health_ratio_out_of_range"]
+        computed = "Computed health_ratio is 96/100 = 0.96, which is valid"
+
+        self.assertEqual([], detection_module._terms_hit(computed, entry.symptom_terms))
+
     def test_a_control_run_can_never_be_scored_match(self) -> None:
         """Regression lock across every rubric fault."""
         rubric = detection_module.load_rubric()

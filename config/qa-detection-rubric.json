@@ -27,7 +27,13 @@
         "not equal",
         "invalid",
         "outside the valid range",
-        "outside 0 to 1"
+        "outside 0 to 1",
+        "exceed",
+        "exceeded",
+        "exceeding",
+        "contradicts",
+        "contradicted",
+        "contradicting"
       ]
     },
     "relative_position_mismatch": {
@@ -52,7 +58,12 @@
         "contradict",
         "invalid",
         "do not match",
-        "disagrees"
+        "disagrees",
+        "differ",
+        "differed",
+        "contradicts",
+        "contradicted",
+        "contradicting"
       ]
     },
     "upgrade_ack_without_effect": {
@@ -118,7 +129,10 @@
         "impossible",
         "exceeds",
         "wrong",
-        "invalid"
+        "invalid",
+        "exceed",
+        "exceeded",
+        "exceeding"
       ]
     },
     "currency_leak_across_restart": {
@@ -138,7 +152,10 @@
         "persisted",
         "leak",
         "retained across",
-        "survived the restart"
+        "survived the restart",
+        "persists",
+        "persist",
+        "carries over"
       ]
     },
     "hp_not_decreased_on_hit": {
@@ -175,7 +192,9 @@
         "out of sync",
         "does not match",
         "mismatch",
-        "out of step"
+        "out of step",
+        "differ",
+        "differed"
       ]
     },
     "item_effect_not_applied": {
@@ -230,7 +249,9 @@
         "differs",
         "drift",
         "does not match",
-        "mismatch"
+        "mismatch",
+        "differ",
+        "differed"
       ]
     }
   }
