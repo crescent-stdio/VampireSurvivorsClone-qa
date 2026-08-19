@@ -164,8 +164,18 @@ def agent_claims(
 
 
 def _terms_hit(text: str, terms: list[str]) -> list[str]:
+    """Match on word boundaries, not raw substrings.
+
+    A substring scan makes short topics catastrophically broad: "exp" and "xp" are
+    both inside "expected", so "the expected effect does not match the observation"
+    -- a sentence about steering -- scored a match for the experience-drift fault.
+    """
     normalized = normalize(text)
-    return [term for term in terms if normalize(term) in normalized]
+    return [
+        term
+        for term in terms
+        if re.search(rf"\b{re.escape(normalize(term))}\b", normalized)
+    ]
 
 
 def has_strong_claim(

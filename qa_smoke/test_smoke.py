@@ -1000,7 +1000,7 @@ class ReportingTests(unittest.TestCase):
             model="gpt-4o-mini",
         )
 
-        self.assertEqual("qa-planning/v5", recorder.prompt_version)
+        self.assertEqual("qa-planning/v6", recorder.prompt_version)
 
     def test_llm_contract_failure_is_not_classified_as_infrastructure_error(self) -> None:
         recorder = RunRecorder(
@@ -2598,6 +2598,21 @@ class AgentDetectionScoringTests(unittest.TestCase):
 
         self.assertEqual("miss", result.status)
 
+    def test_terms_match_on_word_boundaries_not_substrings(self) -> None:
+        """"exp" and "xp" both sit inside "expected".
+
+        A substring scan scored the experience-drift fault on the sentence "the
+        expected effect does not match the observation", which is about steering.
+        """
+        rubric = detection_module.load_rubric()
+        entry = rubric.faults["experience_level_drift"]
+        innocuous = "the expected effect does not match the observation"
+
+        self.assertEqual([], detection_module._terms_hit(innocuous, entry.topic_terms))
+        self.assertNotEqual(
+            [], detection_module._terms_hit("exp does not match exp ratio", entry.topic_terms)
+        )
+
     def test_a_control_run_can_never_be_scored_match(self) -> None:
         """Regression lock across every rubric fault."""
         rubric = detection_module.load_rubric()
@@ -3418,9 +3433,12 @@ class BridgeAssistGuardTests(unittest.TestCase):
                 prompt = planner._planning_system_prompt()
 
                 self.assertIn(
-                    "A matched transition says nothing about whether the state itself is valid",
+                    "a matched transition says nothing about whether the state itself is valid",
                     prompt,
                 )
+                # The forcing mechanism: the agent must compute, not just assert.
+                self.assertIn("actually compute it before you answer", prompt)
+                self.assertIn("the value you computed from them", prompt)
                 self.assertIn("reflection.status=unexpected", prompt)
                 # Invariant classes only: no field, value or subsystem is named.
                 self.assertNotIn("health_ratio", prompt)
@@ -3619,8 +3637,8 @@ class BridgeAssistGuardTests(unittest.TestCase):
         base = RunRecorder(output_dir=TEST_TEMP_ROOT / "pv-llm", seed=1, mode="qa", policy="llm")
         hybrid = RunRecorder(output_dir=TEST_TEMP_ROOT / "pv-hybrid", seed=1, mode="qa", policy="hybrid")
 
-        self.assertEqual("qa-planning/v5", base.effective_prompt_version())
-        self.assertEqual("qa-planning/v5-hybrid", hybrid.effective_prompt_version())
+        self.assertEqual("qa-planning/v6", base.effective_prompt_version())
+        self.assertEqual("qa-planning/v6-hybrid", hybrid.effective_prompt_version())
 
     def test_hybrid_charter_declares_the_automatic_avoidance(self) -> None:
         control = TestCharter(bridge_assist=True).as_dict()["control_policy"]
