@@ -52,6 +52,17 @@ namespace Vampire.QA
         private string currentSkill = "none";
         private Vector2 steeringHeading = Vector2.right;
         private Vector2 currentSteering = Vector2.zero;
+        private Vector2 directCommandVector = Vector2.zero;
+        private float directCommandMagnitude = 1f;
+        private bool assistEnabledThisHorizon;
+        private float assistWeightThisHorizon;
+        private int assistFrames;
+        private int assistControlFrames;
+        private float assistDeflectionSum;
+        private float assistMaxDeflection;
+        private float assistDangerSum;
+        private int assistFramesTotal;
+        private float assistDeflectionTotal;
         private string steeringTargetKind = "heading";
         private float steeringTargetDistance = -1f;
         private string currentPlannerIntent = "";
@@ -292,6 +303,7 @@ namespace Vampire.QA
             operationResult = applyMovement ? "Movement interval completed" : "Wait interval completed";
             steeringActive = false;
             directControlActive = false;
+            ClearDirectControlAssistState();
             steeringCollectChests = false;
             currentSkill = applyMovement ? "move" : "wait";
             currentPlannerIntent = "";
@@ -322,6 +334,7 @@ namespace Vampire.QA
             steeringHeading = heading.normalized;
             steeringActive = true;
             directControlActive = false;
+            ClearDirectControlAssistState();
             steeringCollectChests = command.collect_chests;
             currentSkill = "steer";
             currentPlannerIntent = "bridge_hybrid_baseline";
@@ -363,6 +376,15 @@ namespace Vampire.QA
                 direction.Normalize();
             steeringHeading = direction.sqrMagnitude > 0.0001f ? direction.normalized : Vector2.right;
             currentSteering = direction;
+            directCommandVector = direction;
+            // Character.Move stores the vector raw and FixedUpdate does
+            // rb.velocity += moveDirection * acceleration * dt, so magnitude is speed.
+            // Preserving it keeps hybrid identical to llm at zero danger.
+            directCommandMagnitude = direction.magnitude > 0.0001f ? direction.magnitude : 1f;
+            assistEnabledThisHorizon = command.assist_avoidance && command.assist_survival_weight > 0f;
+            assistWeightThisHorizon = assistEnabledThisHorizon
+                ? Mathf.Clamp(command.assist_survival_weight, 0f, 5f)
+                : 0f;
             steeringActive = true;
             directControlActive = true;
             steeringCollectChests = false;
@@ -380,18 +402,86 @@ namespace Vampire.QA
             steeringCheckpointPosition = player.Position;
             nextSteeringCheckpointTime = level.LevelTime + 1f;
             steeringStuckWindows = 0;
+            // Per-horizon only. The run-cumulative totals must survive, and
+            // BeginPlanningHold must not reset either set: it continues this command.
+            assistFrames = 0;
+            assistControlFrames = 0;
+            assistDeflectionSum = 0f;
+            assistMaxDeflection = 0f;
+            assistDangerSum = 0f;
             ClearEvent();
 
             targetLevelTime = level.LevelTime + duration;
             operationDeadline = Time.realtimeSinceStartup + duration / runTimeScale + 10f;
             operation = OperationKind.Run;
             operationResult = "Direct LLM steering horizon completed";
-            UpdateDirectSteering(player);
+            UpdateDirectSteering(player, entities, command);
             Time.timeScale = runTimeScale;
         }
 
-        private void UpdateDirectSteering(Character player)
+        /// <summary>
+        /// Clears direct-control assist state so a steer/move horizon cannot report a
+        /// stale commanded vector or assist counters from an earlier direct_steer.
+        /// </summary>
+        private void ClearDirectControlAssistState()
         {
+            directCommandVector = Vector2.zero;
+            directCommandMagnitude = 1f;
+            assistEnabledThisHorizon = false;
+            assistWeightThisHorizon = 0f;
+            assistFrames = 0;
+            assistControlFrames = 0;
+            assistDeflectionSum = 0f;
+            assistMaxDeflection = 0f;
+            assistDangerSum = 0f;
+        }
+
+        /// <summary>
+        /// Blends a rule-based survival term into the agent's vector. Pure and static so
+        /// EditMode can cover the math without a scene.
+        /// </summary>
+        /// <param name="heading">Normalized agent vector, frozen for the horizon.</param>
+        /// <param name="escape">Normalized flee direction from <see cref="CalculateDanger"/>.</param>
+        /// <param name="magnitude">Requested magnitude; preserved because Character.Move
+        /// scales acceleration by it.</param>
+        public static Vector2 BlendSurvivalAssist(
+            Vector2 heading, Vector2 escape, float danger, float weight, float magnitude)
+        {
+            if (escape.sqrMagnitude < 0.0001f || weight <= 0f)
+                return heading * magnitude;
+            Vector2 desired = heading + escape.normalized * weight * Mathf.Clamp01(0.35f + danger);
+            if (desired.sqrMagnitude < 0.0001f)
+                return heading * magnitude;
+            return desired.normalized * magnitude;
+        }
+
+        private void UpdateDirectSteering(Character player, EntityManager entities, QACommand command)
+        {
+            bool assist = command != null && command.assist_avoidance
+                && command.assist_survival_weight > 0f && entities != null;
+            Vector2 output = directCommandVector;
+            if (assist)
+            {
+                float danger = CalculateDanger(player, entities, EffectiveThreatRadius(command), out Vector2 escape);
+                float weight = Mathf.Clamp(command.assist_survival_weight, 0f, 5f);
+                // Blend from steeringHeading, never from currentSteering: the latter is
+                // last frame's output, and re-integrating the escape term ~60x/second
+                // would spin the player off the agent's intent within a few frames.
+                output = BlendSurvivalAssist(steeringHeading, escape, danger, weight, directCommandMagnitude);
+                assistControlFrames++;
+                assistDangerSum += danger;
+                if (escape.sqrMagnitude > 0.0001f)
+                {
+                    float deflection = Vector2.Angle(steeringHeading, output.normalized);
+                    assistFrames++;
+                    assistFramesTotal++;
+                    assistDeflectionSum += deflection;
+                    assistDeflectionTotal += deflection;
+                    if (deflection > assistMaxDeflection)
+                        assistMaxDeflection = deflection;
+                }
+            }
+            currentSteering = output;
             player.Move(currentSteering);
             if (currentSteering != Vector2.zero)
                 player.StartWalkAnimation();
@@ -558,7 +648,7 @@ namespace Vampire.QA
                 if (steeringActive && player != null && entities != null && activeCommand != null)
                 {
                     if (directControlActive)
-                        UpdateDirectSteering(player);
+                        UpdateDirectSteering(player, entities, activeCommand);
                     else
                         UpdateSteering(player, entities, activeCommand);
                 }
@@ -752,7 +842,7 @@ namespace Vampire.QA
                 return;
             }
 
-            UpdateDirectSteering(player);
+            UpdateDirectSteering(player, entities, command);
             if (dialog != null && dialog.MenuOpen)
             {
                 InterruptPlanningHold("upgrade_open", "A blocking upgrade dialog opened while the next LLM plan was pending.", level.LevelTime);
@@ -1110,7 +1200,21 @@ namespace Vampire.QA
                 collect_chests = steeringCollectChests,
                 danger_score = danger,
                 planner_intent = currentPlannerIntent,
-                target_id = currentTargetId
+                target_id = currentTargetId,
+                assist_enabled = assistEnabledThisHorizon,
+                assist_weight = assistWeightThisHorizon,
+                commanded = new VectorState(directCommandVector.x, directCommandVector.y),
+                assist_frames = assistFrames,
+                control_frames = assistControlFrames,
+                assist_mean_deflection_degrees = assistControlFrames > 0
+                    ? assistDeflectionSum / assistControlFrames
+                    : 0f,
+                assist_max_deflection_degrees = assistMaxDeflection,
+                assist_mean_danger = assistControlFrames > 0
+                    ? assistDangerSum / assistControlFrames
+                    : 0f,
+                assist_frames_total = assistFramesTotal,
+                assist_deflection_degrees_total = assistDeflectionTotal
             };
         }
 

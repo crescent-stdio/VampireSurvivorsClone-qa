@@ -81,6 +81,13 @@ namespace Vampire.QA
         public string intent;
         public int target_id;
         public bool continue_during_planning;
+
+        // Per-frame rule-based survival assist (--policy hybrid). Both default to
+        // off/zero so a command produced before protocol 1.5 -- or by the llm and
+        // heuristic policies -- keeps the historical raw-vector behavior. The bool
+        // is the explicit switch: a stray weight can never enable the assist.
+        public bool assist_avoidance;
+        public float assist_survival_weight;
     }
 
     [Serializable]
@@ -162,6 +169,22 @@ namespace Vampire.QA
         public float danger_score;
         public string planner_intent;
         public int target_id;
+
+        // Bridge survival assist telemetry. Under --policy llm every field below
+        // stays at its zero value, which is what proves that arm was untouched.
+        public bool assist_enabled;
+        public float assist_weight;
+        public VectorState commanded;
+        public int assist_frames;
+        public int control_frames;
+        public float assist_mean_deflection_degrees;
+        public float assist_max_deflection_degrees;
+        public float assist_mean_danger;
+
+        // Run-cumulative. The observation is written before a planning hold runs,
+        // so hold frames are only recoverable by differencing these across steps.
+        public int assist_frames_total;
+        public float assist_deflection_degrees_total;
     }
 
     [Serializable]
