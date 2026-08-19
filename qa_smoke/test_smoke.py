@@ -2441,6 +2441,168 @@ class DetectionRubricTests(unittest.TestCase):
         )
 
 
+def claim_step(step: int, run_id: str, text: str, refs: list[str]) -> dict[str, object]:
+    """A recorded transition whose decision carries agent-authored text."""
+    return {
+        "step": step,
+        "run_id": run_id,
+        "decision": {
+            "plan": "keep moving",
+            "hypothesis": "",
+            "qa_observation": text,
+            "expected_effect": "",
+            "arguments": {"x": 1.0, "y": 0.0, "interrupt_health_ratio": 0.3},
+            "reflection": {"status": "unexpected", "summary": "", "evidence_refs": refs,
+                           "candidate_id": "c-1", "reproduction_attempted": False},
+        },
+    }
+
+
+FINDING = "health_ratio reads 1.25 which is inconsistent with health 98 of max_health 100"
+
+
+class AgentDetectionScoringTests(unittest.TestCase):
+    def score(self, **overrides: object) -> object:
+        kwargs: dict[str, object] = {
+            "fault_id": "health_ratio_out_of_range",
+            "policy": "llm",
+            "trace_completeness": "complete",
+            "oracle_verdict": "fail",
+            "transitions": [],
+            "fault_refs": ["run-obs-00000003"],
+            "hypotheses": [],
+            "llm_assessment": None,
+        }
+        kwargs.update(overrides)
+        return detection_module.score_agent_detection(**kwargs)
+
+    def test_naming_the_defect_with_a_flagged_ref_is_a_match(self) -> None:
+        result = self.score(
+            transitions=[claim_step(0, "run", FINDING, ["run-obs-00000003"])]
+        )
+
+        self.assertEqual("match", result.status)
+        self.assertEqual(["run-obs-00000003"], result.cited_evidence_refs)
+        self.assertIn("health ratio", result.matched_terms)
+
+    def test_correct_words_citing_an_unrelated_transition_are_not_a_match(self) -> None:
+        result = self.score(
+            transitions=[claim_step(0, "run", FINDING, ["run-obs-00000099"])]
+        )
+
+        self.assertEqual("miss", result.status)
+
+    def test_a_topic_word_without_a_symptom_is_narration_not_a_finding(self) -> None:
+        result = self.score(
+            transitions=[
+                claim_step(0, "run", "health ratio is 1.25 and enemies are close", ["run-obs-00000003"])
+            ]
+        )
+
+        self.assertEqual("miss", result.status)
+
+    def test_arguments_are_never_scanned_for_rubric_terms(self) -> None:
+        """The charter injects interrupt_health_ratio into every direct_steer.
+
+        Scanning the whole decision matched "health ratio" on 16 of 18 steps of a
+        real run where the agent never mentioned it once.
+        """
+        silent = claim_step(0, "run", "", ["run-obs-00000003"])
+        silent["decision"]["qa_observation"] = "moving toward the pickup"
+        silent["decision"]["reflection"]["summary"] = "it is inconsistent"
+
+        result = self.score(transitions=[silent])
+
+        self.assertEqual("miss", result.status)
+
+    def test_a_control_run_can_never_be_scored_match(self) -> None:
+        """Regression lock across every rubric fault."""
+        rubric = detection_module.load_rubric()
+        for fault_id, entry in rubric.faults.items():
+            text = " ".join([*entry.topic_terms, *entry.symptom_terms])
+            with self.subTest(fault=fault_id):
+                result = self.score(
+                    fault_id=None,
+                    transitions=[claim_step(0, "run", text, ["run-obs-00000003"])],
+                    hypotheses=[{"candidate_id": "c-1", "statement": text, "status": "confirmed",
+                                 "evidence_refs": ["run-obs-00000003"]}],
+                    llm_assessment={"bug_candidates": [{"title": text}]},
+                )
+                self.assertNotEqual("match", result.status)
+                self.assertEqual("false_positive", result.status)
+
+    def test_a_silent_control_run_is_not_a_false_positive(self) -> None:
+        result = self.score(fault_id=None, transitions=[claim_step(0, "run", "all normal", [])])
+
+        self.assertEqual("not_evaluated", result.status)
+
+    def test_an_exploratory_unexpected_alone_is_not_a_false_positive(self) -> None:
+        """Change B makes raising `unexpected` cheap; punishing it would restore silence."""
+        result = self.score(
+            fault_id=None,
+            transitions=[claim_step(0, "run", "health ratio looks inconsistent", ["run-obs-00000003"])],
+        )
+
+        self.assertEqual("not_evaluated", result.status)
+
+    def test_heuristic_policy_is_never_scored(self) -> None:
+        result = self.score(policy="heuristic", transitions=[claim_step(0, "run", FINDING, ["run-obs-00000003"])])
+
+        self.assertEqual("not_evaluated", result.status)
+
+    def test_an_unobservable_fault_is_not_a_miss(self) -> None:
+        result = self.score(fault_id="health_bar_desync", transitions=[])
+
+        self.assertEqual("not_evaluated", result.status)
+        self.assertIn("player_view", result.reason)
+
+    def test_nothing_to_find_is_not_a_miss(self) -> None:
+        for overrides in ({"oracle_verdict": "pass"}, {"fault_refs": []}):
+            with self.subTest(**overrides):
+                self.assertEqual("not_evaluated", self.score(**overrides).status)
+
+    def test_a_partial_trace_cannot_be_a_miss_but_can_be_a_match(self) -> None:
+        silent = self.score(trace_completeness="partial", transitions=[])
+        found = self.score(
+            trace_completeness="partial",
+            transitions=[claim_step(0, "run", FINDING, ["run-obs-00000003"])],
+        )
+
+        self.assertEqual("not_evaluated", silent.status)
+        self.assertEqual("match", found.status)
+
+    def test_an_unknown_fault_is_not_a_miss(self) -> None:
+        self.assertEqual("not_evaluated", self.score(fault_id="brand_new_fault").status)
+
+    def test_the_assessment_surface_can_carry_a_match(self) -> None:
+        ref = "a" * 32 + "-obs-00000003"
+        result = self.score(
+            fault_refs=[ref],
+            llm_assessment={"bug_candidates": [{"title": FINDING, "evidence": ref}]},
+        )
+
+        self.assertEqual("match", result.status)
+        self.assertEqual(["assessment"], result.matched_surfaces)
+
+    def test_the_scorer_stays_out_of_the_human_annotation_protocol(self) -> None:
+        """aggregate_annotations (3 reviewers, majority) stays the authority on validity."""
+        source = (Path(__file__).resolve().parent / "detection.py").read_text(encoding="utf-8")
+        # Mentioning the protocol in prose is the point; importing or writing it is not.
+        imports = [line for line in source.splitlines() if line.startswith(("import ", "from "))]
+
+        self.assertEqual([], [line for line in imports if "reporting" in line])
+        for name in ("Annotation", "aggregate_annotations"):
+            self.assertNotIn(name, "\n".join(imports))
+        self.assertFalse(hasattr(detection_module, "Annotation"))
+        self.assertNotIn("write_text", source)
+        self.assertIn("sole authority", detection_module.AUTHORITY_NOTE)
+
+    def test_scoring_never_raises_into_the_verdict_path(self) -> None:
+        result = self.score(transitions=[{"decision": "not a dict"}], hypotheses=[{"status": 1}])
+
+        self.assertIn(result.status, {"miss", "not_evaluated"})
+
+
 class FaultEvidenceRefTests(unittest.TestCase):
     """Every observation the oracle objects to is citable evidence, not just the first."""
 

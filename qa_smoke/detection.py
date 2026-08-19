@@ -110,3 +110,189 @@ def load_rubric(path: Path | None = None) -> DetectionRubric:
         if not entry.topic_terms or not entry.symptom_terms:
             raise DetectionContractError(f"fault {fault_id} needs topic and symptom terms")
     return rubric
+
+
+def _claim_text(decision: dict[str, Any]) -> str:
+    reflection = decision.get("reflection")
+    parts = [str(decision.get(field) or "") for field in AGENT_TEXT_FIELDS]
+    if isinstance(reflection, dict):
+        parts.append(str(reflection.get("summary") or ""))
+    return " ".join(part for part in parts if part)
+
+
+def agent_claims(
+    transitions: list[dict[str, Any]],
+    hypotheses: list[dict[str, Any]] | None,
+    llm_assessment: dict[str, Any] | None,
+) -> list[AgentClaim]:
+    """Every surface on which the agent could have written a finding."""
+    claims: list[AgentClaim] = []
+    for transition in transitions:
+        decision = transition.get("decision")
+        if not isinstance(decision, dict):
+            continue
+        text = _claim_text(decision)
+        if not text.strip():
+            continue
+        reflection = decision.get("reflection")
+        refs = list((reflection or {}).get("evidence_refs") or []) if isinstance(reflection, dict) else []
+        claims.append(
+            AgentClaim(surface="reflection", text=text, evidence_refs=[str(ref) for ref in refs])
+        )
+    for state in hypotheses or []:
+        statement = str(state.get("statement") or "")
+        if statement.strip():
+            claims.append(
+                AgentClaim(
+                    surface="hypothesis",
+                    text=statement,
+                    evidence_refs=[str(ref) for ref in state.get("evidence_refs") or []],
+                )
+            )
+    if llm_assessment:
+        # No response_schema is enforced on the assessment, so the shape is unknown;
+        # dump the whole thing and scrape any transition ids out of it.
+        blob = json.dumps(llm_assessment, ensure_ascii=False)
+        claims.append(
+            AgentClaim(
+                surface="assessment",
+                text=blob,
+                evidence_refs=re.findall(r"[0-9a-f]{32}-(?:obs|event)-[0-9a-f]+", blob),
+            )
+        )
+    return claims
+
+
+def _terms_hit(text: str, terms: list[str]) -> list[str]:
+    normalized = normalize(text)
+    return [term for term in terms if normalize(term) in normalized]
+
+
+def has_strong_claim(
+    hypotheses: list[dict[str, Any]] | None, llm_assessment: dict[str, Any] | None
+) -> bool:
+    """A confirmed hypothesis or a reported bug candidate.
+
+    A bare `reflection.status == "unexpected"` is exploration and deliberately does not
+    count: the planner prompt makes raising one cheap on purpose, and penalising that on
+    control runs would train the agent back into silence.
+    """
+    if any(str(state.get("status") or "") == "confirmed" for state in hypotheses or []):
+        return True
+    candidates = (llm_assessment or {}).get("bug_candidates")
+    return bool(isinstance(candidates, list) and candidates)
+
+
+def score_agent_detection(
+    *,
+    fault_id: str | None,
+    policy: str,
+    trace_completeness: str,
+    oracle_verdict: str,
+    transitions: list[dict[str, Any]],
+    fault_refs: list[str],
+    hypotheses: list[dict[str, Any]] | None = None,
+    llm_assessment: dict[str, Any] | None = None,
+    rubric: DetectionRubric | None = None,
+) -> DetectionResult:
+    """Decide whether the agent reported the injected fault. Never raises."""
+    try:
+        return _score(
+            fault_id=fault_id,
+            policy=policy,
+            trace_completeness=trace_completeness,
+            oracle_verdict=oracle_verdict,
+            transitions=transitions,
+            fault_refs=fault_refs,
+            hypotheses=hypotheses,
+            llm_assessment=llm_assessment,
+            rubric=rubric,
+        )
+    except Exception as error:  # never break the verdict path over a scoring bug
+        return DetectionResult(status="not_evaluated", reason=f"scoring failed: {error}")
+
+
+def _score(
+    *,
+    fault_id: str | None,
+    policy: str,
+    trace_completeness: str,
+    oracle_verdict: str,
+    transitions: list[dict[str, Any]],
+    fault_refs: list[str],
+    hypotheses: list[dict[str, Any]] | None,
+    llm_assessment: dict[str, Any] | None,
+    rubric: DetectionRubric | None,
+) -> DetectionResult:
+    rubric = rubric or load_rubric()
+    version = rubric.rubric_version
+
+    if policy not in ("llm", "hybrid"):
+        return DetectionResult(
+            status="not_evaluated",
+            reason=f"policy {policy!r} has no agent text channel",
+            rubric_version=version,
+        )
+
+    strong = has_strong_claim(hypotheses, llm_assessment)
+    if not fault_id:
+        if strong:
+            return DetectionResult(
+                status="false_positive",
+                reason="the agent reported a bug on a run with no injected fault",
+                rubric_version=version,
+            )
+        return DetectionResult(
+            status="not_evaluated",
+            reason="control run; silence is correct behavior rather than a measurable result",
+            rubric_version=version,
+        )
+
+    entry = rubric.for_fault(fault_id)
+    if entry is None:
+        return DetectionResult(
+            status="not_evaluated",
+            reason=f"no rubric entry for {fault_id!r}",
+            rubric_version=version,
+        )
+    if not entry.observable_in_agent_channel:
+        return DetectionResult(
+            status="not_evaluated",
+            reason=entry.unobservable_reason,
+            rubric_version=version,
+        )
+    if oracle_verdict != "fail" or not fault_refs:
+        return DetectionResult(
+            status="not_evaluated",
+            reason="the fault never became observable in this trace",
+            rubric_version=version,
+        )
+
+    flagged = set(fault_refs)
+    for claim in agent_claims(transitions, hypotheses, llm_assessment):
+        topics = _terms_hit(claim.text, entry.topic_terms)
+        symptoms = _terms_hit(claim.text, entry.symptom_terms)
+        if not topics or not symptoms:
+            continue
+        cited = [ref for ref in claim.evidence_refs if ref in flagged]
+        if cited:
+            return DetectionResult(
+                status="match",
+                reason="the agent named the defect while citing a transition the oracle rejects",
+                matched_terms=sorted({*topics, *symptoms}),
+                matched_surfaces=[claim.surface],
+                cited_evidence_refs=cited,
+                rubric_version=version,
+            )
+
+    if trace_completeness == "partial":
+        return DetectionResult(
+            status="not_evaluated",
+            reason="a partial trace cannot establish that the agent never reported it",
+            rubric_version=version,
+        )
+    return DetectionResult(
+        status="miss",
+        reason="the agent never described the defect in its own text",
+        rubric_version=version,
+    )
