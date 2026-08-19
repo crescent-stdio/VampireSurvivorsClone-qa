@@ -16,6 +16,10 @@ esac
 QA_PRESET=${QA_PRESET:-eval}
 QA_SWEEP_CHECKPOINT=${QA_SWEEP_CHECKPOINT:-QAArtifacts/pytorch-ppo/checkpoint-final.pt}
 
+# Validate the requested artifact before checking optional runtime dependencies so a
+# missing checkpoint is reported directly and does not get masked by uv/player setup.
+qa_require_file "$QA_SWEEP_CHECKPOINT"
+
 qa_require_uv
 qa_configure_torch_device
 qa_resolve_mlagents_player "$QA_PLAYER"
@@ -24,7 +28,6 @@ cd "$QA_PROJECT_ROOT"
 QA_SWEEP_SEEDS=${QA_SWEEP_SEEDS:-$(qa_preset_value "$QA_PRESET" run.seeds)}
 # Unity writes relative episode artifacts beside the macOS bundle.
 QA_SWEEP_ARTIFACT_ROOT=${QA_SWEEP_ARTIFACT_ROOT:-$(dirname -- "$QA_MLAGENTS_PLAYER_BUNDLE")/QAArtifacts}
-qa_require_file "$QA_SWEEP_CHECKPOINT"
 
 QA_SWEEP_TOTAL=0
 QA_SWEEP_INFRA_FAILURES=0

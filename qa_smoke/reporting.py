@@ -18,6 +18,22 @@ EXECUTION_STATUSES = {"completed", "infrastructure_error", "contract_error"}
 COVERAGE_STATUSES = {"reached", "not_reached"}
 ORACLE_VERDICTS = {"pass", "fail", "not_evaluated"}
 AGENT_DETECTIONS = {"match", "miss", "false_positive", "not_evaluated"}
+ALWAYS_ON_FAILURE_KINDS = {
+    "crash",
+    "timeout",
+    "exception",
+    "freeze",
+    "stuck",
+    "unresponsive",
+    "transition",
+    "description_flaw",
+    "view_state_match",
+    "bridge_action_failed",
+    "unity_error",
+    "non_finite_state",
+    "unexpected_pause",
+    "llm_gameplay_stalled",
+}
 
 
 class Annotation(BaseModel):
@@ -42,6 +58,7 @@ def build_run_verdict(
     oracle_verdict: str,
     agent_detection: str,
     evidence_refs: list[str],
+    anomalies: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if execution_status not in EXECUTION_STATUSES:
         raise ValueError(f"unsupported execution_status: {execution_status}")
@@ -58,13 +75,38 @@ def build_run_verdict(
     if execution_status == "completed" and not evidence_refs:
         raise ValueError("completed verdict requires evidence_refs")
     return {
-        "schema_version": "qa-run-verdict/v1",
+        "schema_version": "qa-run-verdict/v2",
         "execution_status": execution_status,
         "coverage_status": coverage_status,
         "oracle_verdict": oracle_verdict,
         "agent_detection": agent_detection,
         "evidence_refs": list(dict.fromkeys(evidence_refs)),
+        "final_verdict": final_verdict(
+            execution_status,
+            coverage_status,
+            oracle_verdict,
+            anomalies or [],
+        ),
     }
+
+
+def final_verdict(
+    execution_status: str,
+    coverage_status: str,
+    oracle_verdict: str,
+    anomalies: list[dict[str, Any]],
+) -> str:
+    """Map detailed execution axes and always-on anomalies to the four-value verdict."""
+
+    if execution_status != "completed":
+        return "ERROR"
+    if any(str(item.get("kind", "")) in ALWAYS_ON_FAILURE_KINDS for item in anomalies):
+        return "FAIL"
+    if oracle_verdict == "fail":
+        return "FAIL"
+    if coverage_status == "not_reached":
+        return "NOT_REACHED"
+    return "PASS"
 
 
 def aggregate_annotations(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -151,6 +193,8 @@ class RunRecorder:
     death_seen: bool = False
     restart_seen: bool = False
     previous_level_time: float = 0.0
+    previous_observation_frame: int | None = None
+    previous_observation_level_time: float | None = None
     selected_at_level_time: float | None = None
     launched: bool = False
     steering_horizons: int = 0
@@ -518,6 +562,36 @@ class RunRecorder:
                 self._add_anomaly(step, "unity_error", str(log), "high")
         if self._contains_non_finite(observation):
             self._add_anomaly(step, "non_finite_state", "Observation contains NaN or infinity", "critical")
+        player = observation.get("player") or {}
+        player_view = observation.get("player_view") or {}
+        if player.get("present") and player_view:
+            raw_health = float(player.get("health", 0.0) or 0.0)
+            max_health = float(player.get("max_health", 0.0) or 0.0)
+            view_health_ratio = player_view.get("health_ratio")
+            if max_health > 0 and view_health_ratio is not None:
+                expected_ratio = raw_health / max_health
+                if not math.isclose(float(view_health_ratio), expected_ratio, rel_tol=1e-5, abs_tol=1e-5):
+                    self._add_anomaly(
+                        step,
+                        "view_state_match",
+                        f"player_view.health_ratio={view_health_ratio} expected={expected_ratio}",
+                        "high",
+                    )
+        frame_value = observation.get("frame")
+        current_level_time = float((observation.get("progress") or {}).get("level_time", 0.0) or 0.0)
+        phase = str(observation.get("phase") or "")
+        if (
+            isinstance(frame_value, int)
+            and self.previous_observation_frame == frame_value
+            and self.previous_observation_level_time is not None
+            and math.isclose(current_level_time, self.previous_observation_level_time, abs_tol=1e-5)
+            and not observation.get("paused")
+            and phase == "active_gameplay"
+        ):
+            self._add_anomaly(step, "freeze", "frame and simulation time did not advance", "critical")
+        if isinstance(frame_value, int):
+            self.previous_observation_frame = frame_value
+            self.previous_observation_level_time = current_level_time
         menu = observation.get("menu") or {}
         actions = observation.get("available_actions") or []
         pause_reason = str(observation.get("pause_reason") or "")

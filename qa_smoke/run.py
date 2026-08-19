@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Sequence
 
-from .bridge_client import BridgeClient
+from .adapters import VampireSurvivorsAdapter
 from .charter import DEFAULT_OBJECTIVE, TestCharter
 from .evaluation import evaluate_coverage, evaluate_oracle
 from .hypotheses import HypothesisTracker
@@ -29,6 +29,7 @@ from .planners import (
 )
 from .reporting import RunRecorder, build_run_verdict
 from .scenarios import ScenarioContractError, load_scenario, scenario_fingerprint
+from .state_channels import build_agent_observation
 from .source_tools import SourceTools
 
 
@@ -83,6 +84,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", default=os.environ.get("QA_MODEL", ""))
     parser.add_argument("--api-url", default=os.environ.get("QA_API_URL"))
     parser.add_argument("--scenario")
+    parser.add_argument(
+        "--fault",
+        default="",
+        help="Explicit QA fault to inject; clean runs leave this empty.",
+    )
     parser.add_argument("--objective", "--instruction", default=None)
     parser.add_argument(
         "--movement-constraint",
@@ -510,6 +516,7 @@ def build_session_verdict(
         oracle_verdict=oracle_verdict,
         agent_detection="not_evaluated",
         evidence_refs=evidence_refs,
+        anomalies=recorder.anomalies,
     )
 
 
@@ -546,7 +553,7 @@ def run_session(args: argparse.Namespace) -> int:
         scenario_id=scenario_id,
         preset=getattr(args, "preset", ""),
         scenario_fingerprint=scenario_fingerprint(scenario) if scenario is not None else "",
-        fault_id=scenario.ground_truth.fault_id if scenario is not None else None,
+        fault_id=args.fault or None,
     )
     planner: Planner
     try:
@@ -567,17 +574,14 @@ def run_session(args: argparse.Namespace) -> int:
     fatal_error: str | None = None
     last_observation: dict[str, Any] = {}
     started = time.monotonic()
-    client = BridgeClient(
-        args.game_exe,
-        output_dir,
-        args.mode,
-        args.seed,
-        args.time_scale,
-        args.headless,
+    client = VampireSurvivorsAdapter(
+        game_exe=args.game_exe,
+        session_dir=output_dir,
+        mode=args.mode,
+        time_scale=args.time_scale,
+        headless=args.headless,
         run_id=run_id,
         scenario_id=scenario_id,
-        preset=getattr(args, "preset", ""),
-        fault_id=scenario.ground_truth.fault_id if scenario is not None else "",
     )
     restarts_used = 0
     stalled_steps = 0
@@ -595,7 +599,11 @@ def run_session(args: argparse.Namespace) -> int:
                 f"{f'{charter.assist_survival_weight} per frame' if charter.bridge_assist else 'disabled'}",
                 flush=True,
             )
-        ready = client.launch()
+        ready = client.start(
+            seed=args.seed,
+            preset=getattr(args, "preset", ""),
+            faults=[args.fault] if args.fault else [],
+        )
         recorder.launched = True
         serialized_arguments = {
             key: value
@@ -637,7 +645,14 @@ def run_session(args: argparse.Namespace) -> int:
             if args.uses_llm_planner and planning_window_started is None:
                 planning_window_started = time.monotonic()
             raw_decision = canonicalize_decision_arguments(
-                planner.plan(last_observation, step, tool_context, source_steps_remaining)
+                planner.plan(
+                    build_agent_observation(last_observation)
+                    if args.uses_llm_planner
+                    else last_observation,
+                    step,
+                    tool_context,
+                    source_steps_remaining,
+                )
             )
             planning_usage = planner.take_last_usage()
             initial_cache_boundary = bool(planning_usage.pop("cache_boundary", 0))
@@ -660,7 +675,10 @@ def run_session(args: argparse.Namespace) -> int:
                 )
             if args.uses_llm_planner:
                 contract = build_action_contract(
-                    last_observation, args.mode, charter, source_steps_remaining
+                    build_agent_observation(last_observation),
+                    args.mode,
+                    charter,
+                    source_steps_remaining,
                 )
                 reflection_contract = build_reflection_contract(
                     tool_context[-1] if tool_context else None
@@ -694,7 +712,7 @@ def run_session(args: argparse.Namespace) -> int:
                         raise RuntimeError(contract_error)
                     repaired_decision = canonicalize_decision_arguments(
                         planner.repair_plan(
-                            last_observation,
+                            build_agent_observation(last_observation),
                             step,
                             tool_context,
                             raw_decision,
@@ -875,7 +893,16 @@ def run_session(args: argparse.Namespace) -> int:
     except Exception as error:
         fatal_error = f"{type(error).__name__}: {error}"
     finally:
-        client.close()
+        episode_exit = client.stop()
+        if episode_exit.kind != "normal":
+            recorder.anomalies.append(
+                {
+                    "step": len(recorder.steps),
+                    "kind": episode_exit.kind,
+                    "severity": "critical",
+                    "evidence": episode_exit.detail or f"player exit code={episode_exit.return_code}",
+                }
+            )
 
     if planning_window_started is not None:
         recorder.planning_window_wall_seconds = max(

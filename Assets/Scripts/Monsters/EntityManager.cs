@@ -1,4 +1,5 @@
 using UnityEngine;
+using Vampire.QA;
 using UnityEngine.Pool;
 using System.Linq;
 using System.Collections;
@@ -63,6 +64,8 @@ namespace Vampire
         public SpatialHashGrid Grid { get => grid; }
         public int ChestCount { get => chests == null ? 0 : chests.Count; }
         public int EntityCount { get => livingMonsters == null ? 0 : livingMonsters.Count; }
+        public int LastVisibleEnemyCount { get; private set; }
+        public int LastDamagedEnemyCount { get; private set; }
 
         public void Init(LevelBlueprint levelBlueprint, Character character, Inventory inventory, StatsManager statsManager, InfiniteBackground infiniteBackground, AbilitySelectionDialog abilitySelectionDialog)
         {
@@ -140,11 +143,21 @@ namespace Vampire
         {
             if (flashCoroutine != null) StopCoroutine(flashCoroutine);
             flashCoroutine = StartCoroutine(Flash());
+            var visibleTargets = 0;
+            var damagedTargets = 0;
             foreach (Monster monster in livingMonsters.ToList() )
             {
                 if (TransformOnScreen(monster.transform, Vector2.one))
+                {
+                    visibleTargets++;
+                    if (QaFaultInjection.RestrictItemRange && damagedTargets > 0)
+                        continue;
                     monster.TakeDamage(damage, Vector2.zero);
+                    damagedTargets++;
+                }
             }
+            LastVisibleEnemyCount = visibleTargets;
+            LastDamagedEnemyCount = damagedTargets;
         }
 
         public void KillAllMonsters()

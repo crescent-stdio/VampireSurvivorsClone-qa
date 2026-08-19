@@ -195,6 +195,8 @@ namespace Vampire.QA
         public string type;
         public string detail;
         public float level_time;
+        public int targets_affected;
+        public int targets_in_radius;
     }
 
     [Serializable]
@@ -243,6 +245,48 @@ namespace Vampire.QA
     }
 
     [Serializable]
+    public class PlayerViewState
+    {
+        public bool present;
+        public float health;
+        public float max_health;
+        public float health_ratio;
+        public float exp;
+        public float next_level_exp;
+        public float exp_ratio;
+        public int level;
+    }
+
+    [Serializable]
+    public class EvaluatorState
+    {
+        public PlayerState player;
+        public WorldState world;
+        public ProgressState progress;
+        public InventoryState inventory;
+    }
+
+    [Serializable]
+    public class AgentState
+    {
+        public string scene;
+        public string phase;
+        public bool paused;
+        public string pause_reason;
+        public bool awaiting_agent_command;
+        public string[] available_actions;
+        public EventState event_state;
+        public MenuState menu;
+    }
+
+    [Serializable]
+    public class HarnessAdvisoryState
+    {
+        public float danger_score;
+        public VectorState escape_vector;
+    }
+
+    [Serializable]
     public class AbilityInventoryState
     {
         public string type;
@@ -277,6 +321,10 @@ namespace Vampire.QA
         public ProgressState progress;
         public MenuState menu;
         public InventoryState inventory;
+        public EvaluatorState evaluator_state;
+        public PlayerViewState player_view;
+        public AgentState agent_state;
+        public HarnessAdvisoryState harness_advisory;
         public ControllerState controller;
         public EventState event_state;
         public string[] available_actions;

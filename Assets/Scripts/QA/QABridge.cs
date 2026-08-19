@@ -79,6 +79,8 @@ namespace Vampire.QA
         private string eventId = "";
         private string eventCausedByCommandId = "";
         private float eventLevelTime;
+        private int eventTargetsAffected;
+        private int eventTargetsInRadius;
         private int observationSequence;
         private ProgressState chestProgressBeforeFault = new ProgressState();
         private int restartCoinsBeforeFault;
@@ -96,6 +98,7 @@ namespace Vampire.QA
             if (!faultOptions.IsValid)
                 throw new InvalidOperationException(faultOptions.FailureReason);
             activeFaultId = faultOptions.FaultId;
+            QaFaultInjection.Activate(activeFaultId);
             mode = ReadArgument("-qaMode", "player").ToLowerInvariant();
             int.TryParse(ReadArgument("-qaSeed", "1337"), out seed);
             float parsedScale;
@@ -584,6 +587,18 @@ namespace Vampire.QA
             }
 
             bool used = inventory.UseItemAt(command.index);
+            if (used)
+            {
+                LevelManager level = FindObjectOfType<LevelManager>();
+                EntityManager entities = FindObjectOfType<EntityManager>();
+                eventTargetsAffected = entities != null ? entities.LastDamagedEnemyCount : 0;
+                eventTargetsInRadius = entities != null ? entities.LastVisibleEnemyCount : 0;
+                SetEvent(
+                    "item_used",
+                    "Inventory item was consumed by the QA action.",
+                    level != null ? level.LevelTime : 0f,
+                    command.id);
+            }
             BeginSettleOperation(command, 2, used ? "Used inventory slot " + command.index : "Inventory slot is empty or invalid");
         }
 
@@ -978,10 +993,36 @@ namespace Vampire.QA
                     caused_by_command_id = eventCausedByCommandId,
                     type = eventType,
                     detail = eventDetail,
-                    level_time = eventType.Length > 0 ? eventLevelTime : level != null ? level.LevelTime : 0f
+                    level_time = eventType.Length > 0 ? eventLevelTime : level != null ? level.LevelTime : 0f,
+                    targets_affected = eventTargetsAffected,
+                    targets_in_radius = eventTargetsInRadius
                 },
                 available_actions = AvailableActions(player, abilityDialog, selector),
                 recent_logs = recentLogs.ToArray()
+            };
+            observation.player_view = CapturePlayerView(player);
+            observation.evaluator_state = new EvaluatorState
+            {
+                player = observation.player,
+                world = observation.world,
+                progress = observation.progress,
+                inventory = observation.inventory
+            };
+            observation.agent_state = new AgentState
+            {
+                scene = observation.scene,
+                phase = observation.phase,
+                paused = observation.paused,
+                pause_reason = observation.pause_reason,
+                awaiting_agent_command = observation.awaiting_agent_command,
+                available_actions = observation.available_actions,
+                event_state = observation.event_state,
+                menu = observation.menu
+            };
+            observation.harness_advisory = new HarnessAdvisoryState
+            {
+                danger_score = observation.world != null ? observation.world.danger_score : 0f,
+                escape_vector = observation.world != null ? observation.world.escape_vector : new VectorState()
             };
             return observation;
         }
@@ -1048,6 +1089,25 @@ namespace Vampire.QA
                 state.max_health,
                 state.health_ratio);
             state.exp = QaFaultInjection.Experience(activeFaultId, state.level, state.exp);
+            return state;
+        }
+
+        private PlayerViewState CapturePlayerView(Character player)
+        {
+            PlayerViewState state = new PlayerViewState { present = player != null };
+            if (player == null)
+                return state;
+
+            state.health = player.DisplayedHealth;
+            state.max_health = player.MaxHealth;
+            state.health_ratio = state.max_health > 0 ? state.health / state.max_health : 0f;
+            state.exp = QaFaultInjection.DisplayedExperience(
+                activeFaultId,
+                player.DisplayedExperience,
+                player.CurrentLevel);
+            state.next_level_exp = player.NextExperience;
+            state.exp_ratio = state.next_level_exp > 0 ? state.exp / state.next_level_exp : 0f;
+            state.level = player.CurrentLevel;
             return state;
         }
 
@@ -1326,6 +1386,8 @@ namespace Vampire.QA
             eventType = "";
             eventDetail = "";
             eventLevelTime = 0f;
+            eventTargetsAffected = 0;
+            eventTargetsInRadius = 0;
         }
 
         private ProgressState CaptureProgress(LevelManager level, StatsManager stats)

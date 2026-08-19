@@ -48,3 +48,21 @@ Date: 2026-08-19
 Decision: `approved`
 
 Notes: Approval was provided explicitly in the implementation session for all nine ground-truth entries.
+
+## v4 review template
+
+The v4 suite is additive during Week 4. It is not considered reviewed until two
+independent reviewers complete the record below and any disagreement has a
+separate consensus note.
+
+| Scenario | Validity | Difficulty | Matched bug | Minimal reproduction | Reviewer A | Reviewer B | Consensus |
+|---|---|---|---|---|---|---|---|
+| `easy-hp-on-hit` | `uncertain` | `N/A` | | | | | |
+| `easy-view-health` | `uncertain` | `N/A` | | | | | |
+| `medium-item-effect` | `uncertain` | `N/A` | | | | | |
+| `medium-item-hit-range` | `uncertain` | `N/A` | | | | | |
+| `hard-exp-conservation` | `uncertain` | `N/A` | | | | | |
+
+Allowed validity labels are `valid`, `duplicate`, `non-bug`, and `uncertain`.
+Use `uncertain` when the evidence is insufficient; do not infer a definitive
+label from a preferred design outcome.

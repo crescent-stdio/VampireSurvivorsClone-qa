@@ -4,6 +4,7 @@ using UnityEngine.Events;
 using UnityEngine.InputSystem;
 using TMPro;
 using System.Collections.Generic;
+using Vampire.QA;
 
 namespace Vampire
 {
@@ -59,6 +60,8 @@ namespace Vampire
         public float MaxHealth { get => characterBlueprint.hp; }
         public float CurrentExperience { get => currentExp; }
         public float NextExperience { get => nextLevelExp; }
+        public float DisplayedHealth => healthBar == null ? currentHealth : healthBar.CurrentPoints;
+        public float DisplayedExperience => expBar == null ? currentExp : expBar.CurrentPoints;
         public bool IsAlive { get => alive; }
         public UnityEvent<float> OnDealDamage { get; } = new UnityEvent<float>();
         public UnityEvent OnDeath { get; } = new UnityEvent();
@@ -195,9 +198,12 @@ namespace Vampire
                     damage = damage < 1 ? damage : 1;
                 else
                     damage -= armor.Value;
-                // Decrease health
-                healthBar.SubtractPoints(damage);
-                currentHealth -= damage;
+                // Decrease health. QA fault fixtures can intentionally break either
+                // the raw state update or the view update while preserving the hit.
+                if (!QaFaultInjection.SkipHealthDecrease)
+                    currentHealth -= damage;
+                if (!QaFaultInjection.SkipHealthBarUpdate)
+                    healthBar.SubtractPoints(damage);
                 // Knockback
                 rb.velocity += knockback * Mathf.Sqrt(rb.drag);
                 statsManager.IncreaseDamageTaken(damage);

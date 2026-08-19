@@ -1,4 +1,5 @@
 using UnityEngine;
+using Vampire.QA;
 
 namespace Vampire
 {
@@ -8,7 +9,8 @@ namespace Vampire
 
         protected override void OnCollected()
         {
-            entityManager.DamageAllVisibileEnemies(bombDamage);
+            if (!QaFaultInjection.SuppressItemEffect)
+                entityManager.DamageAllVisibileEnemies(bombDamage);
             Destroy(gameObject);
         }
     }

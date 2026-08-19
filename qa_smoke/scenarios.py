@@ -11,6 +11,8 @@ from .charter import DEFAULT_OBJECTIVE, TestCharter
 
 
 DEFAULT_SCENARIO_PATH = Path(__file__).resolve().parents[1] / "config" / "qa-scenarios.json"
+DEFAULT_V4_SCENARIO_PATH = Path(__file__).resolve().parents[1] / "config" / "qa-scenarios-v4.json"
+DEFAULT_V4_GROUND_TRUTH_PATH = Path(__file__).resolve().parents[1] / "config" / "qa-ground-truth-v4.json"
 
 REGISTERED_COVERAGE_TARGETS = frozenset(
     {
@@ -34,6 +36,37 @@ REGISTERED_ORACLES = frozenset(
         "chest_state_transition",
         "experience_conservation",
         "restart_currency_isolation",
+        "valid_observation",
+        "normal_state_transitions",
+        "stable_long_progression",
+        "hp_decreases_on_hit",
+        "view_state_match",
+        "item_effect_applied",
+        "item_hit_range",
+        "exp_conservation",
+    }
+)
+
+REGISTERED_V4_GOALS = frozenset(
+    {
+        "player_present AND hit_window_observed",
+        "player_present AND player_view_present",
+        "item_used AND target_visible",
+        "item_used AND targets_in_effect_radius",
+        "level >= 3",
+        "player_present",
+        "upgrade_seen AND chest_collected",
+        "level >= 3 OR level_time >= 120",
+    }
+)
+
+REGISTERED_V4_ORACLES = frozenset(
+    {
+        "hp_decreases_on_hit",
+        "view_state_match",
+        "item_effect_applied",
+        "item_hit_range",
+        "exp_conservation",
         "valid_observation",
         "normal_state_transitions",
         "stable_long_progression",
@@ -154,6 +187,71 @@ class ScenarioDocument(StrictModel):
         return self
 
 
+class V4GoalDefinition(StrictModel):
+    description: str
+    reached_when: str
+    verified_path: str
+
+    @property
+    def verified_seed(self) -> int:
+        prefix = "scripted:seed="
+        if not self.verified_path.startswith(prefix):
+            raise ValueError("verified_path must use scripted:seed=<n>")
+        try:
+            return int(self.verified_path[len(prefix) :])
+        except ValueError as error:
+            raise ValueError("verified_path must contain an integer seed") from error
+
+
+class V4OracleDefinition(StrictModel):
+    id: str
+    kind: Literal["transition", "invariant", "trajectory"]
+
+
+class V4Scenario(StrictModel):
+    id: str
+    difficulty: Literal["easy", "medium", "hard"]
+    bug_type: Literal["logic_error", "description_flaw", "data_inconsistency", "control"]
+    preset: str
+    legacy_scenario_id: str
+    goal: V4GoalDefinition
+    oracle: V4OracleDefinition
+    abort: list[str] = Field(default_factory=list)
+    mode: Literal["explore", "qa"] = "qa"
+    context_refs: list[str] = Field(default_factory=list)
+    driver: Literal["scripted", "random", "ppo", "llm"] = "scripted"
+    seeds: list[int]
+    limits: ScenarioLimits
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> "V4Scenario":
+        if not self.id.strip() or not self.preset.strip():
+            raise ValueError("v4 scenario id and preset must not be empty")
+        if not self.seeds or len(set(self.seeds)) != len(self.seeds):
+            raise ValueError("v4 scenario seeds must be unique and non-empty")
+        if self.goal.reached_when not in REGISTERED_V4_GOALS:
+            raise ValueError(f"unregistered v4 goal: {self.goal.reached_when}")
+        if self.oracle.id not in REGISTERED_V4_ORACLES:
+            raise ValueError(f"unregistered v4 oracle: {self.oracle.id}")
+        if self.goal.verified_seed not in self.seeds:
+            raise ValueError("verified_path seed must be included in seeds")
+        if not self.legacy_scenario_id.strip():
+            raise ValueError("legacy_scenario_id must not be empty")
+        return self
+
+
+class V4ScenarioDocument(StrictModel):
+    schema_version: Literal["qa-scenarios/v4"] = Field(alias="schema")
+    scenarios: list[V4Scenario]
+
+    @model_validator(mode="after")
+    def validate_unique_ids(self) -> "V4ScenarioDocument":
+        identifiers = [scenario.id for scenario in self.scenarios]
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError("v4 scenario ids must be unique")
+        return self
+
+
 def load_scenarios(path: Path | None = None) -> list[Scenario]:
     source = path or DEFAULT_SCENARIO_PATH
     try:
@@ -169,6 +267,31 @@ def load_scenario(scenario_id: str, path: Path | None = None) -> Scenario:
         return next(scenario for scenario in scenarios if scenario.id == scenario_id)
     except StopIteration as error:
         raise ScenarioContractError(f"unknown scenario: {scenario_id}") from error
+
+
+def load_v4_scenarios(path: Path | None = None) -> list[V4Scenario]:
+    source = path or DEFAULT_V4_SCENARIO_PATH
+    try:
+        document = V4ScenarioDocument.model_validate_json(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ScenarioContractError(f"invalid v4 scenario configuration {source}: {error}") from error
+    return document.scenarios
+
+
+def load_v4_ground_truth(path: Path | None = None) -> dict[str, dict[str, object]]:
+    source = path or DEFAULT_V4_GROUND_TRUTH_PATH
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ScenarioContractError(f"invalid v4 ground truth configuration {source}: {error}") from error
+    scenarios = payload.get("scenarios") if isinstance(payload, dict) else None
+    if not isinstance(scenarios, dict):
+        raise ScenarioContractError("v4 ground truth scenarios must be an object")
+    return {
+        str(scenario_id): dict(value)
+        for scenario_id, value in scenarios.items()
+        if isinstance(value, dict)
+    }
 
 
 def canonical_scenario_json(scenario: Scenario) -> str:

@@ -355,6 +355,112 @@ ORACLE_REGISTRY: dict[str, OracleEvaluator] = {
 }
 
 
+def _v4_refs(transitions: list[Transition]) -> list[str]:
+    refs = [
+        str((transition.get("observation") or {}).get("observation_id") or "")
+        for transition in transitions
+    ]
+    refs = [reference for reference in refs if reference]
+    if not refs:
+        raise EvaluationContractError("v4 oracle requires observation evidence")
+    return list(dict.fromkeys(refs))
+
+
+def evaluate_v4_oracle(oracle_id: str, transitions: list[Transition]) -> OracleResult:
+    """Evaluate v4 invariants against the additive raw/view observation channels."""
+
+    refs = _v4_refs(transitions)
+    if oracle_id == "view_state_match":
+        for transition in transitions:
+            observation = transition.get("observation") or {}
+            player = observation.get("player") or {}
+            view = observation.get("player_view") or {}
+            if not player.get("present") or not view:
+                continue
+            maximum = float(player.get("max_health", 0.0) or 0.0)
+            raw_health = float(player.get("health", 0.0) or 0.0)
+            if maximum > 0 and "health" in view:
+                if not math.isclose(float(view["health"]), raw_health, abs_tol=1e-5):
+                    return OracleResult(
+                        verdict="fail", evidence_refs=refs, detail="displayed health differs from raw health"
+                    )
+            if maximum > 0 and "health_ratio" in view:
+                expected = raw_health / maximum
+                if not math.isclose(float(view["health_ratio"]), expected, abs_tol=1e-5):
+                    return OracleResult(
+                        verdict="fail", evidence_refs=refs, detail="displayed health ratio differs from raw health"
+                    )
+        return OracleResult(verdict="pass", evidence_refs=refs, detail="raw and displayed health match")
+
+    if oracle_id == "exp_conservation":
+        for transition in transitions:
+            observation = transition.get("observation") or {}
+            player = observation.get("player") or {}
+            view = observation.get("player_view") or {}
+            if player.get("present") and view and "exp" in view:
+                if not math.isclose(float(view["exp"]), float(player.get("exp", 0.0) or 0.0), abs_tol=1e-5):
+                    return OracleResult(
+                        verdict="fail", evidence_refs=refs, detail="displayed experience differs from raw experience"
+                    )
+        return OracleResult(verdict="pass", evidence_refs=refs, detail="raw and displayed experience match")
+
+    if oracle_id in {"hp_decreases_on_hit", "item_effect_applied", "item_hit_range"}:
+        for index, transition in enumerate(transitions):
+            observation = transition.get("observation") or {}
+            event_type = str((observation.get("event_state") or {}).get("type") or "")
+            if oracle_id == "hp_decreases_on_hit" and event_type in {"player_hit", "hit"}:
+                before = (transitions[index - 1].get("observation") or {}).get("player") or {} if index else {}
+                after = observation.get("player") or {}
+                passed = float(after.get("health", 0.0) or 0.0) < float(before.get("health", 0.0) or 0.0)
+                return OracleResult(
+                    verdict="pass" if passed else "fail",
+                    evidence_refs=refs,
+                    detail="player health changed after hit" if passed else "player health did not decrease after hit",
+                )
+            if oracle_id == "item_effect_applied" and event_type == "item_used":
+                before_progress = (transitions[index - 1].get("observation") or {}).get("progress") or {} if index else {}
+                after_progress = observation.get("progress") or {}
+                passed = float(after_progress.get("damage_dealt", 0.0) or 0.0) > float(before_progress.get("damage_dealt", 0.0) or 0.0)
+                return OracleResult(
+                    verdict="pass" if passed else "fail",
+                    evidence_refs=refs,
+                    detail="item damage was observed" if passed else "item use had no damage effect",
+                )
+            if oracle_id == "item_hit_range" and event_type == "item_used":
+                event = observation.get("event_state") or {}
+                affected = event.get("targets_affected")
+                expected = event.get("targets_in_radius")
+                if affected is not None and expected is not None:
+                    passed = int(affected) == int(expected)
+                    return OracleResult(
+                        verdict="pass" if passed else "fail",
+                        evidence_refs=refs,
+                        detail="item affected every target in range" if passed else "item affected only part of the range",
+                    )
+        return OracleResult(verdict="not_evaluated", evidence_refs=refs, detail="required transition was not observed")
+
+    raise EvaluationContractError(f"unregistered v4 oracle: {oracle_id}")
+
+
+def _v4_oracle_tuple(oracle_id: str, transitions: list[Transition]) -> tuple[bool, list[str], str]:
+    result = evaluate_v4_oracle(oracle_id, transitions)
+    return result.verdict == "pass", result.evidence_refs, result.detail
+
+
+ORACLE_REGISTRY.update(
+    {
+        oracle_id: (lambda transitions, oracle_id=oracle_id: _v4_oracle_tuple(oracle_id, transitions))
+        for oracle_id in (
+            "hp_decreases_on_hit",
+            "view_state_match",
+            "item_effect_applied",
+            "item_hit_range",
+            "exp_conservation",
+        )
+    }
+)
+
+
 def evaluate_coverage(scenario: Scenario, transitions: list[Transition]) -> CoverageResult:
     evaluator = COVERAGE_REGISTRY.get(scenario.coverage_target)
     if evaluator is None:

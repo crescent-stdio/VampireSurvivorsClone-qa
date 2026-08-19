@@ -1,0 +1,157 @@
+{
+  "schema": "qa-scenarios/v4",
+  "scenarios": [
+    {
+      "id": "easy-hp-on-hit",
+      "difficulty": "easy",
+      "bug_type": "logic_error",
+      "preset": "smoke",
+      "legacy_scenario_id": "easy-health-ratio",
+      "goal": {
+        "description": "Enter gameplay and observe a deterministic player hit window.",
+        "reached_when": "player_present AND hit_window_observed",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "hp_decreases_on_hit", "kind": "transition"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": ["Assets/Scripts/Character/Character.cs"],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 60.0, "max_steps": 20}
+    },
+    {
+      "id": "easy-view-health",
+      "difficulty": "easy",
+      "bug_type": "description_flaw",
+      "preset": "smoke",
+      "legacy_scenario_id": "control-valid-observation",
+      "goal": {
+        "description": "Observe player raw health and the displayed health bar together.",
+        "reached_when": "player_present AND player_view_present",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "view_state_match", "kind": "invariant"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": ["Assets/Scripts/Gameplay/PointBar.cs"],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 60.0, "max_steps": 20}
+    },
+    {
+      "id": "medium-item-effect",
+      "difficulty": "medium",
+      "bug_type": "logic_error",
+      "preset": "smoke",
+      "legacy_scenario_id": "medium-upgrade-effect",
+      "goal": {
+        "description": "Use a deterministic item while an eligible target is visible.",
+        "reached_when": "item_used AND target_visible",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "item_effect_applied", "kind": "transition"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": ["Assets/Scripts/Collectables/Bomb.cs"],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 120.0, "max_steps": 40}
+    },
+    {
+      "id": "medium-item-hit-range",
+      "difficulty": "medium",
+      "bug_type": "logic_error",
+      "preset": "smoke",
+      "legacy_scenario_id": "easy-relative-position",
+      "goal": {
+        "description": "Use an area item with multiple deterministic targets in range.",
+        "reached_when": "item_used AND targets_in_effect_radius",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "item_hit_range", "kind": "transition"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": ["Assets/Scripts/Monsters/EntityManager.cs"],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 120.0, "max_steps": 40}
+    },
+    {
+      "id": "hard-exp-conservation",
+      "difficulty": "hard",
+      "bug_type": "data_inconsistency",
+      "preset": "smoke",
+      "legacy_scenario_id": "hard-experience-drift",
+      "goal": {
+        "description": "Reach level 3 through a fixed experience path and compare raw and displayed EXP.",
+        "reached_when": "level >= 3",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "exp_conservation", "kind": "invariant"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": ["Assets/Scripts/Character/Character.cs"],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 240.0, "max_steps": 80}
+    },
+    {
+      "id": "control-easy-observation",
+      "difficulty": "easy",
+      "bug_type": "control",
+      "preset": "smoke",
+      "legacy_scenario_id": "control-valid-observation",
+      "goal": {
+        "description": "Exercise a valid raw observation without an injected fault.",
+        "reached_when": "player_present",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "valid_observation", "kind": "invariant"},
+      "abort": ["phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": [],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 60.0, "max_steps": 20}
+    },
+    {
+      "id": "control-medium-item",
+      "difficulty": "medium",
+      "bug_type": "control",
+      "preset": "smoke",
+      "legacy_scenario_id": "control-normal-transitions",
+      "goal": {
+        "description": "Exercise normal chest and upgrade transitions.",
+        "reached_when": "upgrade_seen AND chest_collected",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "normal_state_transitions", "kind": "transition"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": [],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 120.0, "max_steps": 40}
+    },
+    {
+      "id": "control-hard-progression",
+      "difficulty": "hard",
+      "bug_type": "control",
+      "preset": "smoke",
+      "legacy_scenario_id": "control-long-progression",
+      "goal": {
+        "description": "Sustain deterministic progression without injected faults.",
+        "reached_when": "level >= 3 OR level_time >= 120",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "stable_long_progression", "kind": "trajectory"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": [],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 240.0, "max_steps": 80}
+    }
+  ]
+}

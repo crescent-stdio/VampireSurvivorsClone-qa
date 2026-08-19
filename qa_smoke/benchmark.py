@@ -305,6 +305,7 @@ def run_benchmark(
     api_url: str | None = None,
     headless: bool = False,
     quiet: bool = False,
+    inject_faults: bool = True,
 ) -> list[RunResult]:
     results: list[RunResult] = []
     requested_seeds = list(seeds) if seeds is not None else None
@@ -329,6 +330,8 @@ def run_benchmark(
                 "--seed",
                 str(selected_seed),
             ]
+            if inject_faults and scenario.ground_truth.fault_id:
+                arguments.extend(["--fault", scenario.ground_truth.fault_id])
             if model:
                 arguments.extend(["--model", model])
             if api_url:

@@ -1,0 +1,53 @@
+{
+  "schema": "qa-ground-truth/v4",
+  "scenarios": {
+    "easy-hp-on-hit": {
+      "bug_id": "BUG-1",
+      "fault_id": "hp_not_decreased_on_hit",
+      "validity": "valid",
+      "expected_behavior": "A successful hit decreases the player's raw health."
+    },
+    "easy-view-health": {
+      "bug_id": "BUG-2",
+      "fault_id": "health_bar_desync",
+      "validity": "valid",
+      "expected_behavior": "The health bar represents the raw player health."
+    },
+    "medium-item-effect": {
+      "bug_id": "BUG-3",
+      "fault_id": "item_effect_not_applied",
+      "validity": "valid",
+      "expected_behavior": "Using an area item damages every eligible target."
+    },
+    "medium-item-hit-range": {
+      "bug_id": "BUG-4",
+      "fault_id": "item_hit_range_mismatch",
+      "validity": "valid",
+      "expected_behavior": "All targets inside the effect radius receive the effect."
+    },
+    "hard-exp-conservation": {
+      "bug_id": "BUG-5",
+      "fault_id": "experience_display_drift",
+      "validity": "valid",
+      "expected_behavior": "Raw experience and displayed experience remain consistent."
+    },
+    "control-easy-observation": {
+      "bug_id": null,
+      "fault_id": null,
+      "validity": "control",
+      "expected_behavior": "The observation remains internally consistent."
+    },
+    "control-medium-item": {
+      "bug_id": null,
+      "fault_id": null,
+      "validity": "control",
+      "expected_behavior": "Normal item and progression transitions remain valid."
+    },
+    "control-hard-progression": {
+      "bug_id": null,
+      "fault_id": null,
+      "validity": "control",
+      "expected_behavior": "Long progression preserves state invariants."
+    }
+  }
+}

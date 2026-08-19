@@ -79,6 +79,11 @@ namespace Vampire.QA
             "chest_collected_without_state_transition";
         public const string ExperienceLevelDrift = "experience_level_drift";
         public const string CurrencyLeakAcrossRestart = "currency_leak_across_restart";
+        public const string HpNotDecreasedOnHit = "hp_not_decreased_on_hit";
+        public const string HealthBarDesync = "health_bar_desync";
+        public const string ItemEffectNotApplied = "item_effect_not_applied";
+        public const string ItemHitRangeMismatch = "item_hit_range_mismatch";
+        public const string ExperienceDisplayDrift = "experience_display_drift";
 
         private static readonly Dictionary<string, string> ScenarioByFault =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -88,8 +93,15 @@ namespace Vampire.QA
                 [UpgradeAckWithoutEffect] = "medium-upgrade-effect",
                 [ChestCollectedWithoutStateTransition] = "medium-chest-transition",
                 [ExperienceLevelDrift] = "hard-experience-drift",
-                [CurrencyLeakAcrossRestart] = "hard-restart-currency"
+                [CurrencyLeakAcrossRestart] = "hard-restart-currency",
+                [HpNotDecreasedOnHit] = "easy-hp-on-hit",
+                [HealthBarDesync] = "easy-view-health",
+                [ItemEffectNotApplied] = "medium-item-effect",
+                [ItemHitRangeMismatch] = "medium-item-hit-range",
+                [ExperienceDisplayDrift] = "hard-exp-conservation",
             };
+
+        private static string activeFaultId = "";
 
         public static IReadOnlyCollection<string> AllFaultIds => ScenarioByFault.Keys;
 
@@ -143,6 +155,31 @@ namespace Vampire.QA
         public static bool ShouldApplyUpgrade(string activeFault)
         {
             return activeFault != UpgradeAckWithoutEffect;
+        }
+
+        public static void Activate(string faultId)
+        {
+            activeFaultId = faultId ?? "";
+        }
+
+        public static bool IsActive(string faultId)
+        {
+            return string.Equals(activeFaultId, faultId, StringComparison.Ordinal);
+        }
+
+        public static bool SkipHealthDecrease => IsActive(HpNotDecreasedOnHit);
+
+        public static bool SkipHealthBarUpdate => IsActive(HealthBarDesync);
+
+        public static bool SuppressItemEffect => IsActive(ItemEffectNotApplied);
+
+        public static bool RestrictItemRange => IsActive(ItemHitRangeMismatch);
+
+        public static float DisplayedExperience(string activeFault, float experience, int level)
+        {
+            return activeFault == ExperienceDisplayDrift && level >= 3
+                ? experience + 3f
+                : experience;
         }
     }
 }
