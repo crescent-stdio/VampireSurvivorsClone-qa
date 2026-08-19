@@ -19,6 +19,7 @@ from .planners import (
     LLMPlanner,
     Planner,
     build_action_contract,
+    build_reflection_contract,
     canonicalize_decision_arguments,
     compact_observation,
     compute_observed_delta,
@@ -45,6 +46,10 @@ SCENARIO_OWNED_ARGUMENTS = {
     "max_simulation_seconds": "--max-simulation-seconds",
     "max_steps": "--max-steps",
 }
+
+
+class LLMContractError(RuntimeError):
+    """The LLM violated the action contract twice."""
 
 AD_HOC_DEFAULTS: dict[str, Any] = {
     "objective": DEFAULT_OBJECTIVE,
@@ -449,7 +454,9 @@ def build_session_verdict(
 ) -> dict[str, Any]:
     if fatal_error is None:
         execution_status = "completed"
-    elif fatal_error.startswith(("BridgeContractError:", "ScenarioContractError:")):
+    elif fatal_error.startswith(
+        ("BridgeContractError:", "ScenarioContractError:", "LLMContractError:")
+    ):
         execution_status = "contract_error"
     else:
         execution_status = "infrastructure_error"
@@ -611,7 +618,13 @@ def run_session(args: argparse.Namespace) -> int:
                 contract = build_action_contract(
                     last_observation, args.mode, charter, source_steps_remaining
                 )
-                contract["has_previous_transition"] = bool(tool_context)
+                reflection_contract = build_reflection_contract(
+                    tool_context[-1] if tool_context else None
+                )
+                contract["has_previous_transition"] = (
+                    reflection_contract["has_previous_transition"]
+                )
+                contract["reflection_contract"] = reflection_contract
                 contract_error = validate_decision_against_contract(raw_decision, contract)
                 if contract_error:
                     record_contract_event(
@@ -673,7 +686,7 @@ def run_session(args: argparse.Namespace) -> int:
                                 "evidence": repair_error,
                             }
                         )
-                        raise RuntimeError(
+                        raise LLMContractError(
                             "LLM repeated an invalid action after one corrective retry: " + repair_error
                         )
                     raw_decision = repaired_decision

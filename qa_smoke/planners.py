@@ -192,6 +192,39 @@ def build_action_contract(
     }
 
 
+def build_reflection_contract(
+    previous_transition: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build reflection rules and evidence IDs from one sanitized transition."""
+    has_previous_transition = bool(previous_transition)
+    allowed_evidence_refs: list[str] = []
+    if isinstance(previous_transition, dict):
+        observation = previous_transition.get("observation")
+        if not isinstance(observation, dict):
+            observation = previous_transition
+        observation_id = str(observation.get("observation_id") or "").strip()
+        if observation_id:
+            allowed_evidence_refs.append(observation_id)
+        event = observation.get("event_state")
+        if not isinstance(event, dict):
+            event = previous_transition.get("event_state") or {}
+        event_id = str(event.get("event_id") or "").strip()
+        if event_id and event_id not in allowed_evidence_refs:
+            allowed_evidence_refs.append(event_id)
+
+    return {
+        "has_previous_transition": has_previous_transition,
+        "allowed_statuses": (
+            ["matched", "unexpected", "uncertain"]
+            if has_previous_transition
+            else ["not_applicable"]
+        ),
+        "evidence_refs_required": has_previous_transition,
+        "candidate_id_required_for": ["unexpected"],
+        "allowed_evidence_refs": allowed_evidence_refs,
+    }
+
+
 def canonicalize_decision_arguments(decision: dict[str, Any]) -> dict[str, Any]:
     """Normalize only the model's argument syntax; never invent a gameplay choice."""
     canonical = dict(decision)
@@ -231,6 +264,14 @@ def build_decision_response_schema(contract: dict[str, Any]) -> dict[str, Any] |
     if len(allowed_calls) != 1 or not str(allowed_calls[0]).startswith("game."):
         return None
     action = str(allowed_calls[0]).split(".", 1)[1]
+    reflection_contract = contract.get("reflection_contract") or {}
+    allowed_reflection_statuses = reflection_contract.get("allowed_statuses")
+    if not isinstance(allowed_reflection_statuses, list) or not allowed_reflection_statuses:
+        allowed_reflection_statuses = (
+            ["matched", "unexpected", "uncertain"]
+            if contract.get("has_previous_transition")
+            else ["not_applicable"]
+        )
     argument_properties: dict[str, Any] = {}
     required_arguments: list[str] = []
     if action in ("start_game", "select_upgrade", "use_item"):
@@ -260,7 +301,7 @@ def build_decision_response_schema(contract: dict[str, Any]) -> dict[str, Any] |
         "properties": {
             "status": {
                 "type": "string",
-                "enum": ["matched", "unexpected", "uncertain", "not_applicable"],
+                "enum": allowed_reflection_statuses,
             },
             "summary": {"type": "string"},
             "evidence_refs": {"type": "array", "items": {"type": "string"}},
@@ -370,15 +411,21 @@ def validate_decision_against_contract(
     if not isinstance(reflection, dict):
         return "reflection must be a JSON object"
     reflection_status = str(reflection.get("status") or "")
-    allowed_reflection_statuses = {
-        "matched",
-        "unexpected",
-        "uncertain",
-        "not_applicable",
-    }
+    reflection_contract = contract.get("reflection_contract") or {}
+    allowed_reflection_statuses = set(
+        reflection_contract.get("allowed_statuses") or (
+            ["matched", "unexpected", "uncertain"]
+            if contract.get("has_previous_transition")
+            else ["not_applicable"]
+        )
+    )
     if reflection_status not in allowed_reflection_statuses:
         return f"reflection.status must be one of {sorted(allowed_reflection_statuses)}"
-    has_previous = bool(contract.get("has_previous_transition"))
+    has_previous = bool(
+        reflection_contract.get(
+            "has_previous_transition", contract.get("has_previous_transition")
+        )
+    )
     if has_previous and reflection_status == "not_applicable":
         return "reflection.status cannot be not_applicable when a previous transition exists"
     if not has_previous and reflection_status != "not_applicable":
@@ -392,10 +439,21 @@ def validate_decision_against_contract(
         return "reflection.evidence_refs must be an array of strings"
     if has_previous and reflection_status != "not_applicable" and not evidence_refs:
         return "reflection must cite evidence_refs from the observed transition"
-    if reflection_status in ("unexpected", "uncertain") and not str(
+    allowed_evidence_refs = reflection_contract.get("allowed_evidence_refs")
+    if (
+        has_previous
+        and isinstance(allowed_evidence_refs, list)
+        and allowed_evidence_refs
+        and any(reference not in allowed_evidence_refs for reference in evidence_refs)
+    ):
+        return (
+            "reflection.evidence_refs must use allowed transition IDs: "
+            f"{allowed_evidence_refs}"
+        )
+    if reflection_status == "unexpected" and not str(
         reflection.get("candidate_id") or ""
     ).strip():
-        return "unexpected or uncertain reflection requires candidate_id"
+        return "unexpected reflection requires candidate_id"
     if not isinstance(reflection.get("reproduction_attempted"), bool):
         return "reflection.reproduction_attempted must be a boolean"
     expected_required = (
@@ -608,7 +666,9 @@ class LLMPlanner:
     ) -> dict[str, Any]:
         system = self._planning_system_prompt() + (
             "\nYour previous response violated the current action contract. Correct it once. "
-            "Do not repeat or explain the invalid call; return only a valid JSON decision."
+            "Do not repeat or explain the invalid call; return only a valid JSON decision. "
+            "Preserve valid gameplay tool, action, and arguments. Correct only the fields named by contract_error. "
+            "Do not invent evidence IDs or candidate IDs."
         )
         payload = self._planning_payload(observation, step, tool_context, source_steps_remaining)
         payload["invalid_decision"] = invalid_decision
@@ -636,7 +696,7 @@ During active gameplay use direct_steer. You alone must decide whether to contin
 Unity does NOT automatically avoid enemies, choose a chest, attract toward a chest, enforce the requested heading, or alter your direction. It only holds your chosen vector every frame and detects events. Use world.threat_entities, danger_score, escape_vector, and chest relative vectors to choose x/y yourself.
 When intent=collect_chest, aim x/y toward that target's relative_x/relative_y (normally the normalized target vector); do not claim collection while moving away from it. When danger is high, an evade vector should materially align with escape_vector. Choose full 2D movement, not only a cardinal axis.
 The horizon can end early on a chest entering close-control range, chest collection, low health, danger spikes, stuck detection, level-up, death, or another event. Re-plan from event_state and controller state.
-Act as a QA engineer while you play. Before every state-changing game action, state a concrete expected_effect. On the next planning step, compare observed_delta with that expectation in reflection. Use matched, unexpected, or uncertain and cite observation/event IDs from the transition. The first step has no prior transition and must use reflection.status=not_applicable.
+Act as a QA engineer while you play. Before every state-changing game action, state a concrete expected_effect. On the next planning step, compare observed_delta with that expectation in reflection. Use action_contract.has_previous_transition, not the numeric step, to decide reflection.status. When it is false, use not_applicable with empty evidence_refs and candidate_id. When it is true, never use not_applicable. Copy only exact observation_id or event_id strings listed in reflection_contract.allowed_evidence_refs. uncertain may describe an unresolved risk and may leave candidate_id empty. unexpected always requires a stable non-empty candidate_id.
 Keep navigation reasoning in hypothesis and QA findings in qa_observation. An unexpected result starts a hypothesis; mark reproduction_attempted only when you deliberately repeated a relevant setup/action. A candidate becomes confirmed only after its own reproduction path, never from hidden evaluator data.
 For direct_steer and wait, normally request a duration no greater than {self.plan_horizon_seconds:.3f} simulation seconds.
 Return one JSON object only with keys: plan, hypothesis, qa_observation, tool, action, arguments, expected_effect, reflection.
@@ -654,13 +714,18 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
         action_contract = build_action_contract(
             observation, self.mode, self.charter, source_steps_remaining
         )
-        action_contract["has_previous_transition"] = bool(recent_transitions)
         previous_transition = recent_transitions[-1] if recent_transitions else None
+        reflection_contract = build_reflection_contract(previous_transition)
+        action_contract["has_previous_transition"] = (
+            reflection_contract["has_previous_transition"]
+        )
+        action_contract["reflection_contract"] = reflection_contract
         return {
             "step": step,
             "test_charter": self.charter.as_dict(),
             "observation": compact_observation(observation),
             "action_contract": action_contract,
+            "reflection_contract": reflection_contract,
             "previous_transition": previous_transition,
             "recent_transitions": recent_transitions,
             "session_memory": memory.summary(),

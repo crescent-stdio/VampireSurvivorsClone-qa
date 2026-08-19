@@ -136,7 +136,7 @@ class RunRecorder:
     scenario_fingerprint: str = ""
     fault_id: str | None = None
     protocol_version: str = "1.4"
-    prompt_version: str = "qa-planning/v2"
+    prompt_version: str = "qa-planning/v3"
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     steps: list[dict[str, Any]] = field(default_factory=list)
     anomalies: list[dict[str, Any]] = field(default_factory=list)

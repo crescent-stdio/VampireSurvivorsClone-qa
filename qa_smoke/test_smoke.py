@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import threading
@@ -9,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from . import bridge_client as bridge_client_module
+from . import planners as planners_module
 from . import benchmark as benchmark_module
 from .bridge_client import BridgeClient
 from .charter import TestCharter
@@ -243,6 +245,134 @@ class HeuristicPlannerTests(unittest.TestCase):
 
 
 class LLMPlannerTests(unittest.TestCase):
+    def test_reflection_contract_extracts_flattened_transition_ids(self) -> None:
+        contract = planners_module.build_reflection_contract(
+            {
+                "observation_id": "obs-2",
+                "event_state": {"event_id": "event-2"},
+            }
+        )
+
+        self.assertEqual(
+            ["obs-2", "event-2"],
+            contract["allowed_evidence_refs"],
+        )
+
+    def test_reflection_contract_extracts_nested_transition_ids(self) -> None:
+        contract = planners_module.build_reflection_contract(
+            {
+                "observation": {
+                    "observation_id": "obs-3",
+                    "event_state": {"event_id": "event-3"},
+                }
+            }
+        )
+
+        self.assertEqual(
+            ["obs-3", "event-3"],
+            contract["allowed_evidence_refs"],
+        )
+
+    def test_uncertain_reflection_without_candidate_id_is_allowed(self) -> None:
+        contract = {
+            "phase": "active_gameplay",
+            "allowed_calls": ["game.direct_steer"],
+            "required_arguments": {},
+            "has_previous_transition": True,
+            "reflection_contract": {
+                "has_previous_transition": True,
+                "allowed_statuses": ["matched", "unexpected", "uncertain"],
+                "evidence_refs_required": True,
+                "candidate_id_required_for": ["unexpected"],
+                "allowed_evidence_refs": ["obs-2"],
+            },
+        }
+        decision = {
+            "qa_observation": "The result is uncertain because nearby threats may affect health.",
+            "tool": "game",
+            "action": "direct_steer",
+            "arguments": {"x": 1.0, "y": 0.0, "duration": 2.0},
+            "expected_effect": "The player should continue moving toward the target.",
+            "reflection": {
+                "status": "uncertain",
+                "summary": "The outcome is not confirmed yet.",
+                "evidence_refs": ["obs-2"],
+                "candidate_id": "",
+                "reproduction_attempted": False,
+            },
+        }
+
+        self.assertIsNone(
+            validate_decision_against_contract(decision, contract)
+        )
+
+    def test_unexpected_reflection_requires_candidate_id(self) -> None:
+        contract = {
+            "phase": "active_gameplay",
+            "allowed_calls": ["game.direct_steer"],
+            "required_arguments": {},
+            "has_previous_transition": True,
+            "reflection_contract": {
+                "has_previous_transition": True,
+                "allowed_statuses": ["matched", "unexpected", "uncertain"],
+                "evidence_refs_required": True,
+                "candidate_id_required_for": ["unexpected"],
+                "allowed_evidence_refs": ["obs-2"],
+            },
+        }
+        decision = {
+            "qa_observation": "The observed result was unexpected.",
+            "tool": "game",
+            "action": "direct_steer",
+            "arguments": {"x": 1.0, "y": 0.0, "duration": 2.0},
+            "expected_effect": "The player should continue moving toward the target.",
+            "reflection": {
+                "status": "unexpected",
+                "summary": "The observed result did not match the expectation.",
+                "evidence_refs": ["obs-2"],
+                "candidate_id": "",
+                "reproduction_attempted": False,
+            },
+        }
+
+        self.assertEqual(
+            "unexpected reflection requires candidate_id",
+            validate_decision_against_contract(decision, contract),
+        )
+
+    def test_reflection_rejects_evidence_outside_previous_transition(self) -> None:
+        contract = {
+            "phase": "active_gameplay",
+            "allowed_calls": ["game.direct_steer"],
+            "required_arguments": {},
+            "has_previous_transition": True,
+            "reflection_contract": {
+                "has_previous_transition": True,
+                "allowed_statuses": ["matched", "unexpected", "uncertain"],
+                "evidence_refs_required": True,
+                "candidate_id_required_for": ["unexpected"],
+                "allowed_evidence_refs": ["obs-2", "event-2"],
+            },
+        }
+        decision = {
+            "qa_observation": "The observed result matched the expectation.",
+            "tool": "game",
+            "action": "direct_steer",
+            "arguments": {"x": 1.0, "y": 0.0, "duration": 2.0},
+            "expected_effect": "The player should continue moving toward the target.",
+            "reflection": {
+                "status": "matched",
+                "summary": "The observed result matched the expectation.",
+                "evidence_refs": ["obs-other"],
+                "candidate_id": "",
+                "reproduction_attempted": False,
+            },
+        }
+
+        error = validate_decision_against_contract(decision, contract)
+
+        self.assertIn("allowed", error or "")
+
     def test_user_charter_is_sent_in_every_plan_request(self) -> None:
         charter = TestCharter(
             objective="Survive and probe the east boundary",
@@ -260,6 +390,88 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIn("does NOT automatically avoid enemies", system_prompt)
         self.assertIn("direct_steer", system_prompt)
         self.assertIn("long-term NET-PROGRESS", system_prompt)
+
+    def test_planning_payload_contains_reflection_contract_and_transition_ids(self) -> None:
+        planner = LLMPlanner("qa", "test-model", TestCharter(), 5.0, api_key="test-key")
+
+        payload = planner._planning_payload(
+            {
+                "paused": True,
+                "player": {"present": True, "alive": True},
+                "menu": {},
+                "available_actions": ["direct_steer"],
+            },
+            2,
+            [
+                {
+                    "observation_id": "obs-2",
+                    "event_state": {"event_id": "event-2"},
+                }
+            ],
+            0,
+        )
+
+        self.assertEqual(
+            ["obs-2", "event-2"],
+            payload["reflection_contract"]["allowed_evidence_refs"],
+        )
+        self.assertEqual(
+            ["matched", "unexpected", "uncertain"],
+            payload["action_contract"]["reflection_contract"]["allowed_statuses"],
+        )
+
+    def test_response_schema_limits_reflection_status_to_transition_phase(self) -> None:
+        base_contract = {
+            "phase": "active_gameplay",
+            "allowed_calls": ["game.direct_steer"],
+            "allowed_indices": [],
+            "required_arguments": {},
+        }
+        without_previous = {
+            **base_contract,
+            "has_previous_transition": False,
+        }
+        with_previous = {
+            **base_contract,
+            "has_previous_transition": True,
+        }
+
+        first_schema = build_decision_response_schema(without_previous)
+        later_schema = build_decision_response_schema(with_previous)
+
+        self.assertEqual(
+            ["not_applicable"],
+            first_schema["properties"]["reflection"]["properties"]["status"]["enum"],
+        )
+        self.assertEqual(
+            ["matched", "unexpected", "uncertain"],
+            later_schema["properties"]["reflection"]["properties"]["status"]["enum"],
+        )
+
+    def test_repair_prompt_explains_reflection_contract_rules(self) -> None:
+        planner = LLMPlanner("qa", "test-model", TestCharter(), 5.0, api_key="test-key")
+        invalid_decision = {
+            "tool": "game",
+            "action": "direct_steer",
+            "arguments": {"x": 1.0, "y": 0.0, "duration": 5.0},
+        }
+        with patch.object(planner, "_request", return_value=invalid_decision) as request:
+            planner.repair_plan(
+                {
+                    "paused": True,
+                    "player": {"present": True, "alive": True},
+                    "menu": {},
+                    "available_actions": ["direct_steer"],
+                },
+                2,
+                [{"observation_id": "obs-2", "event_state": {}}],
+                invalid_decision,
+                "reflection must cite evidence_refs from the observed transition",
+            )
+
+        system_prompt = request.call_args.args[0]
+        self.assertIn("has_previous_transition", system_prompt)
+        self.assertIn("Do not invent evidence IDs", system_prompt)
 
     def test_active_gameplay_contract_rejects_unpause_loop_without_choosing_vector(self) -> None:
         observation = {
@@ -588,6 +800,35 @@ class LLMPlannerTests(unittest.TestCase):
 
 
 class ReportingTests(unittest.TestCase):
+    def test_run_recorder_uses_new_reflection_prompt_version(self) -> None:
+        recorder = RunRecorder(
+            TEST_TEMP_ROOT / "prompt-version",
+            "qa",
+            "llm",
+            9101,
+            model="gpt-4o-mini",
+        )
+
+        self.assertEqual("qa-planning/v3", recorder.prompt_version)
+
+    def test_llm_contract_failure_is_not_classified_as_infrastructure_error(self) -> None:
+        recorder = RunRecorder(
+            TEST_TEMP_ROOT / "llm-contract-verdict",
+            "qa",
+            "llm",
+            9101,
+            model="gpt-4o-mini",
+        )
+
+        verdict = run_module.build_session_verdict(
+            argparse.Namespace(scenario_definition=None),
+            recorder,
+            "LLMContractError: invalid reflection",
+            {},
+        )
+
+        self.assertEqual("contract_error", verdict["execution_status"])
+
     @staticmethod
     def annotation(reviewer_id: str, label: str) -> dict[str, object]:
         return {
