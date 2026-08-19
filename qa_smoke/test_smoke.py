@@ -2654,6 +2654,87 @@ class LLMRetryTests(unittest.TestCase):
                     LLMPlanner("qa", "m", TestCharter(), 5.0, api_key="k", **kwargs)
 
 
+class PlannerUsageAccountingTests(unittest.TestCase):
+    """Tokens the provider billed must be recorded even when the call fails."""
+
+    class FailingPlanner:
+        """Sets usage the way _request does, then raises like truncation does."""
+
+        def __init__(self) -> None:
+            self.last_usage = {
+                "prompt_tokens": 900,
+                "completion_tokens": 300,
+                "total_tokens": 1200,
+                "cache_boundary": 0,
+            }
+
+        def take_last_usage(self) -> dict[str, object]:
+            usage, self.last_usage = self.last_usage, {}
+            return usage
+
+    def test_usage_from_a_failed_call_is_still_recorded(self) -> None:
+        recorder = RunRecorder(TEST_TEMP_ROOT / "usage-drain", "qa", "llm", 9101)
+        planner = self.FailingPlanner()
+
+        run_module.drain_planner_usage(recorder, planner, "planning_request", 3)
+
+        totals = recorder.api_usage_totals()
+        self.assertEqual(1200, totals["total_tokens"])
+        self.assertEqual(1, len(recorder.api_usage_events))
+
+    def test_draining_twice_does_not_double_count(self) -> None:
+        recorder = RunRecorder(TEST_TEMP_ROOT / "usage-drain-twice", "qa", "llm", 9101)
+        planner = self.FailingPlanner()
+
+        run_module.drain_planner_usage(recorder, planner, "planning_request", 3)
+        run_module.drain_planner_usage(recorder, planner, "planning_request", 4)
+
+        self.assertEqual(1200, recorder.api_usage_totals()["total_tokens"])
+        self.assertEqual(1, len(recorder.api_usage_events))
+
+    def test_a_heuristic_planner_records_nothing(self) -> None:
+        recorder = RunRecorder(TEST_TEMP_ROOT / "usage-drain-heuristic", "qa", "heuristic", 9101)
+
+        run_module.drain_planner_usage(
+            recorder, HeuristicPlanner(5.0, TestCharter()), "planning_request", 0
+        )
+
+        self.assertEqual([], recorder.api_usage_events)
+
+    def test_failed_request_usage_does_not_leak_into_the_next_call(self) -> None:
+        """last_usage is only cleared by take_last_usage, so an undrained failure
+        would otherwise be attributed to whichever call succeeded next."""
+        state = {"calls": 0}
+
+        def opener(*_args, **_kwargs):
+            state["calls"] += 1
+            first = state["calls"] == 1
+            return fake_opener(
+                json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {"content": "{}"},
+                                "finish_reason": "length" if first else "stop",
+                            }
+                        ],
+                        "usage": {"total_tokens": 999 if first else 10},
+                    }
+                )
+            )()
+
+        planner = LLMPlanner(
+            "qa", "test-model", TestCharter(), 5.0, api_key="test-key", urlopen=opener
+        )
+        with self.assertRaises(RuntimeError):
+            planner._request("sys", "user")
+        planner.take_last_usage()
+
+        planner._request("sys", "user")
+
+        self.assertEqual(10, planner.take_last_usage()["total_tokens"])
+
+
 class LLMTransportLabelTests(unittest.TestCase):
     """Every way a request can fail must be labelled and stay infrastructure."""
 

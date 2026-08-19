@@ -502,6 +502,26 @@ def session_evidence_refs(
     return list(dict.fromkeys(reference for reference in references if reference))
 
 
+def drain_planner_usage(
+    recorder: RunRecorder,
+    planner: Planner,
+    phase: str,
+    step: int | None = None,
+) -> dict[str, Any]:
+    """Record whatever the last request billed, even if it then failed.
+
+    take_last_usage() is the only thing that clears the planner's buffer, so a
+    call that raised after the provider answered -- a truncated response, a
+    malformed body -- used to leave its tokens unrecorded and then attribute
+    them to the next successful call. Callers invoke this from a finally.
+    """
+    usage = planner.take_last_usage()
+    cache_boundary = bool(usage.pop("cache_boundary", 0))
+    if usage:
+        recorder.add_api_usage(phase, usage, step, cache_boundary=cache_boundary)
+    return usage
+
+
 def build_session_verdict(
     args: argparse.Namespace,
     recorder: RunRecorder,
@@ -678,25 +698,28 @@ def run_session(args: argparse.Namespace) -> int:
             source_steps_remaining = max(0, args.max_source_steps - source_steps)
             if args.uses_llm_planner and planning_window_started is None:
                 planning_window_started = time.monotonic()
-            raw_decision = canonicalize_decision_arguments(
-                planner.plan(
-                    build_agent_observation(last_observation)
-                    if args.uses_llm_planner
-                    else last_observation,
-                    step,
-                    tool_context,
-                    source_steps_remaining,
+            planning_usage: dict[str, Any] = {}
+            try:
+                raw_decision = canonicalize_decision_arguments(
+                    planner.plan(
+                        build_agent_observation(last_observation)
+                        if args.uses_llm_planner
+                        else last_observation,
+                        step,
+                        tool_context,
+                        source_steps_remaining,
+                    )
                 )
-            )
-            planning_usage = planner.take_last_usage()
-            initial_cache_boundary = bool(planning_usage.pop("cache_boundary", 0))
-            if args.uses_llm_planner:
-                recorder.add_api_usage(
-                    "planning_request",
-                    planning_usage,
-                    step,
-                    cache_boundary=initial_cache_boundary,
-                )
+            finally:
+                # Runs on the failure path too: a request that billed tokens and
+                # then raised must still appear in metrics.api_usage, which is
+                # what the next run is sized against.
+                if args.uses_llm_planner:
+                    planning_usage = drain_planner_usage(
+                        recorder, planner, "planning_request", step
+                    )
+                else:
+                    planner.take_last_usage()
             if raw_decision.get("_syntax_normalizations"):
                 record_contract_event(
                     output_dir,
@@ -744,16 +767,23 @@ def run_session(args: argparse.Namespace) -> int:
                         )
                     if not isinstance(planner, LLMPlanner):
                         raise RuntimeError(contract_error)
-                    repaired_decision = canonicalize_decision_arguments(
-                        planner.repair_plan(
-                            build_agent_observation(last_observation),
-                            step,
-                            tool_context,
-                            raw_decision,
-                            contract_error,
-                            source_steps_remaining,
+                    repair_usage: dict[str, Any] = {}
+                    try:
+                        repaired_decision = canonicalize_decision_arguments(
+                            planner.repair_plan(
+                                build_agent_observation(last_observation),
+                                step,
+                                tool_context,
+                                raw_decision,
+                                contract_error,
+                                source_steps_remaining,
+                            )
                         )
-                    )
+                    finally:
+                        repair_usage = drain_planner_usage(
+                            recorder, planner, "repair_request", step
+                        )
+                        planning_usage = merge_api_usage(planning_usage, repair_usage)
                     if repaired_decision.get("_syntax_normalizations"):
                         record_contract_event(
                             output_dir,
@@ -767,15 +797,6 @@ def run_session(args: argparse.Namespace) -> int:
                     repaired_decision = inject_reflection_evidence_refs(
                         repaired_decision, reflection_contract
                     )
-                    repair_usage = planner.take_last_usage()
-                    repair_cache_boundary = bool(repair_usage.pop("cache_boundary", 0))
-                    recorder.add_api_usage(
-                        "repair_request",
-                        repair_usage,
-                        step,
-                        cache_boundary=repair_cache_boundary,
-                    )
-                    planning_usage = merge_api_usage(planning_usage, repair_usage)
                     repair_error = validate_decision_against_contract(repaired_decision, contract)
                     if repair_error:
                         recorder.repair_contract_rejections += 1
@@ -971,8 +992,10 @@ def run_session(args: argparse.Namespace) -> int:
     llm_assessment = None
     if fatal_error is None and args.uses_llm_planner:
         try:
-            llm_assessment = planner.final_assessment(assessment_context)
-            recorder.add_api_usage("final_assessment", planner.take_last_usage())
+            try:
+                llm_assessment = planner.final_assessment(assessment_context)
+            finally:
+                drain_planner_usage(recorder, planner, "final_assessment")
         except Exception as error:
             recorder.anomalies.append({"step": len(recorder.steps), "kind": "llm_report_failed", "severity": "medium", "evidence": str(error)})
     try:
