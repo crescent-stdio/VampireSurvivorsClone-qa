@@ -496,3 +496,55 @@ def evaluate_oracle(scenario: Scenario, transitions: list[Transition]) -> Oracle
         evidence_refs=refs,
         detail=detail,
     )
+
+
+class ScenarioVerdictAxes(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    coverage_status: Literal["reached", "not_reached"]
+    oracle_verdict: Literal["pass", "fail", "not_evaluated"]
+    evidence_refs: list[str]
+    detail: str
+
+
+def scenario_verdict_axes(
+    scenario: Scenario,
+    transitions: list[Transition],
+    execution_status: str,
+) -> ScenarioVerdictAxes | None:
+    """Judge a trace that may be a prefix of an aborted run.
+
+    An oracle `fail` is proof-carrying: it fires because a recorded observation
+    violates an invariant, and the evidence ref points at that observation.
+    Truncating a trace cannot manufacture a violation, so a failure found in a
+    prefix is a real failure.
+
+    A `pass` is the opposite claim -- "no violation anywhere" -- which a prefix
+    cannot support. Any run that did not complete therefore has its pass
+    downgraded to `not_evaluated`. `build_run_verdict` independently rejects
+    `infrastructure_error` + `pass`, so this invariant is enforced twice: once
+    by construction here, once by assertion there.
+
+    Returns None when the trace cannot be judged at all (empty, or without any
+    observation ids); the caller keeps its own defaults rather than having an
+    aborted run relabelled.
+    """
+    try:
+        coverage = evaluate_coverage(scenario, transitions)
+        oracle = evaluate_oracle(scenario, transitions)
+    except EvaluationContractError:
+        return None
+    verdict = oracle.verdict
+    detail = oracle.detail
+    if execution_status != "completed" and verdict == "pass":
+        verdict = "not_evaluated"
+        detail = (
+            "oracle was not evaluated: the run did not complete, and a partial "
+            "trace cannot establish that no violation occurred"
+        )
+    return ScenarioVerdictAxes(
+        coverage_status=coverage.status,
+        oracle_verdict=verdict,
+        evidence_refs=list(dict.fromkeys(coverage.evidence_refs + oracle.evidence_refs)),
+        detail=detail,
+    )

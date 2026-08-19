@@ -12,7 +12,7 @@ from typing import Any, Sequence
 
 from .adapters import VampireSurvivorsAdapter
 from .charter import DEFAULT_OBJECTIVE, TestCharter
-from .evaluation import evaluate_coverage, evaluate_oracle
+from .evaluation import scenario_verdict_axes
 from .hypotheses import HypothesisTracker
 from .planners import (
     HeuristicPlanner,
@@ -506,16 +506,19 @@ def build_session_verdict(
         execution_status = "infrastructure_error"
 
     scenario = getattr(args, "scenario_definition", None)
-    if execution_status == "completed" and scenario is not None:
-        coverage = evaluate_coverage(scenario, recorder.steps)
-        oracle = evaluate_oracle(scenario, recorder.steps)
-        evidence_refs = coverage.evidence_refs + oracle.evidence_refs
-        coverage_status = coverage.status
-        oracle_verdict = oracle.verdict
-    else:
-        evidence_refs = session_evidence_refs(recorder, last_observation)
-        coverage_status = "not_reached"
-        oracle_verdict = "not_evaluated"
+    evidence_refs = session_evidence_refs(recorder, last_observation)
+    coverage_status = "not_reached"
+    oracle_verdict = "not_evaluated"
+    # An aborted run still carries the observations it did record, and a fault
+    # proven there is proven. scenario_verdict_axes downgrades a partial pass;
+    # it returns None when the trace holds nothing judgeable, in which case the
+    # defaults above stand and execution_status is left alone.
+    if scenario is not None:
+        axes = scenario_verdict_axes(scenario, recorder.steps, execution_status)
+        if axes is not None:
+            coverage_status = axes.coverage_status
+            oracle_verdict = axes.oracle_verdict
+            evidence_refs = axes.evidence_refs
     return build_run_verdict(
         execution_status=execution_status,
         coverage_status=coverage_status,
@@ -523,6 +526,7 @@ def build_session_verdict(
         agent_detection="not_evaluated",
         evidence_refs=evidence_refs,
         anomalies=recorder.anomalies,
+        trace_completeness="complete" if execution_status == "completed" else "partial",
     )
 
 

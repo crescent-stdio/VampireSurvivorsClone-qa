@@ -43,6 +43,7 @@ from .run import (
     normalize_decision,
     terminal_stop_reason,
 )
+from .evaluation import scenario_verdict_axes
 from .scenarios import Scenario, ScenarioContractError, load_scenario, scenario_fingerprint
 from .source_tools import SourceTools
 
@@ -2314,6 +2315,156 @@ APPROVED_SCENARIO_FINGERPRINTS = {
     "control-normal-transitions": "efd037b6eacca55e8affeee6b5ea9fa451e5c6a547bb63b8a98a28aab879523f",
     "control-long-progression": "458d405383e7339d53596562eda9611d0baaa3e566966b88c3dff720f147975f",
 }
+
+
+def health_step(step: int, run_id: str, health: float, ratio: float) -> dict[str, object]:
+    """One recorded transition carrying a player observation."""
+    return {
+        "step": step,
+        "observation": {
+            "observation_id": f"{run_id}-obs-{step:08d}",
+            "phase": "active_gameplay",
+            "player": {
+                "present": True,
+                "alive": True,
+                "health": health,
+                "max_health": 100.0,
+                "health_ratio": ratio,
+            },
+        },
+    }
+
+
+def trace(run_id: str, ratio_is_faulty: bool, count: int = 4) -> list[dict[str, object]]:
+    return [
+        health_step(i, run_id, 98.0, 1.25 if ratio_is_faulty else 0.98)
+        for i in range(count)
+    ]
+
+
+class PartialTraceVerdictTests(unittest.TestCase):
+    """An aborted run must surface faults it proved without claiming cleanliness."""
+
+    def scenario_args(self) -> argparse.Namespace:
+        return argparse.Namespace(scenario_definition=load_scenario("easy-health-ratio"))
+
+    def recorder_with(self, name: str, steps: list[dict[str, object]]) -> RunRecorder:
+        recorder = RunRecorder(TEST_TEMP_ROOT / name, "qa", "hybrid", 9102, model="gpt-4o-mini")
+        recorder.steps = steps
+        return recorder
+
+    def test_aborted_run_reports_an_oracle_failure_from_its_partial_trace(self) -> None:
+        recorder = self.recorder_with("partial-fail", trace("run-fault", ratio_is_faulty=True))
+
+        verdict = run_module.build_session_verdict(
+            self.scenario_args(), recorder, "RuntimeError: LLM API HTTP 429: rate limited", {}
+        )
+
+        self.assertEqual("infrastructure_error", verdict["execution_status"])
+        self.assertEqual("reached", verdict["coverage_status"])
+        self.assertEqual("fail", verdict["oracle_verdict"])
+        self.assertEqual("partial", verdict["trace_completeness"])
+        self.assertEqual("ERROR", verdict["final_verdict"])
+        self.assertTrue(verdict["evidence_refs"])
+
+    def test_aborted_run_cannot_report_an_oracle_pass(self) -> None:
+        """The core trust lock: a prefix cannot establish that nothing went wrong."""
+        recorder = self.recorder_with("partial-pass", trace("run-clean", ratio_is_faulty=False))
+
+        verdict = run_module.build_session_verdict(
+            self.scenario_args(), recorder, "RuntimeError: LLM API HTTP 429: rate limited", {}
+        )
+
+        self.assertEqual("reached", verdict["coverage_status"])
+        self.assertEqual("not_evaluated", verdict["oracle_verdict"])
+        self.assertEqual("partial", verdict["trace_completeness"])
+
+    def test_contract_error_run_also_downgrades_a_partial_pass(self) -> None:
+        recorder = self.recorder_with("contract-pass", trace("run-clean2", ratio_is_faulty=False))
+
+        verdict = run_module.build_session_verdict(
+            self.scenario_args(), recorder, "LLMContractError: invalid reflection", {}
+        )
+
+        self.assertEqual("contract_error", verdict["execution_status"])
+        self.assertEqual("not_evaluated", verdict["oracle_verdict"])
+
+    def test_completed_run_still_reports_a_pass(self) -> None:
+        recorder = self.recorder_with("complete-pass", trace("run-clean3", ratio_is_faulty=False))
+
+        verdict = run_module.build_session_verdict(self.scenario_args(), recorder, None, {})
+
+        self.assertEqual("pass", verdict["oracle_verdict"])
+        self.assertEqual("complete", verdict["trace_completeness"])
+        self.assertEqual("PASS", verdict["final_verdict"])
+
+    def test_empty_trace_falls_back_without_relabeling_execution_status(self) -> None:
+        """A bridge crash must not be laundered into an agent contract error."""
+        recorder = self.recorder_with("empty-trace", [])
+
+        verdict = run_module.build_session_verdict(
+            self.scenario_args(), recorder, "BridgeError: Game process exited with code -6", {}
+        )
+
+        self.assertEqual("infrastructure_error", verdict["execution_status"])
+        self.assertEqual("not_reached", verdict["coverage_status"])
+        self.assertEqual("not_evaluated", verdict["oracle_verdict"])
+
+    def test_ad_hoc_run_without_a_scenario_is_never_evaluated(self) -> None:
+        recorder = self.recorder_with("no-scenario", trace("run-fault2", ratio_is_faulty=True))
+
+        verdict = run_module.build_session_verdict(
+            argparse.Namespace(scenario_definition=None), recorder, None, {}
+        )
+
+        self.assertEqual("not_reached", verdict["coverage_status"])
+        self.assertEqual("not_evaluated", verdict["oracle_verdict"])
+
+    def test_prefixes_of_a_clean_trace_never_produce_a_false_oracle_failure(self) -> None:
+        """Oracles pairing a before/after state must not fire on a truncated prefix."""
+        scenario = load_scenario("easy-health-ratio")
+        full = trace("run-prefix", ratio_is_faulty=False, count=8)
+        for length in range(len(full) + 1):
+            with self.subTest(prefix_length=length):
+                axes = scenario_verdict_axes(scenario, full[:length], "completed")
+                if axes is not None:
+                    self.assertNotEqual("fail", axes.oracle_verdict)
+
+    def test_deterministic_gate_still_rejects_a_non_completed_artifact(self) -> None:
+        """Partial-trace verdicts must not open a loophole in the benchmark gate."""
+        with self.assertRaisesRegex(ValueError, "infrastructure_error"):
+            build_run_verdict(
+                execution_status="infrastructure_error",
+                coverage_status="reached",
+                oracle_verdict="pass",
+                agent_detection="not_evaluated",
+                evidence_refs=["obs-1"],
+                trace_completeness="partial",
+            )
+
+    def test_verdict_keeps_the_v2_schema(self) -> None:
+        verdict = build_run_verdict(
+            execution_status="infrastructure_error",
+            coverage_status="reached",
+            oracle_verdict="fail",
+            agent_detection="not_evaluated",
+            evidence_refs=["obs-1"],
+            trace_completeness="partial",
+        )
+
+        self.assertEqual("qa-run-verdict/v2", verdict["schema_version"])
+        self.assertEqual("ERROR", verdict["final_verdict"])
+
+    def test_unsupported_trace_completeness_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "trace_completeness"):
+            build_run_verdict(
+                execution_status="completed",
+                coverage_status="reached",
+                oracle_verdict="pass",
+                agent_detection="not_evaluated",
+                evidence_refs=["obs-1"],
+                trace_completeness="mostly",
+            )
 
 
 class BridgeAssistGuardTests(unittest.TestCase):

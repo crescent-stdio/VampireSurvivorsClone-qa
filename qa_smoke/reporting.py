@@ -18,6 +18,8 @@ EXECUTION_STATUSES = {"completed", "infrastructure_error", "contract_error"}
 COVERAGE_STATUSES = {"reached", "not_reached"}
 ORACLE_VERDICTS = {"pass", "fail", "not_evaluated"}
 AGENT_DETECTIONS = {"match", "miss", "false_positive", "not_evaluated"}
+# "partial" marks a verdict judged from the prefix of an aborted run.
+TRACE_COMPLETENESS = {"complete", "partial"}
 ALWAYS_ON_FAILURE_KINDS = {
     "crash",
     "timeout",
@@ -59,6 +61,7 @@ def build_run_verdict(
     agent_detection: str,
     evidence_refs: list[str],
     anomalies: list[dict[str, Any]] | None = None,
+    trace_completeness: str = "complete",
 ) -> dict[str, Any]:
     if execution_status not in EXECUTION_STATUSES:
         raise ValueError(f"unsupported execution_status: {execution_status}")
@@ -74,6 +77,8 @@ def build_run_verdict(
         raise ValueError("not_reached coverage requires oracle_verdict not_evaluated")
     if execution_status == "completed" and not evidence_refs:
         raise ValueError("completed verdict requires evidence_refs")
+    if trace_completeness not in TRACE_COMPLETENESS:
+        raise ValueError(f"unsupported trace_completeness: {trace_completeness}")
     return {
         "schema_version": "qa-run-verdict/v2",
         "execution_status": execution_status,
@@ -81,6 +86,7 @@ def build_run_verdict(
         "oracle_verdict": oracle_verdict,
         "agent_detection": agent_detection,
         "evidence_refs": list(dict.fromkeys(evidence_refs)),
+        "trace_completeness": trace_completeness,
         "final_verdict": final_verdict(
             execution_status,
             coverage_status,
@@ -819,6 +825,24 @@ class RunRecorder:
         status = "not_observed" if optional and not passed else "pass" if passed else "fail"
         return {"name": name, "status": status, "evidence": evidence}
 
+    def _verdict_line(self, verdict: dict[str, Any]) -> str:
+        """Render the verdict axes, flagging a judgement made from a prefix.
+
+        An aborted run can legitimately report an oracle failure, so the reader
+        must be able to tell that verdict apart from one earned by a full run.
+        """
+        if not verdict:
+            return "- Verdict: `not recorded`"
+        line = (
+            f"- Verdict: **{verdict.get('final_verdict', 'ERROR')}** "
+            f"(execution `{verdict.get('execution_status')}`, "
+            f"coverage `{verdict.get('coverage_status')}`, "
+            f"oracle `{verdict.get('oracle_verdict')}`)"
+        )
+        if verdict.get("trace_completeness") == "partial":
+            line += f" — judged from a partial trace of {len(self.steps)} steps"
+        return line
+
     def write_report(self, report: dict[str, Any]) -> None:
         (self.output_dir / "report.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -827,6 +851,7 @@ class RunRecorder:
             "# Gameplay QA Smoke Report",
             "",
             f"- Result: **{report['result'].upper()}**",
+            self._verdict_line(report.get("verdict_axes") or {}),
             f"- Mode / policy: `{report['mode']}` / `{report['policy']}`",
             f"- Model: `{report.get('model') or 'not applicable'}`",
             f"- Game window visible: `{report.get('game_window_visible', True)}`",
