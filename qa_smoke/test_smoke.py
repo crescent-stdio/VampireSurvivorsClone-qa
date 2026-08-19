@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import subprocess
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
@@ -2318,6 +2321,25 @@ APPROVED_SCENARIO_FINGERPRINTS = {
 }
 
 
+def fake_opener(payload: str):
+    """Stand in for urllib.request.urlopen, returning a fixed body."""
+
+    class _Response:
+        def read(self) -> bytes:
+            return payload.encode("utf-8")
+
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    def opener(*_args, **_kwargs) -> "_Response":
+        return _Response()
+
+    return opener
+
+
 def health_step(step: int, run_id: str, health: float, ratio: float) -> dict[str, object]:
     """One recorded transition carrying a player observation."""
     return {
@@ -2466,6 +2488,65 @@ class PartialTraceVerdictTests(unittest.TestCase):
                 evidence_refs=["obs-1"],
                 trace_completeness="mostly",
             )
+
+
+class LLMTransportLabelTests(unittest.TestCase):
+    """Every way a request can fail must be labelled and stay infrastructure."""
+
+    def planner(self) -> LLMPlanner:
+        return LLMPlanner("qa", "test-model", TestCharter(), 5.0, api_key="test-key")
+
+    def send(self, planner: LLMPlanner, opener) -> None:
+        with patch("urllib.request.urlopen", opener):
+            planner._send_once(urllib.request.Request("https://example.invalid"))
+
+    def test_http_error_is_labelled_a_transport_error(self) -> None:
+        def opener(*_args, **_kwargs):
+            raise urllib.error.HTTPError(
+                "https://example.invalid", 429, "Too Many Requests", {},
+                io.BytesIO(b'{"error": {"message": "rate limited"}}'),
+            )
+
+        with self.assertRaisesRegex(planners_module.LLMTransportError, "HTTP 429"):
+            self.send(self.planner(), opener)
+
+    def test_connection_error_is_labelled_a_transport_error(self) -> None:
+        def opener(*_args, **_kwargs):
+            raise urllib.error.URLError("connection reset")
+
+        with self.assertRaises(planners_module.LLMTransportError):
+            self.send(self.planner(), opener)
+
+    def test_timeout_is_labelled_a_transport_error(self) -> None:
+        def opener(*_args, **_kwargs):
+            raise TimeoutError()
+
+        with self.assertRaisesRegex(planners_module.LLMTransportError, "timed out"):
+            self.send(self.planner(), opener)
+
+    def test_non_json_body_is_labelled_a_response_error(self) -> None:
+        with self.assertRaisesRegex(planners_module.LLMResponseError, "non-JSON"):
+            self.send(self.planner(), fake_opener("<html>gateway</html>"))
+
+    def test_envelope_without_choices_is_labelled_a_response_error(self) -> None:
+        with self.assertRaisesRegex(planners_module.LLMResponseError, "no choices"):
+            self.send(self.planner(), fake_opener(json.dumps({"usage": {}})))
+
+    def test_transport_failures_are_classified_as_infrastructure_errors(self) -> None:
+        """Guards the name-prefix coupling in build_session_verdict.
+
+        A provider outage must never be recorded as an agent contract violation.
+        """
+        recorder = RunRecorder(TEST_TEMP_ROOT / "transport-verdict", "qa", "llm", 9101)
+        for name in ("LLMTransportError", "LLMResponseError"):
+            with self.subTest(error=name):
+                verdict = run_module.build_session_verdict(
+                    argparse.Namespace(scenario_definition=None),
+                    recorder,
+                    f"{name}: provider is unavailable",
+                    {},
+                )
+                self.assertEqual("infrastructure_error", verdict["execution_status"])
 
 
 class ReevaluateTests(unittest.TestCase):

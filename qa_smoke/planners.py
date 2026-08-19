@@ -670,6 +670,21 @@ def compact_observation(observation: dict[str, Any], max_threats: int = 8, max_c
     }
 
 
+class LLMTransportError(RuntimeError):
+    """The request never produced a usable HTTP response.
+
+    Note the name: run.build_session_verdict classifies a fatal error by the
+    prefix of its class name, and only BridgeContractError/ScenarioContractError/
+    LLMContractError map to contract_error. Transport failures are the provider's
+    or the network's, never the agent's, so they must keep landing in
+    infrastructure_error.
+    """
+
+
+class LLMResponseError(RuntimeError):
+    """The HTTP response arrived but was not a usable completion envelope."""
+
+
 class Planner(Protocol):
     def plan(
         self,
@@ -1024,12 +1039,7 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
             method="POST",
         )
         request_started = time.monotonic()
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                response_body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"LLM API HTTP {error.code}: {detail[:1000]}") from error
+        response_body = self._send_once(request)
         self.last_usage = self._normalize_usage(response_body.get("usage") or {})
         self.last_usage["latency_ms"] = max(0, round((time.monotonic() - request_started) * 1000))
         self.last_usage["request_count"] = 1
@@ -1041,6 +1051,35 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
         if isinstance(content, list):
             content = "".join(item.get("text", "") for item in content if isinstance(item, dict))
         return self._parse_json(str(content))
+
+    def _send_once(self, request: urllib.request.Request) -> dict[str, Any]:
+        """Perform one round trip, labelling every way it can fail.
+
+        Previously only HTTPError was caught, so a connection reset, the 120s
+        read timeout, or a truncated body surfaced as a bare unlabelled error.
+        """
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                payload = response.read().decode("utf-8")
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise LLMTransportError(f"LLM API HTTP {error.code}: {detail[:1000]}") from error
+        except urllib.error.URLError as error:
+            # URLError is HTTPError's base class, so this must stay second.
+            raise LLMTransportError(f"LLM API request failed: {error.reason}") from error
+        except TimeoutError as error:
+            raise LLMTransportError("LLM API request timed out after 120s") from error
+        try:
+            response_body = json.loads(payload)
+        except json.JSONDecodeError as error:
+            raise LLMResponseError(
+                f"LLM API returned a non-JSON body ({len(payload)} bytes): {payload[:200]}"
+            ) from error
+        if not isinstance(response_body, dict) or not response_body.get("choices"):
+            raise LLMResponseError(
+                f"LLM API response carried no choices: {payload[:200]}"
+            )
+        return response_body
 
     def _response_format(self, response_schema: dict[str, Any] | None) -> dict[str, Any]:
         if (
