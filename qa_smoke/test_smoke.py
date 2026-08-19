@@ -2654,6 +2654,80 @@ class LLMRetryTests(unittest.TestCase):
                     LLMPlanner("qa", "m", TestCharter(), 5.0, api_key="k", **kwargs)
 
 
+def completion(content: str = "{}", finish_reason: str = "stop", tokens: int = 10) -> str:
+    return json.dumps(
+        {
+            "choices": [{"message": {"content": content}, "finish_reason": finish_reason}],
+            "usage": {"total_tokens": tokens, "completion_tokens": tokens},
+        }
+    )
+
+
+class TruncationTests(unittest.TestCase):
+    """Running out of output room must cost a retry, not the episode."""
+
+    def planner_capturing(self, bodies: list[dict[str, object]], responses: list[str]):
+        def opener(request, *_args, **_kwargs):
+            bodies.append(json.loads(request.data.decode("utf-8")))
+            return fake_opener(responses[min(len(bodies) - 1, len(responses) - 1)])()
+
+        return LLMPlanner(
+            "qa", "test-model", TestCharter(), 5.0, api_key="test-key", urlopen=opener
+        )
+
+    def test_planning_requests_use_the_raised_output_cap(self) -> None:
+        bodies: list[dict[str, object]] = []
+        planner = self.planner_capturing(bodies, [completion('{"a": 1}')])
+
+        planner._request("sys", "user")
+
+        self.assertEqual(planners_module.PLANNING_MAX_TOKENS, bodies[0]["max_tokens"])
+        self.assertEqual(700, planners_module.PLANNING_MAX_TOKENS)
+
+    def test_a_truncated_response_is_retried_once_at_a_higher_cap(self) -> None:
+        bodies: list[dict[str, object]] = []
+        planner = self.planner_capturing(
+            bodies,
+            [completion(finish_reason="length", tokens=700), completion('{"a": 1}')],
+        )
+
+        result = planner._request("sys", "user")
+
+        self.assertEqual({"a": 1}, result)
+        self.assertEqual([700, 1400], [body["max_tokens"] for body in bodies])
+
+    def test_repeated_truncation_raises_naming_both_caps(self) -> None:
+        bodies: list[dict[str, object]] = []
+        planner = self.planner_capturing(
+            bodies, [completion(finish_reason="length", tokens=700)]
+        )
+
+        with self.assertRaisesRegex(planners_module.LLMTruncationError, r"\[700, 1400\]"):
+            planner._request("sys", "user")
+
+    def test_tokens_from_truncated_attempts_are_still_reported(self) -> None:
+        bodies: list[dict[str, object]] = []
+        planner = self.planner_capturing(
+            bodies, [completion(finish_reason="length", tokens=700)]
+        )
+
+        with self.assertRaises(planners_module.LLMTruncationError):
+            planner._request("sys", "user")
+
+        usage = planner.take_last_usage()
+        self.assertEqual(1400, usage["total_tokens"])
+        self.assertEqual(1, usage["request_count"])
+
+    def test_the_repair_path_uses_the_same_cap(self) -> None:
+        bodies: list[dict[str, object]] = []
+        planner = self.planner_capturing(bodies, [completion('{"a": 1}')])
+        planner._pending_user_content = "prior"
+
+        planner._request("sys", "user", max_tokens=planners_module.PLANNING_MAX_TOKENS)
+
+        self.assertEqual(700, bodies[0]["max_tokens"])
+
+
 class PlannerUsageAccountingTests(unittest.TestCase):
     """Tokens the provider billed must be recorded even when the call fails."""
 
@@ -2708,17 +2782,19 @@ class PlannerUsageAccountingTests(unittest.TestCase):
 
         def opener(*_args, **_kwargs):
             state["calls"] += 1
-            first = state["calls"] == 1
+            # The first request truncates on both attempts and dies; the next
+            # one succeeds. Its usage must not carry the dead request's tokens.
+            failing = state["calls"] <= 2
             return fake_opener(
                 json.dumps(
                     {
                         "choices": [
                             {
                                 "message": {"content": "{}"},
-                                "finish_reason": "length" if first else "stop",
+                                "finish_reason": "length" if failing else "stop",
                             }
                         ],
-                        "usage": {"total_tokens": 999 if first else 10},
+                        "usage": {"total_tokens": 999 if failing else 10},
                     }
                 )
             )()
@@ -2726,9 +2802,9 @@ class PlannerUsageAccountingTests(unittest.TestCase):
         planner = LLMPlanner(
             "qa", "test-model", TestCharter(), 5.0, api_key="test-key", urlopen=opener
         )
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(planners_module.LLMTruncationError):
             planner._request("sys", "user")
-        planner.take_last_usage()
+        self.assertEqual(1998, planner.take_last_usage()["total_tokens"])
 
         planner._request("sys", "user")
 

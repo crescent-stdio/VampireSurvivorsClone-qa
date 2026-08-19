@@ -676,6 +676,13 @@ def compact_observation(observation: dict[str, Any], max_threats: int = 8, max_c
 # a fast failure into a slow one while burning quota.
 RETRYABLE_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 MAX_RETRY_WAIT_SECONDS = 20.0
+# Measured completion tokens per planning call across the recorded runs sit at
+# 177-269, i.e. the mean already reaches 59-90% of the old 300 cap, so the upper
+# tail crossed it several times per run. max_tokens is a ceiling rather than a
+# reservation, so responses that already fit cost exactly what they did before.
+PLANNING_MAX_TOKENS = 700
+# Matches the final-assessment budget, so no new magic number enters the file.
+TRUNCATION_RETRY_MAX_TOKENS = 1400
 _DURATION_PATTERN = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)")
 _BODY_RETRY_PATTERN = re.compile(
     r"try again in\s+([0-9]+(?:\.[0-9]+)?)\s*(ms|s)", re.IGNORECASE
@@ -757,6 +764,10 @@ class LLMTransportError(RuntimeError):
 
 class LLMResponseError(RuntimeError):
     """The HTTP response arrived but was not a usable completion envelope."""
+
+
+class LLMTruncationError(RuntimeError):
+    """The model hit the output ceiling twice and never finished its JSON."""
 
 
 class Planner(Protocol):
@@ -909,7 +920,7 @@ class LLMPlanner:
         return self._request(
             system,
             user_content,
-            max_tokens=300,
+            max_tokens=PLANNING_MAX_TOKENS,
             response_schema=schema,
             messages=self._planning_request_messages(user_content),
             cache_boundary=cache_boundary,
@@ -957,7 +968,7 @@ class LLMPlanner:
         return self._request(
             system,
             correction_content,
-            max_tokens=300,
+            max_tokens=PLANNING_MAX_TOKENS,
             response_schema=schema,
             messages=repair_messages,
             cache_boundary=self._pending_cache_boundary,
@@ -1102,7 +1113,7 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
         self,
         system: str,
         user: str,
-        max_tokens: int = 300,
+        max_tokens: int = PLANNING_MAX_TOKENS,
         response_schema: dict[str, Any] | None = None,
         messages: list[dict[str, str]] | None = None,
         include_planning_history: bool = True,
@@ -1131,23 +1142,75 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
             method="POST",
         )
         request_started = self.monotonic()
-        response_body = self._send_with_retries(request)
-        self.last_usage = self._normalize_usage(response_body.get("usage") or {})
-        self.last_usage["latency_ms"] = max(0, round((time.monotonic() - request_started) * 1000))
-        # request_count stays 1: one logical planning call, however many HTTP
-        # round trips it took, so calls/mean_latency stay comparable across runs.
-        self.last_usage["request_count"] = 1
-        self.last_usage["cache_boundary"] = int(bool(cache_boundary))
-        self.last_usage["llm_retries"] = self._retry_count
-        self.last_usage["llm_retry_wait_ms"] = round(self._retry_wait_seconds * 1000)
-        self.last_usage["llm_http_attempts"] = self._http_attempts
-        choice = response_body["choices"][0]
-        if choice.get("finish_reason") == "length":
-            raise RuntimeError("LLM response was truncated at the output token limit")
+        billed: dict[str, int] = {}
+        try:
+            response_body, choice = self._complete(request, body, max_tokens, billed)
+        finally:
+            # Publish usage even when the call raises. A truncated attempt was
+            # billed, and the caller drains this from its own finally.
+            self.last_usage = self._session_usage(billed, request_started, cache_boundary)
         content = choice["message"]["content"]
         if isinstance(content, list):
             content = "".join(item.get("text", "") for item in content if isinstance(item, dict))
         return self._parse_json(str(content))
+
+    def _session_usage(
+        self,
+        billed: dict[str, int],
+        request_started: float,
+        cache_boundary: bool,
+    ) -> dict[str, int]:
+        usage = dict(billed)
+        if not usage:
+            # Nothing was billed (e.g. the request never reached the provider);
+            # an empty dict keeps this out of the report entirely.
+            return usage
+        usage["latency_ms"] = max(0, round((self.monotonic() - request_started) * 1000))
+        # request_count stays 1: one logical planning call, however many HTTP
+        # round trips it took, so calls/mean_latency stay comparable across runs.
+        usage["request_count"] = 1
+        usage["cache_boundary"] = int(bool(cache_boundary))
+        usage["llm_retries"] = self._retry_count
+        usage["llm_retry_wait_ms"] = round(self._retry_wait_seconds * 1000)
+        usage["llm_http_attempts"] = self._http_attempts
+        return usage
+
+    def _complete(
+        self,
+        request: urllib.request.Request,
+        body: dict[str, Any],
+        max_tokens: int,
+        billed: dict[str, int],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Get one finished completion, retrying once if the model ran out of room.
+
+        The truncation retry has its own budget, separate from the transport
+        attempt cap, so a rate limit early in the step cannot silently consume
+        the one chance to recover from a truncated answer.
+
+        `billed` accumulates across attempts: a truncated response is real spend
+        and has to reach the report even though it was unusable.
+        """
+        caps = [max_tokens]
+        retry_cap = min(max_tokens * 2, TRUNCATION_RETRY_MAX_TOKENS)
+        if retry_cap > max_tokens:
+            caps.append(retry_cap)
+        completions: list[int] = []
+        for cap in caps:
+            body["max_tokens"] = cap
+            request.data = json.dumps(body).encode("utf-8")
+            response_body = self._send_with_retries(request)
+            usage = self._normalize_usage(response_body.get("usage") or {})
+            for key, value in usage.items():
+                billed[key] = billed.get(key, 0) + value
+            choice = response_body["choices"][0]
+            if choice.get("finish_reason") != "length":
+                return response_body, choice
+            completions.append(int(usage.get("completion_tokens", 0) or 0))
+        raise LLMTruncationError(
+            "LLM response was truncated at the output token limit "
+            f"(attempted max_tokens {caps}; completion_tokens {completions})"
+        )
 
     def _send_with_retries(self, request: urllib.request.Request) -> dict[str, Any]:
         """Retry a transient failure, honoring the provider's own delay hint.
