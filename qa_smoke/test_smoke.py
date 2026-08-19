@@ -44,6 +44,7 @@ from .run import (
     terminal_stop_reason,
 )
 from .evaluation import scenario_verdict_axes
+from . import reevaluate as reevaluate_module
 from .scenarios import Scenario, ScenarioContractError, load_scenario, scenario_fingerprint
 from .source_tools import SourceTools
 
@@ -2465,6 +2466,117 @@ class PartialTraceVerdictTests(unittest.TestCase):
                 evidence_refs=["obs-1"],
                 trace_completeness="mostly",
             )
+
+
+class ReevaluateTests(unittest.TestCase):
+    """Recovering verdicts from stored artifacts must not invent findings."""
+
+    def write_run(
+        self,
+        name: str,
+        *,
+        run_id: str = "run-a",
+        execution_status: str = "infrastructure_error",
+        rows: list[dict[str, object]] | None = None,
+        scenario_id: str = "easy-health-ratio",
+    ) -> Path:
+        run_dir = TEST_TEMP_ROOT / name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "manifest.json").write_text(
+            json.dumps({"run_id": run_id, "scenario_id": scenario_id}), encoding="utf-8"
+        )
+        (run_dir / "verdict.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "qa-run-verdict/v2",
+                    "execution_status": execution_status,
+                    "coverage_status": "not_reached",
+                    "oracle_verdict": "not_evaluated",
+                    "agent_detection": "not_evaluated",
+                    "evidence_refs": [],
+                    "final_verdict": "ERROR",
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = rows if rows is not None else trace(run_id, ratio_is_faulty=True)
+        (run_dir / "steps.jsonl").write_text(
+            "".join(json.dumps({**row, "run_id": run_id}) + "\n" for row in payload),
+            encoding="utf-8",
+        )
+        return run_dir
+
+    def test_aborted_fault_run_recovers_its_failure(self) -> None:
+        run_dir = self.write_run("reeval-fault")
+
+        updated = reevaluate_module.reevaluate_run(run_dir)
+
+        self.assertEqual("fail", updated["oracle_verdict"])
+        self.assertEqual("reached", updated["coverage_status"])
+        self.assertEqual("partial", updated["trace_completeness"])
+        self.assertEqual("ERROR", updated["final_verdict"])
+
+    def test_execution_status_is_never_revised(self) -> None:
+        run_dir = self.write_run("reeval-status", execution_status="contract_error")
+
+        updated = reevaluate_module.reevaluate_run(run_dir)
+
+        self.assertEqual("contract_error", updated["execution_status"])
+
+    def test_aborted_clean_run_is_not_promoted_to_pass(self) -> None:
+        run_dir = self.write_run(
+            "reeval-clean", rows=trace("run-a", ratio_is_faulty=False)
+        )
+
+        updated = reevaluate_module.reevaluate_run(run_dir)
+
+        self.assertEqual("not_evaluated", updated["oracle_verdict"])
+
+    def test_rows_from_another_session_are_ignored(self) -> None:
+        """steps.jsonl is append-mode, so a reused directory holds several runs.
+
+        Judging the union let a fault-injected session bleed into a fault-free
+        one and produced a control false positive.
+        """
+        run_dir = self.write_run(
+            "reeval-mixed", run_id="run-clean", rows=trace("run-clean", ratio_is_faulty=False)
+        )
+        with (run_dir / "steps.jsonl").open("a", encoding="utf-8") as handle:
+            for row in trace("run-faulty", ratio_is_faulty=True):
+                handle.write(json.dumps({**row, "run_id": "run-faulty"}) + "\n")
+
+        updated = reevaluate_module.reevaluate_run(run_dir)
+
+        self.assertNotEqual("fail", updated["oracle_verdict"])
+
+    def test_empty_trace_is_skipped(self) -> None:
+        run_dir = self.write_run("reeval-empty", rows=[])
+
+        with self.assertRaises(reevaluate_module.ReevaluationSkipped):
+            reevaluate_module.reevaluate_run(run_dir)
+
+    def test_unknown_scenario_is_skipped(self) -> None:
+        run_dir = self.write_run("reeval-unknown", scenario_id="no-such-scenario")
+
+        with self.assertRaises(reevaluate_module.ReevaluationSkipped):
+            reevaluate_module.reevaluate_run(run_dir)
+
+    def test_rewrite_is_idempotent(self) -> None:
+        run_dir = self.write_run("reeval-idempotent")
+
+        reevaluate_module.main([str(run_dir)])
+        first = (run_dir / "verdict.json").read_text(encoding="utf-8")
+        reevaluate_module.main([str(run_dir)])
+
+        self.assertEqual(first, (run_dir / "verdict.json").read_text(encoding="utf-8"))
+
+    def test_dry_run_writes_nothing(self) -> None:
+        run_dir = self.write_run("reeval-dry")
+        before = (run_dir / "verdict.json").read_text(encoding="utf-8")
+
+        reevaluate_module.main(["--dry-run", str(run_dir)])
+
+        self.assertEqual(before, (run_dir / "verdict.json").read_text(encoding="utf-8"))
 
 
 class BridgeAssistGuardTests(unittest.TestCase):
