@@ -2620,6 +2620,33 @@ class LLMRetryTests(unittest.TestCase):
         self.assertEqual(6000, totals["llm_retry_wait_ms"])
         self.assertEqual(2, totals["calls"])
 
+    def test_retry_limits_are_exposed_on_the_cli(self) -> None:
+        args = run_module.parse_args(
+            [
+                "--game-exe", "player.app",
+                "--output", "artifacts",
+                "--llm-max-attempts", "5",
+                "--llm-retry-budget-seconds", "10.5",
+            ]
+        )
+
+        self.assertEqual(5, args.llm_max_attempts)
+        self.assertEqual(10.5, args.llm_retry_budget_seconds)
+
+    def test_retry_limits_do_not_conflict_with_a_scenario_charter(self) -> None:
+        """They are infrastructure knobs, so a scenario run may still set them."""
+        args = run_module.parse_args(
+            [
+                "--game-exe", "player.app",
+                "--output", "artifacts",
+                "--scenario", "easy-health-ratio",
+                "--seed", "9102",
+                "--llm-max-attempts", "1",
+            ]
+        )
+
+        self.assertEqual(1, args.llm_max_attempts)
+
     def test_invalid_retry_configuration_is_rejected(self) -> None:
         for kwargs in ({"max_attempts": 0}, {"retry_budget_seconds": -1.0}):
             with self.subTest(**kwargs):

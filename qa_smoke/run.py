@@ -123,6 +123,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "passing it with any other policy is an error rather than a silent no-op."
         ),
     )
+    parser.add_argument(
+        "--llm-max-attempts",
+        type=int,
+        default=3,
+        help="HTTP attempts per LLM request. 1 disables retries entirely.",
+    )
+    parser.add_argument(
+        "--llm-retry-budget-seconds",
+        type=float,
+        default=45.0,
+        help="Cumulative seconds a single LLM request may spend sleeping between retries.",
+    )
     parser.add_argument("--min-forward-component", type=float, default=None)
     chest_group = parser.add_mutually_exclusive_group()
     chest_group.add_argument("--collect-chests", dest="collect_chests", action="store_true")
@@ -572,7 +584,15 @@ def run_session(args: argparse.Namespace) -> int:
     planner: Planner
     try:
         if args.uses_llm_planner:
-            planner = LLMPlanner(args.mode, args.model, charter, args.plan_horizon_seconds, args.api_url)
+            planner = LLMPlanner(
+            args.mode,
+            args.model,
+            charter,
+            args.plan_horizon_seconds,
+            args.api_url,
+            max_attempts=args.llm_max_attempts,
+            retry_budget_seconds=args.llm_retry_budget_seconds,
+        )
         else:
             planner = HeuristicPlanner(args.plan_horizon_seconds, charter)
     except Exception as error:
