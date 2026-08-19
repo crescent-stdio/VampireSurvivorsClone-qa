@@ -862,6 +862,24 @@ class LLMPlanner:
             if self.mode == "qa"
             else "You are in Player Exploring mode. Use only player-perceptible state and game actions."
         )
+        # Keep the no-assist wording byte-identical: it is the cached prompt prefix, and
+        # drift both costs cache hits and makes token metrics incomparable across runs.
+        if self.charter.bridge_assist:
+            executor_note = "The executor blends a bounded survival term into your vector every frame."
+            control_note = (
+                "Unity does NOT choose a chest, attract toward a chest, or enforce the requested heading. "
+                "It DOES add rule-based avoidance to your vector every frame: "
+                f"executed = normalize(your_vector + escape_vector * {self.charter.assist_survival_weight} * clamp01(0.35 + danger)). "
+                "controller.commanded is what you asked for and controller.steering is what executed; a difference "
+                "between them is the assist, not a game defect. The assist is bounded and does not path-plan, so you "
+                "must still steer away from danger yourself."
+            )
+        else:
+            executor_note = "The executor never silently corrects your vector."
+            control_note = (
+                "Unity does NOT automatically avoid enemies, choose a chest, attract toward a chest, enforce the "
+                "requested heading, or alter your direction. It only holds your chosen vector every frame and detects events."
+            )
         return f"""You are an autonomous gameplay QA agent for a Vampire Survivors-style Unity game.
 {mode_note}
 The bridge_clock is a synchronization state, not a menu command. paused_at_observation=true with pause_reason=agent_decision_boundary means the game is already started and waiting for your next action. Never use start_game or wait to "unpause" it. Use observation.phase and action_contract as authoritative.
@@ -869,9 +887,9 @@ During normal direct control, Unity may keep holding your previous vector while 
 Game actions: observe, start_game(index), direct_steer(x,y,duration,intent,target_id), wait(duration), select_upgrade(index), use_item(index), restart, return_to_menu.
 QA-only tools: source_search(query), source_read(path,line_start,line_count).
 The response MUST use one of action_contract.allowed_calls and arguments MUST always be a JSON object matching action_contract.required_arguments. For actions without arguments, return an empty object {{}}. Prefer progress and coverage, react immediately to upgrade dialogs, and never invent an unavailable game action.
-Follow the supplied test charter. A named heading is a long-term NET-PROGRESS goal, not a per-action axis lock. Lateral detours and temporary backtracking are allowed for survival and chest collection. The executor never silently corrects your vector.
+Follow the supplied test charter. A named heading is a long-term NET-PROGRESS goal, not a per-action axis lock. Lateral detours and temporary backtracking are allowed for survival and chest collection. {executor_note}
 During active gameplay use direct_steer. You alone must decide whether to continue the requested heading, evade enemies, or approach a specific chest from world.visible_chests. Set target_id to that chest ID when collecting; otherwise use 0. Set intent to a short value such as explore, evade, collect_chest, reposition, or hold.
-Unity does NOT automatically avoid enemies, choose a chest, attract toward a chest, enforce the requested heading, or alter your direction. It only holds your chosen vector every frame and detects events. Use world.threat_entities, danger_score, escape_vector, and chest relative vectors to choose x/y yourself.
+{control_note} Use world.threat_entities, danger_score, escape_vector, and chest relative vectors to choose x/y yourself.
 When intent=collect_chest, aim x/y toward that target's relative_x/relative_y (normally the normalized target vector); do not claim collection while moving away from it. When danger is high, an evade vector should materially align with escape_vector. Choose full 2D movement, not only a cardinal axis.
 The horizon can end early on a chest entering close-control range, chest collection, low health, danger spikes, stuck detection, level-up, death, or another event. Re-plan from event_state and controller state.
 Act as a QA engineer while you play. Before every state-changing game action, state a concrete expected_effect. On the next planning step, compare the compact prior outcome with that expectation in reflection. Use action_contract.has_previous_transition, not the numeric step, to decide reflection.status. When it is false, use not_applicable with empty evidence_refs and candidate_id. When it is true, never use not_applicable. Return evidence_refs as an empty array; the runner deterministically inserts the latest allowed transition IDs before validation. uncertain may describe an unresolved risk and may leave candidate_id empty. unexpected always requires a stable non-empty candidate_id.

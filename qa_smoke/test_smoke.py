@@ -2347,6 +2347,39 @@ class BridgeAssistGuardTests(unittest.TestCase):
                     expected, scenario_fingerprint(load_scenario(scenario_id))
                 )
 
+    def test_hybrid_charter_declares_the_automatic_avoidance(self) -> None:
+        control = TestCharter(bridge_assist=True).as_dict()["control_policy"]
+
+        self.assertTrue(control["automatic_enemy_avoidance"])
+        self.assertIn("0.6", control["automatic_enemy_avoidance_detail"])
+        self.assertNotIn("only", control["bridge_role"])
+        # The assist blends; it never re-aims or targets, so these stay true.
+        self.assertFalse(control["automatic_chest_targeting"])
+        self.assertFalse(control["automatic_direction_correction"])
+
+    def test_hybrid_charter_publishes_the_assist_weight(self) -> None:
+        navigation = TestCharter(bridge_assist=True, assist_survival_weight=0.9).as_dict()[
+            "navigation_policy"
+        ]
+
+        self.assertEqual(0.9, navigation["assist_survival_weight"])
+        self.assertNotIn("assist_survival_weight", TestCharter().as_dict()["navigation_policy"])
+
+    def test_charter_rejects_an_out_of_range_assist_weight(self) -> None:
+        with self.assertRaises(ValueError):
+            TestCharter(assist_survival_weight=5.5)
+
+    def test_hybrid_prompt_declares_the_assist(self) -> None:
+        planner = LLMPlanner(
+            "qa", "test-model", TestCharter(bridge_assist=True), 5.0, api_key="test-key"
+        )
+        prompt = planner._planning_system_prompt()
+
+        for claim in NO_ASSIST_PROMPT_CLAIMS:
+            self.assertNotIn(claim, prompt)
+        self.assertIn("escape_vector * 0.6 * clamp01(0.35 + danger)", prompt)
+        self.assertIn("controller.commanded", prompt)
+
     def test_deterministic_gate_cli_rejects_a_hybrid_request(self) -> None:
         scenarios = [
             load_scenario(scenario_id)
