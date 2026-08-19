@@ -548,3 +548,44 @@ def scenario_verdict_axes(
         evidence_refs=list(dict.fromkeys(coverage.evidence_refs + oracle.evidence_refs)),
         detail=detail,
     )
+
+
+def fault_evidence_refs(scenario: Scenario, transitions: list[Transition]) -> list[str]:
+    """Collect evidence refs for every transition the oracle objects to.
+
+    The oracle predicates return on their first violation, so `evaluate_oracle` names a
+    single observation. When a fault is present in every observation -- as an injected
+    invariant break is -- an agent that notices it three steps later cites a different
+    id and would be scored a miss against that one ref.
+
+    Rather than reimplementing each oracle's notion of a violation, this peels: find the
+    shortest failing prefix, keep the refs the oracle itself returned, drop the
+    transition it stopped on, and repeat until the remainder passes. Prefixes are always
+    slices of the real trace, so oracles that compare a transition with its predecessor
+    keep their context -- feeding them isolated transitions would fabricate violations.
+    Traces are a few dozen steps, so the repeated replay costs nothing.
+    """
+    evaluator = ORACLE_REGISTRY.get(scenario.oracle)
+    if evaluator is None:
+        return []
+
+    def verdict(rows: list[Transition]) -> tuple[bool, list[str]]:
+        try:
+            passed, refs, _ = evaluator(rows)
+        except (EvaluationContractError, ValueError, TypeError, KeyError, IndexError):
+            return True, []
+        return passed, list(refs)
+
+    remaining = list(transitions)
+    collected: list[str] = []
+    # Only a trace the oracle actually rejects has anything to report.
+    while remaining and not verdict(remaining)[0]:
+        for index in range(1, len(remaining) + 1):
+            passed, refs = verdict(remaining[:index])
+            if not passed:
+                collected.extend(refs)
+                del remaining[index - 1]
+                break
+        else:  # pragma: no cover - the loop above always finds the failing prefix
+            break
+    return list(dict.fromkeys(collected))

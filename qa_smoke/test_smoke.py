@@ -46,7 +46,7 @@ from .run import (
     normalize_decision,
     terminal_stop_reason,
 )
-from .evaluation import scenario_verdict_axes
+from .evaluation import evaluate_oracle, fault_evidence_refs, scenario_verdict_axes
 from . import reevaluate as reevaluate_module
 from .scenarios import Scenario, ScenarioContractError, load_scenario, scenario_fingerprint
 from .source_tools import SourceTools
@@ -2363,6 +2363,43 @@ def trace(run_id: str, ratio_is_faulty: bool, count: int = 4) -> list[dict[str, 
         health_step(i, run_id, 98.0, 1.25 if ratio_is_faulty else 0.98)
         for i in range(count)
     ]
+
+
+class FaultEvidenceRefTests(unittest.TestCase):
+    """Every observation the oracle objects to is citable evidence, not just the first."""
+
+    def scenario(self) -> Scenario:
+        return load_scenario("easy-health-ratio")
+
+    def test_a_clean_trace_has_no_fault_refs(self) -> None:
+        refs = fault_evidence_refs(self.scenario(), trace("run-clean", ratio_is_faulty=False))
+
+        self.assertEqual([], refs)
+
+    def test_every_violating_observation_is_collected(self) -> None:
+        """evaluate_oracle stops at the first violation; an agent may notice later."""
+        rows = trace("run-fault", ratio_is_faulty=True, count=6)
+
+        refs = fault_evidence_refs(self.scenario(), rows)
+
+        self.assertEqual(6, len(refs))
+        self.assertIn("run-fault-obs-00000005", refs)
+        self.assertEqual(1, len(evaluate_oracle(self.scenario(), rows).evidence_refs))
+
+    def test_only_the_violating_tail_is_collected(self) -> None:
+        rows = trace("run-mixed", ratio_is_faulty=False, count=3) + [
+            health_step(i, "run-mixed", 98.0, 1.25) for i in range(3, 6)
+        ]
+
+        refs = fault_evidence_refs(self.scenario(), rows)
+
+        self.assertEqual(
+            ["run-mixed-obs-00000003", "run-mixed-obs-00000004", "run-mixed-obs-00000005"],
+            refs,
+        )
+
+    def test_an_empty_trace_is_not_an_error(self) -> None:
+        self.assertEqual([], fault_evidence_refs(self.scenario(), []))
 
 
 class PartialTraceVerdictTests(unittest.TestCase):
