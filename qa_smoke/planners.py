@@ -681,6 +681,16 @@ MAX_RETRY_WAIT_SECONDS = 20.0
 # tail crossed it several times per run. max_tokens is a ceiling rather than a
 # reservation, so responses that already fit cost exactly what they did before.
 PLANNING_MAX_TOKENS = 700
+# Reasoning models spend part of the completion budget on hidden reasoning before
+# emitting anything, so a planning-sized cap truncates every call. They also reject
+# max_tokens outright in favour of max_completion_tokens.
+REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+REASONING_OUTPUT_FLOOR = 8000
+REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
+
+
+def is_reasoning_model(model: str) -> bool:
+    return any(str(model).startswith(prefix) for prefix in REASONING_MODEL_PREFIXES)
 # Matches the final-assessment budget, so no new magic number enters the file.
 TRUNCATION_RETRY_MAX_TOKENS = 1400
 _DURATION_PATTERN = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)")
@@ -865,6 +875,7 @@ class LLMPlanner:
         *,
         max_attempts: int = 3,
         retry_budget_seconds: float = 45.0,
+        reasoning_effort: str | None = None,
         sleep: Any = time.sleep,
         monotonic: Any = time.monotonic,
         urlopen: Any = None,
@@ -883,6 +894,9 @@ class LLMPlanner:
             raise ValueError("max_attempts must be at least 1")
         if retry_budget_seconds < 0:
             raise ValueError("retry_budget_seconds must be zero or greater")
+        if reasoning_effort is not None and reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError(f"unsupported reasoning_effort: {reasoning_effort}")
+        self.reasoning_effort = reasoning_effort
         self.max_attempts = max_attempts
         self.retry_budget_seconds = retry_budget_seconds
         self.sleep = sleep
@@ -1134,8 +1148,13 @@ If the computed value and the reported value disagree, or a fraction falls outsi
             "model": self.model,
             "messages": messages,
             "response_format": self._response_format(response_schema),
-            "max_tokens": max_tokens,
         }
+        if is_reasoning_model(self.model):
+            body["max_completion_tokens"] = max(max_tokens, REASONING_OUTPUT_FLOOR)
+            if self.reasoning_effort:
+                body["reasoning_effort"] = self.reasoning_effort
+        else:
+            body["max_tokens"] = max_tokens
         if self.api_url.startswith("https://api.openai.com/"):
             body["prompt_cache_key"] = f"vsc-gameplay-qa-{self.mode}-{self.model}-v5"
         request = urllib.request.Request(
@@ -1194,13 +1213,18 @@ If the computed value and the reported value disagree, or a fraction falls outsi
         `billed` accumulates across attempts: a truncated response is real spend
         and has to reach the report even though it was unusable.
         """
-        caps = [max_tokens]
-        retry_cap = min(max_tokens * 2, TRUNCATION_RETRY_MAX_TOKENS)
-        if retry_cap > max_tokens:
+        reasoning = is_reasoning_model(self.model)
+        budget_key = "max_completion_tokens" if reasoning else "max_tokens"
+        floor = REASONING_OUTPUT_FLOOR if reasoning else 0
+        caps = [max(max_tokens, floor)]
+        retry_cap = max(min(max_tokens * 2, TRUNCATION_RETRY_MAX_TOKENS), floor * 2 if reasoning else 0)
+        if retry_cap > caps[0]:
             caps.append(retry_cap)
         completions: list[int] = []
         for cap in caps:
-            body["max_tokens"] = cap
+            body.pop("max_tokens", None)
+            body.pop("max_completion_tokens", None)
+            body[budget_key] = cap
             request.data = json.dumps(body).encode("utf-8")
             response_body = self._send_with_retries(request)
             usage = self._normalize_usage(response_body.get("usage") or {})

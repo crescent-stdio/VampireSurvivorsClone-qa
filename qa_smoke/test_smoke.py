@@ -3070,6 +3070,67 @@ def completion(content: str = "{}", finish_reason: str = "stop", tokens: int = 1
     )
 
 
+class ReasoningModelTests(unittest.TestCase):
+    """Reasoning models reject max_tokens and spend budget before emitting output."""
+
+    def body_for(
+        self,
+        model: str,
+        responses: list[str] | None = None,
+        response_schema: dict | None = None,
+        **kwargs,
+    ) -> list[dict]:
+        bodies: list[dict] = []
+
+        def opener(request, *_args, **_kw):
+            bodies.append(json.loads(request.data.decode("utf-8")))
+            payload = (responses or [completion('{"a": 1}')])[min(len(bodies) - 1, len(responses or [1]) - 1)]
+            return fake_opener(payload)()
+
+        LLMPlanner(
+            "qa", model, TestCharter(), 5.0, api_key="test-key", urlopen=opener, **kwargs
+        )._request("sys", "user", response_schema=response_schema)
+        return bodies
+
+    def test_a_standard_model_still_uses_max_tokens(self) -> None:
+        body = self.body_for("gpt-4o-mini")[0]
+
+        self.assertEqual(planners_module.PLANNING_MAX_TOKENS, body["max_tokens"])
+        self.assertNotIn("max_completion_tokens", body)
+        self.assertNotIn("reasoning_effort", body)
+
+    def test_a_reasoning_model_uses_max_completion_tokens(self) -> None:
+        body = self.body_for("gpt-5.6-luna")[0]
+
+        self.assertNotIn("max_tokens", body)
+        self.assertEqual(planners_module.REASONING_OUTPUT_FLOOR, body["max_completion_tokens"])
+
+    def test_reasoning_effort_is_sent_when_requested(self) -> None:
+        body = self.body_for("gpt-5.6-luna", reasoning_effort="low")[0]
+
+        self.assertEqual("low", body["reasoning_effort"])
+
+    def test_the_truncation_retry_keeps_the_reasoning_budget_key(self) -> None:
+        """The retry loop rewrites the budget, and used to reintroduce max_tokens."""
+        bodies = self.body_for(
+            "gpt-5.6-luna",
+            responses=[completion(finish_reason="length", tokens=8000), completion('{"a": 1}')],
+        )
+
+        self.assertEqual([8000, 16000], [b["max_completion_tokens"] for b in bodies])
+        self.assertTrue(all("max_tokens" not in b for b in bodies))
+
+    def test_a_reasoning_model_still_requests_strict_structured_output(self) -> None:
+        schema = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+        body = self.body_for("gpt-5.6-luna", response_schema=schema)[0]
+
+        self.assertEqual("json_schema", body["response_format"]["type"])
+
+    def test_an_unsupported_reasoning_effort_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reasoning_effort"):
+            LLMPlanner("qa", "gpt-5.6-luna", TestCharter(), 5.0, api_key="k", reasoning_effort="turbo")
+
+
 class TruncationTests(unittest.TestCase):
     """Running out of output room must cost a retry, not the episode."""
 
