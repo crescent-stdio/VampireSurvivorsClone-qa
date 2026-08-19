@@ -2568,6 +2568,7 @@ class AgentDetectionScoringTests(unittest.TestCase):
             "fault_refs": ["run-obs-00000003"],
             "hypotheses": [],
             "llm_assessment": None,
+            "has_agent_text_channel": None,
         }
         kwargs.update(overrides)
         return detection_module.score_agent_detection(**kwargs)
@@ -2679,6 +2680,33 @@ class AgentDetectionScoringTests(unittest.TestCase):
 
     def test_heuristic_policy_is_never_scored(self) -> None:
         result = self.score(policy="heuristic", transitions=[claim_step(0, "run", FINDING, ["run-obs-00000003"])])
+
+        self.assertEqual("not_evaluated", result.status)
+
+    def test_a_heuristic_run_without_an_inspector_is_never_scored(self) -> None:
+        """Every existing heuristic artifact must stay ineligible for scoring."""
+        result = self.score(policy="heuristic", transitions=[claim_step(0, "run", FINDING, ["run-obs-00000003"])])
+
+        self.assertEqual("not_evaluated", result.status)
+
+    def test_a_heuristic_run_with_an_inspector_is_scored(self) -> None:
+        """policy says who drove; the text channel says whether there is prose to judge."""
+        found = self.score(
+            policy="heuristic",
+            has_agent_text_channel=True,
+            transitions=[claim_step(0, "run", FINDING, ["run-obs-00000003"])],
+        )
+        silent = self.score(policy="heuristic", has_agent_text_channel=True, transitions=[])
+
+        self.assertEqual("match", found.status)
+        self.assertEqual("miss", silent.status)
+
+    def test_an_explicit_false_channel_overrides_an_llm_policy(self) -> None:
+        result = self.score(
+            policy="llm",
+            has_agent_text_channel=False,
+            transitions=[claim_step(0, "run", FINDING, ["run-obs-00000003"])],
+        )
 
         self.assertEqual("not_evaluated", result.status)
 

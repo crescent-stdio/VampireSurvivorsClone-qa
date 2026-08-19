@@ -198,6 +198,7 @@ def score_agent_detection(
     fault_id: str | None,
     policy: str,
     trace_completeness: str,
+    has_agent_text_channel: bool | None = None,
     oracle_verdict: str,
     transitions: list[dict[str, Any]],
     fault_refs: list[str],
@@ -211,6 +212,7 @@ def score_agent_detection(
             fault_id=fault_id,
             policy=policy,
             trace_completeness=trace_completeness,
+            has_agent_text_channel=has_agent_text_channel,
             oracle_verdict=oracle_verdict,
             transitions=transitions,
             fault_refs=fault_refs,
@@ -227,6 +229,7 @@ def _score(
     fault_id: str | None,
     policy: str,
     trace_completeness: str,
+    has_agent_text_channel: bool | None,
     oracle_verdict: str,
     transitions: list[dict[str, Any]],
     fault_refs: list[str],
@@ -237,10 +240,17 @@ def _score(
     rubric = rubric or load_rubric()
     version = rubric.rubric_version
 
-    if policy not in ("llm", "hybrid"):
+    # `policy` says who drove the game; it used to double as "is there agent prose to
+    # score". Those diverge once an inspector can run on a heuristic-driven session, so
+    # the caller states it explicitly. Defaulting from policy keeps every existing
+    # heuristic artifact scoring not_evaluated rather than becoming eligible for
+    # false_positive.
+    if has_agent_text_channel is None:
+        has_agent_text_channel = policy in ("llm", "hybrid")
+    if not has_agent_text_channel:
         return DetectionResult(
             status="not_evaluated",
-            reason=f"policy {policy!r} has no agent text channel",
+            reason=f"policy {policy!r} produced no agent text to score",
             rubric_version=version,
         )
 
