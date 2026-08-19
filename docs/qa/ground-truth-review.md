@@ -4,11 +4,11 @@
 
 - Schema: `qa-scenarios/v1`
 - Proposed set: six injected faults and three fault-free controls
-- Primary reviewer: _pending_
-- Review date: _pending_
-- Decision: **Pending**
+- Primary reviewer: `project-owner`
+- Review date: 2026-08-19
+- Decision: **Approved**
 
-Task 9 must not begin until a human reviewer verifies every row below and records an approval in the sign-off section. The fault identifier is evaluator-private: it may appear in `manifest.json`, but it must not appear in agent observations, planning requests, `steps.jsonl`, or final-assessment inputs.
+The primary reviewer approved all nine rows before Task 9 began. The fault identifier is evaluator-private: it may appear in `manifest.json`, but it must not appear in agent observations, planning requests, `steps.jsonl`, or final-assessment inputs.
 
 ## Proposed ground truth
 
@@ -32,19 +32,19 @@ Task 9 must not begin until a human reviewer verifies every row below and record
 
 ## Reviewer checklist
 
-- [ ] The expected behavior for each scenario matches intended game behavior.
-- [ ] Each reproduction procedure can expose the declared behavior on macOS.
-- [ ] Each difficulty label reflects temporal reasoning length, not implementation effort.
-- [ ] Each fault changes only its declared observation or transition signal.
-- [ ] The three controls cover the same observation horizons without injected faults.
-- [ ] Fault identifiers remain isolated from the agent channel.
+- [x] The expected behavior for each scenario matches intended game behavior.
+- [x] Each reproduction procedure can expose the declared behavior on macOS.
+- [x] Each difficulty label reflects temporal reasoning length, not implementation effort.
+- [x] Each fault changes only its declared observation or transition signal.
+- [x] The three controls cover the same observation horizons without injected faults.
+- [x] Fault identifiers remain isolated from the agent channel.
 
 ## Primary reviewer sign-off
 
-Reviewer name or identifier: _pending_
+Reviewer name or identifier: `project-owner`
 
-Date: _pending_
+Date: 2026-08-19
 
-Decision: _pending (`approved` or `changes requested`)_
+Decision: `approved`
 
-Notes: _pending_
+Notes: Approval was provided explicitly in the implementation session for all nine ground-truth entries.
