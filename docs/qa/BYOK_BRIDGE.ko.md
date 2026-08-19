@@ -156,6 +156,84 @@ uv run --locked python -m qa_smoke.reevaluate QAArtifacts/bridge-runs/<run>/
 
 저장된 아티팩트는 `python -m qa_smoke.reevaluate`로 함께 채점된다.
 
+## 3-5. 검사관(inspector): 조향과 버그 탐지의 분리
+
+조향과 버그 탐지는 성격이 다른 작업이다.
+
+| | 조향 | 버그 탐지 |
+|---|---|---|
+| 호출 횟수 | 스텝마다(약 19회) | **1회** |
+| 필요한 문맥 | 누적 대화 이력 (~28k/콜) | 관측 목록만 |
+| 지연 민감도 | 높음 (게임이 대기) | 없음 (런 종료 후) |
+| 필요한 능력 | 방향 결정 | 산술과 정밀한 대조 |
+
+`--inspector-model`은 두 번째 작업만 별도 모델에 맡긴다. `--policy`와 **직교**하므로 네 조합이 모두 유효하다.
+
+| 조향 | 검사관 | 용도 |
+|---|---|---|
+| `llm` | 없음 | 기존 동작 |
+| `llm` | 있음 | LLM 능력 평가 + 탐지 측정 |
+| `heuristic` | 있음 | 저비용·결정론적 회귀 검사 |
+| `heuristic` | 없음 | 결정론적 게이트 (변경 없음) |
+
+```sh
+./scripts/qa/run-bridge-smoke.sh --scenario easy-health-ratio --seed 9102 \
+  --mode qa --policy heuristic --fault health_ratio_out_of_range \
+  --inspector-model gpt-5.6-luna --inspector-effort low
+```
+
+### 왜 분리했는가
+
+측정 결과 `gpt-4o-mini`는 조향은 하지만 탐지를 못 한다. v6 프롬프트가 시킨 계산은 정확히 수행하고도(`96/100 = 0.96`) 보고값 1.25와 대조하지 않고 "valid"로 결론냈다. 이를 고치려고 조향까지 강한 모델로 올리면 19콜 전부가 비싸진다.
+
+실측: LLM 조향 런은 프롬프트 50만 토큰/19콜. 검사관은 관측 18개를 압축해 **1콜 약 20k 토큰**이다.
+
+### 정제 — 검사관은 답을 받지 않는다
+
+검사관 입력에는 세 계층이 모두 적용되며 어느 것도 생략할 수 없다.
+
+1. `state_channels.build_agent_observation` — `fault_id`, `ground_truth`, `player_view` 등 제거
+2. `planners.compact_observation` — 화이트리스트, 엔티티 목록 8개로 제한
+3. `memory.sanitize_agent_channel` — `oracle`, `oracle_verdict`, `verdict`, `manifest`를 제거하는 **유일한** 계층
+
+`recorder.steps`의 관측은 **원본**이라 `player_view`가 그대로 들어 있다. 그냥 넘기면 답을 주는 것과 같다.
+
+요청 로그는 `inspector-request.jsonl`로 저장한다. 결정론적 게이트가 `*request*.jsonl`을 누출 검사 대상으로 스캔하므로, 이 이름이 곧 무료 검증이 된다. 응답은 별도 파일에 둔다 — 결함을 정확히 서술한 검사관이 fault_id에 가까운 표현을 쓸 수 있기 때문이다.
+
+### 채점 — 형용사가 아니라 숫자로
+
+검사관은 구조화된 findings를 반환한다.
+
+```json
+{"field": "player.health_ratio", "computed_value": 0.96,
+ "reported_value": 1.25, "statement": "...", "evidence_refs": ["...-obs-00000003"]}
+```
+
+`computed_value != reported_value`이고 `evidence_refs`가 오라클이 문제 삼은 전이와 겹칠 때만 `match`다. 키워드 루브릭은 실제 발견을 표현 차이로 세 번이나 놓쳤고(`exceed`/`exceeds`, `inconsistency`/`inconsistent`, `disagree`), 매번 동의어를 더하는 방향은 점수를 올리는 쪽이라 드리프트를 만든다. 수치 판정에는 그 경로가 없다 — 문장이 아무리 요란해도 두 값이 같으면 발견이 아니다.
+
+키워드 루브릭은 in-loop 플래너 산문 채점이라는 원래 역할로만 남는다.
+
+### 실측 결과
+
+| | 결함 주입 (llm 조향) | 대조군 (heuristic 조향) |
+|---|---|---|
+| `oracle_verdict` | `fail` | `pass` |
+| `agent_detection` | **`match`** | **`not_evaluated`** |
+| 검사관 findings | 18건 | **0건** |
+| API 호출 | 20 | **1** |
+
+검사관은 체력이 변할 때마다(1.0 → 0.96 → … → 0.66) 매번 계산해 1.25와 대조했고, 결함 없는 런에서는 아무것도 만들어내지 않았다.
+
+### reasoning 모델
+
+`gpt-5.6-luna` 같은 reasoning 모델은 `max_tokens`를 거부하고 `max_completion_tokens`를 쓰며, 숨은 추론이 출력 예산을 먼저 소모한다. 하네스가 자동으로 판별해 예산을 8000으로 올리고 `--inspector-effort`로 `reasoning_effort`를 전달한다. 실측 reasoning 토큰은 호출당 288~826개로 비용에 거의 영향이 없다.
+
+### 한계
+
+- `match`는 "에이전트가 버그를 찾았다"의 **구조화된 증거**이지 사람의 타당성 판정이 아니다. `annotations.jsonl`과 `aggregate_annotations`(리뷰어 3명 다수결)가 여전히 유일한 권위다.
+- `agent_detection`은 이제 **에이전트 시스템**을 측정한다. in-loop 플래너만 측정하던 이전 값과 직접 비교할 수 없다.
+- 검사관 실패는 anomaly로 격하되며 절대 `fatal_error`가 되지 않는다. 네트워크 문제로 9개 시나리오 게이트가 무너지면 안 되기 때문이다.
+
 ## 4. 동작과 종료 조건
 
 - planner는 매 프레임이 아니라 기본 6초 horizon, 중요한 event, stall 또는 terminal 상태에서 호출된다.
