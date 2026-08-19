@@ -1,0 +1,237 @@
+{
+  "schema": "qa-detection-rubric/v1",
+  "rubric_version": "1",
+  "note": "Scored against the agent's own free text only. A match means the agent wrote words identifying the defect while citing a transition the oracle objects to; it is not a human bug-validity ruling. annotations.jsonl and reporting.aggregate_annotations remain the sole authority on that.",
+  "faults": {
+    "health_ratio_out_of_range": {
+      "bug_id": "health_ratio_out_of_range",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": [
+        "health ratio",
+        "hp ratio",
+        "health fraction",
+        "health percentage"
+      ],
+      "symptom_terms": [
+        "inconsistent",
+        "does not match",
+        "doesnt match",
+        "mismatch",
+        "exceeds",
+        "greater than 1",
+        "above 1",
+        "over 1",
+        "impossible",
+        "contradict",
+        "not equal",
+        "invalid",
+        "outside the valid range",
+        "outside 0 to 1"
+      ]
+    },
+    "relative_position_mismatch": {
+      "bug_id": "relative_position_mismatch",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": [
+        "relative position",
+        "relative x",
+        "relative y",
+        "relative vector",
+        "relative offset"
+      ],
+      "symptom_terms": [
+        "inconsistent",
+        "does not match",
+        "doesnt match",
+        "wrong",
+        "incorrect",
+        "not equal",
+        "differs",
+        "contradict",
+        "invalid",
+        "do not match",
+        "disagrees"
+      ]
+    },
+    "upgrade_ack_without_effect": {
+      "bug_id": "upgrade_ack_without_effect",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": [
+        "upgrade",
+        "inventory",
+        "ability",
+        "weapon slot"
+      ],
+      "symptom_terms": [
+        "no effect",
+        "without effect",
+        "did not change",
+        "didnt change",
+        "unchanged",
+        "no change",
+        "not applied",
+        "had no impact",
+        "nothing happened"
+      ]
+    },
+    "chest_collected_without_state_transition": {
+      "bug_id": "chest_collected_without_state_transition",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": [
+        "chest"
+      ],
+      "symptom_terms": [
+        "no change",
+        "did not change",
+        "didnt change",
+        "unchanged",
+        "no state change",
+        "no progress",
+        "count did not",
+        "coins did not",
+        "without a state change"
+      ]
+    },
+    "experience_level_drift": {
+      "bug_id": "experience_level_drift",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": [
+        "exp",
+        "experience",
+        "xp",
+        "exp ratio",
+        "next level exp"
+      ],
+      "symptom_terms": [
+        "inconsistent",
+        "does not match",
+        "doesnt match",
+        "drift",
+        "mismatch",
+        "not conserved",
+        "invariant",
+        "impossible",
+        "exceeds",
+        "wrong",
+        "invalid"
+      ]
+    },
+    "currency_leak_across_restart": {
+      "bug_id": "currency_leak_across_restart",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": [
+        "coin",
+        "coins gained",
+        "currency"
+      ],
+      "symptom_terms": [
+        "not reset",
+        "did not reset",
+        "didnt reset",
+        "carried over",
+        "persisted",
+        "leak",
+        "retained across",
+        "survived the restart"
+      ]
+    },
+    "hp_not_decreased_on_hit": {
+      "bug_id": "BUG-1",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": [
+        "health",
+        "hp",
+        "damage taken",
+        "hit"
+      ],
+      "symptom_terms": [
+        "did not decrease",
+        "didnt decrease",
+        "not reduced",
+        "unchanged",
+        "stayed the same",
+        "no damage",
+        "same after the hit"
+      ]
+    },
+    "health_bar_desync": {
+      "bug_id": "BUG-2",
+      "observable_in_agent_channel": false,
+      "unobservable_reason": "The displayed value lives in the player_view channel, which state_channels strips from the agent observation. The agent never receives anything to compare the raw health against.",
+      "topic_terms": [
+        "health bar",
+        "displayed health",
+        "hud health"
+      ],
+      "symptom_terms": [
+        "differs",
+        "out of sync",
+        "does not match",
+        "mismatch",
+        "out of step"
+      ]
+    },
+    "item_effect_not_applied": {
+      "bug_id": "BUG-3",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": [
+        "item",
+        "bomb",
+        "area effect"
+      ],
+      "symptom_terms": [
+        "no effect",
+        "no damage",
+        "did not apply",
+        "didnt apply",
+        "unchanged",
+        "nothing happened"
+      ]
+    },
+    "item_hit_range_mismatch": {
+      "bug_id": "BUG-4",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": [
+        "targets affected",
+        "targets in radius",
+        "effect radius",
+        "hit range",
+        "area of effect"
+      ],
+      "symptom_terms": [
+        "fewer",
+        "only some",
+        "not all",
+        "mismatch",
+        "does not match",
+        "doesnt match",
+        "partial"
+      ]
+    },
+    "experience_display_drift": {
+      "bug_id": "BUG-5",
+      "observable_in_agent_channel": false,
+      "unobservable_reason": "The drift is between raw experience and the player_view display, and state_channels strips player_view from the agent observation.",
+      "topic_terms": [
+        "displayed exp",
+        "exp display",
+        "displayed experience"
+      ],
+      "symptom_terms": [
+        "differs",
+        "drift",
+        "does not match",
+        "mismatch"
+      ]
+    }
+  }
+}

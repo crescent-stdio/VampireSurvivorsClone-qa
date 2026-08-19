@@ -48,7 +48,14 @@ from .run import (
 )
 from .evaluation import evaluate_oracle, fault_evidence_refs, scenario_verdict_axes
 from . import reevaluate as reevaluate_module
-from .scenarios import Scenario, ScenarioContractError, load_scenario, scenario_fingerprint
+from . import detection as detection_module
+from .scenarios import (
+    Scenario,
+    ScenarioContractError,
+    load_scenario,
+    load_v4_ground_truth,
+    scenario_fingerprint,
+)
 from .source_tools import SourceTools
 
 
@@ -2363,6 +2370,75 @@ def trace(run_id: str, ratio_is_faulty: bool, count: int = 4) -> list[dict[str, 
         health_step(i, run_id, 98.0, 1.25 if ratio_is_faulty else 0.98)
         for i in range(count)
     ]
+
+
+def all_known_fault_ids() -> set[str]:
+    ids = {
+        scenario.ground_truth.fault_id
+        for scenario in (load_scenario(i) for i in benchmark_module.DETERMINISTIC_GATE_SCENARIO_IDS)
+        if scenario.ground_truth.fault_id
+    }
+    ids.update(
+        str(entry.get("fault_id"))
+        for entry in load_v4_ground_truth().values()
+        if entry.get("fault_id")
+    )
+    return ids
+
+
+class DetectionRubricTests(unittest.TestCase):
+    def test_rubric_covers_every_known_fault(self) -> None:
+        rubric = detection_module.load_rubric()
+
+        self.assertEqual(all_known_fault_ids(), set(rubric.faults))
+
+    def test_no_rubric_term_can_trip_the_gate_fault_id_check(self) -> None:
+        """benchmark.verify_deterministic_gate fails if a fault_id appears in steps.jsonl.
+
+        The rubric asks the agent to write these phrases, so a term that contains or
+        reconstructs a fault id would make a *better* agent break the gate.
+        """
+        rubric = detection_module.load_rubric()
+        fault_ids = all_known_fault_ids()
+        normalized_ids = {detection_module.normalize(fault_id) for fault_id in fault_ids}
+
+        for fault_id, entry in rubric.faults.items():
+            for term in [*entry.topic_terms, *entry.symptom_terms]:
+                with self.subTest(fault=fault_id, term=term):
+                    for known in fault_ids:
+                        self.assertNotIn(known, term)
+                    self.assertNotIn(detection_module.normalize(term), normalized_ids)
+            for topic in entry.topic_terms:
+                for symptom in entry.symptom_terms:
+                    joined = detection_module.normalize(f"{topic} {symptom}")
+                    with self.subTest(fault=fault_id, joined=joined):
+                        self.assertNotIn(joined, normalized_ids)
+
+    def test_unobservable_faults_carry_a_reason(self) -> None:
+        rubric = detection_module.load_rubric()
+        unobservable = {
+            fault_id
+            for fault_id, entry in rubric.faults.items()
+            if not entry.observable_in_agent_channel
+        }
+
+        # Both are raw-vs-player_view mismatches, and state_channels strips player_view.
+        self.assertEqual({"health_bar_desync", "experience_display_drift"}, unobservable)
+        for fault_id in unobservable:
+            self.assertTrue(rubric.faults[fault_id].unobservable_reason)
+
+    def test_a_wrong_schema_is_rejected(self) -> None:
+        path = TEST_TEMP_ROOT / "bad-rubric.json"
+        path.write_text(json.dumps({"schema": "nope", "faults": {}}), encoding="utf-8")
+
+        with self.assertRaises(detection_module.DetectionContractError):
+            detection_module.load_rubric(path)
+
+    def test_normalization_folds_case_separators_and_whitespace(self) -> None:
+        self.assertEqual(
+            "health ratio is out of range",
+            detection_module.normalize("  Health_Ratio  is   OUT-OF-RANGE "),
+        )
 
 
 class FaultEvidenceRefTests(unittest.TestCase):
