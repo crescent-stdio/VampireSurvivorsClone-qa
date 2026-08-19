@@ -84,13 +84,14 @@ def _run_v4_suite(args: argparse.Namespace, root: Path, *, injected: bool) -> Pa
             "--policy", "heuristic",
             "--scenario", legacy.id,
             "--seed", str(selected_seed),
-            "--quiet",
         ]
         fault_id = str((ground_truth.get(scenario.id) or {}).get("fault_id") or "") if injected else ""
         if fault_id:
             run_arguments.extend(["--fault", fault_id])
         if args.headless:
             run_arguments.append("--headless")
+        if args.quiet:
+            run_arguments.append("--quiet")
         return_code = run_session(parse_run_args(run_arguments))
         _rewrite_v4_verdict(run_dir, scenario)
         result_manifest["scenarios"][scenario.id] = {
