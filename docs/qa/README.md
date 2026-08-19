@@ -1,6 +1,6 @@
 # QA Gameplay lane
 
-This repository contains additive QA-only gameplay lanes for deterministic smoke, replay, ML-Agents PPO, the existing opt-in OpenAI LLM workflow, and a production-scene BYOK QA Bridge. See the [Korean AI agent QA guide](AI_AGENT_QA_GUIDE.ko.md) for onboarding and operational details, the [Korean BYOK Bridge guide](BYOK_BRIDGE.ko.md) for observable autonomous play against Main Menu and Level 1, the [Korean PPO quickstart](PPO_QUICKSTART.ko.md) for connecting PPO from a fresh clone, and the [Korean player distribution guide](PLAYER_DISTRIBUTION.ko.md) for sharing builds with teammates.
+This repository contains additive QA-only gameplay lanes for deterministic smoke, replay, ML-Agents PPO, the existing opt-in OpenAI LLM workflow, and a production-scene BYOK QA Bridge. See the [Korean AI agent QA guide](AI_AGENT_QA_GUIDE.ko.md) for onboarding and operational details, the [Korean BYOK Bridge guide](BYOK_BRIDGE.ko.md) for observable autonomous play against Main Menu and Level 1, the [Korean v4 harness guide](V4_HARNESS.ko.md) for the fault-injection suites and the regression baseline, the [Korean PPO quickstart](PPO_QUICKSTART.ko.md) for connecting PPO from a fresh clone, and the [Korean player distribution guide](PLAYER_DISTRIBUTION.ko.md) for sharing builds with teammates.
 
 ## Architecture
 
