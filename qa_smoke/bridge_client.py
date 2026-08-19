@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 import uuid
@@ -68,13 +69,73 @@ class BridgeClient:
     def ready_path(self) -> Path:
         return self.bridge_dir / "ready.json"
 
+    @property
+    def event_log_path(self) -> Path:
+        return self.bridge_dir / "events.jsonl"
+
+    def _reject_stale_player(self, process_id: int | None) -> None:
+        """Reject a player process left behind by a previous run in this directory.
+
+        ``process_id`` comes from the previous run's ready.json and is None when no
+        readable handshake was left behind. A survivor must not outlive the directory
+        reset: it would rewrite ready.json with its own run id and reproduce the
+        mismatch the reset exists to prevent.
+
+        A live PID alone is insufficient because the operating system can reuse it.
+        Only reject the process when its executable name matches this player.
+        """
+        if type(process_id) is not int or process_id <= 0:
+            return
+        try:
+            inspected_process = subprocess.run(
+                ["/bin/ps", "-p", str(process_id), "-o", "comm="],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise BridgeError(
+                f"could not inspect stale QA player process {process_id}: {error}"
+            ) from error
+        if inspected_process.returncode != 0:
+            return
+        executable = inspected_process.stdout.strip()
+        if not executable or Path(executable).name != self.game_exe.name:
+            return
+        raise BridgeError(
+            f"stale QA player process {process_id} is still running as "
+            f"{self.game_exe.name!r}; stop it before reusing {self.bridge_dir}"
+        )
+
+    def _reset_bridge_directory(self) -> None:
+        """Clear the previous run's handshake state before spawning the player.
+
+        The player takes seconds to boot while launch() polls ready.json every 100ms,
+        so a leftover ready.json is always read before the new player can write its
+        own, and fails run_id validation. Only bridge/ is reset; session artifacts
+        such as reports, steps and logs are left untouched.
+        """
+        stale_ready = self._read_json(self.ready_path) or {}
+        self._reject_stale_player(stale_ready.get("process_id"))
+        try:
+            if self.response_directory.exists():
+                shutil.rmtree(self.response_directory)
+            for path in (self.ready_path, self.command_path, self.event_log_path):
+                path.unlink(missing_ok=True)
+            self.bridge_dir.mkdir(parents=True, exist_ok=True)
+            self.response_directory.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise BridgeError(
+                f"could not reset stale QA bridge state in {self.bridge_dir}: {error}"
+            ) from error
+
     def launch(self) -> dict[str, Any]:
         try:
             self.game_exe = resolve_executable(validate_player(self.game_exe))
         except PlayerError as error:
             raise BridgeError(str(error)) from error
-        self.bridge_dir.mkdir(parents=True, exist_ok=True)
-        self.response_directory.mkdir(parents=True, exist_ok=True)
+        self._reset_bridge_directory()
         self._stdout = (self.session_dir / "game-console.log").open("wb")
         args = [
             str(self.game_exe),
@@ -204,9 +265,10 @@ class BridgeClient:
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any] | None:
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, PermissionError):
             return None
+        return payload if isinstance(payload, dict) else None
 
     @staticmethod
     def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:

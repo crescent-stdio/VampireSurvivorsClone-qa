@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import threading
 import time
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
@@ -51,9 +53,23 @@ TEST_TEMP_ROOT.mkdir(exist_ok=True)
 
 class BridgeClientTests(unittest.TestCase):
     class AliveProcess:
-        @staticmethod
-        def poll() -> None:
-            return None
+        """Fake player process that becomes ready only after a boot delay.
+
+        on_ready fires on the second poll so launch() completes one full read of
+        ready.json while the player is still booting -- the window in which a
+        leftover handshake file from a previous run would be picked up.
+        """
+
+        def __init__(self, on_ready: Callable[[], None] | None = None) -> None:
+            self._on_ready = on_ready
+            self._booting = True
+
+        def poll(self) -> None:
+            if self._booting:
+                self._booting = False
+            elif self._on_ready is not None:
+                self._on_ready()
+                self._on_ready = None
 
     def make_plain_client(
         self, name: str, run_id: str = "run-42", scenario_id: str = "scenario-7"
@@ -70,9 +86,12 @@ class BridgeClientTests(unittest.TestCase):
             scenario_id=scenario_id,
         )
 
-    @staticmethod
-    def write_ready(client: BridgeClient, **overrides: object) -> None:
-        client.bridge_dir.mkdir(parents=True, exist_ok=True)
+    def spawn_writing_ready(self, client: BridgeClient, **overrides: object) -> Callable[..., object]:
+        """Fake Popen whose player writes ready.json only once it has booted.
+
+        launch() resets bridge/ before spawning, so the handshake file has to appear
+        after the reset rather than being pre-written by the test.
+        """
         payload = {
             "protocol_version": "1.4",
             "run_id": client.run_id,
@@ -80,11 +99,22 @@ class BridgeClientTests(unittest.TestCase):
             "ready": True,
         }
         payload.update(overrides)
-        client.ready_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    def launch_with_fake_process(self, client: BridgeClient) -> dict[str, object]:
+        def write_ready() -> None:
+            client.bridge_dir.mkdir(parents=True, exist_ok=True)
+            client.ready_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        def spawn(*_args: object, **_kwargs: object) -> object:
+            return self.AliveProcess(write_ready)
+
+        return spawn
+
+    def launch_with_fake_process(
+        self, client: BridgeClient, **ready_overrides: object
+    ) -> dict[str, object]:
         with patch(
-            "qa_smoke.bridge_client.subprocess.Popen", return_value=self.AliveProcess()
+            "qa_smoke.bridge_client.subprocess.Popen",
+            side_effect=self.spawn_writing_ready(client, **ready_overrides),
         ):
             try:
                 return client.launch()
@@ -117,10 +147,9 @@ class BridgeClientTests(unittest.TestCase):
             scenario_id="easy-health-ratio",
             fault_id="health_ratio_out_of_range",
         )
-        self.write_ready(client)
-
         with patch(
-            "qa_smoke.bridge_client.subprocess.Popen", return_value=self.AliveProcess()
+            "qa_smoke.bridge_client.subprocess.Popen",
+            side_effect=self.spawn_writing_ready(client),
         ) as popen:
             try:
                 client.launch()
@@ -137,17 +166,146 @@ class BridgeClientTests(unittest.TestCase):
 
     def test_launch_rejects_unknown_protocol_version(self) -> None:
         client = self.make_plain_client("unknown-protocol")
-        self.write_ready(client, protocol_version="9.9")
 
         with self.assertRaisesRegex(bridge_client_module.BridgeContractError, "protocol_version"):
-            self.launch_with_fake_process(client)
+            self.launch_with_fake_process(client, protocol_version="9.9")
 
     def test_launch_rejects_run_identifier_mismatch(self) -> None:
         client = self.make_plain_client("run-mismatch")
-        self.write_ready(client, run_id="another-run")
 
         with self.assertRaisesRegex(bridge_client_module.BridgeContractError, "run_id"):
+            self.launch_with_fake_process(client, run_id="another-run")
+
+    def test_launch_clears_stale_bridge_state(self) -> None:
+        process_states = (
+            ("exited", subprocess.CompletedProcess([], 1, stdout="", stderr="")),
+            (
+                "reused",
+                subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout="/usr/bin/unrelated-process\n",
+                    stderr="",
+                ),
+            ),
+        )
+        for name, inspected_process in process_states:
+            client = self.make_plain_client(f"stale-bridge-{name}", run_id="fresh-run")
+            client.response_directory.mkdir(parents=True, exist_ok=True)
+            session_report = client.session_dir / "report.json"
+            session_report.write_text('{"result": "preserve"}', encoding="utf-8")
+            stale_response = client.response_path("1787103218194-9d71861b")
+            stale_response.write_text("{}", encoding="utf-8")
+            client.command_path.write_text(
+                '{"id": "old", "action": "shutdown"}', encoding="utf-8"
+            )
+            client.event_log_path.write_text(
+                '{"run_id": "previous-run"}\n', encoding="utf-8"
+            )
+            client.ready_path.write_text(
+                json.dumps(
+                    {
+                        "protocol_version": "1.4",
+                        "run_id": "previous-run",
+                        "scenario_id": client.scenario_id,
+                        "ready": True,
+                        "process_id": 4242,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.subTest(process_state=name), patch(
+                "qa_smoke.bridge_client.subprocess.run",
+                return_value=inspected_process,
+            ):
+                ready = self.launch_with_fake_process(client)
+
+            self.assertEqual("fresh-run", ready["run_id"])
+            self.assertFalse(stale_response.exists())
+            self.assertFalse(client.command_path.exists())
+            self.assertFalse(client.event_log_path.exists())
+            self.assertEqual(
+                '{"result": "preserve"}', session_report.read_text(encoding="utf-8")
+            )
+
+    def test_launch_rejects_a_stale_player_using_the_same_executable(self) -> None:
+        client = self.make_plain_client("stale-player", run_id="fresh-run")
+        client.bridge_dir.mkdir(parents=True, exist_ok=True)
+        client.ready_path.write_text(
+            json.dumps(
+                {
+                    "protocol_version": "1.4",
+                    "run_id": "previous-run",
+                    "scenario_id": client.scenario_id,
+                    "ready": True,
+                    "process_id": 4242,
+                }
+            ),
+            encoding="utf-8",
+        )
+        inspected_process = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=f"/tmp/{client.game_exe.name}\n",
+            stderr="",
+        )
+
+        with patch(
+            "qa_smoke.bridge_client.subprocess.run",
+            return_value=inspected_process,
+        ), self.assertRaisesRegex(
+            bridge_client_module.BridgeError,
+            "stale QA player process 4242",
+        ):
             self.launch_with_fake_process(client)
+
+    def test_launch_rejects_an_uninspectable_stale_process(self) -> None:
+        client = self.make_plain_client("uninspectable-player", run_id="fresh-run")
+        client.bridge_dir.mkdir(parents=True, exist_ok=True)
+        client.ready_path.write_text(
+            json.dumps(
+                {
+                    "protocol_version": "1.4",
+                    "run_id": "previous-run",
+                    "scenario_id": client.scenario_id,
+                    "ready": True,
+                    "process_id": 4242,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch(
+            "qa_smoke.bridge_client.subprocess.run",
+            side_effect=PermissionError("process inspection denied"),
+        ), self.assertRaisesRegex(
+            bridge_client_module.BridgeError,
+            "could not inspect stale QA player process 4242",
+        ):
+            self.launch_with_fake_process(client)
+
+    def test_launch_reports_a_bridge_cleanup_failure(self) -> None:
+        client = self.make_plain_client("cleanup-failure", run_id="fresh-run")
+        client.response_directory.mkdir(parents=True, exist_ok=True)
+
+        with patch(
+            "qa_smoke.bridge_client.shutil.rmtree",
+            side_effect=PermissionError("cleanup denied"),
+        ), self.assertRaisesRegex(
+            bridge_client_module.BridgeError,
+            "could not reset stale QA bridge state",
+        ):
+            self.launch_with_fake_process(client)
+
+    def test_launch_clears_a_non_object_stale_ready_file(self) -> None:
+        client = self.make_plain_client("non-object-ready", run_id="fresh-run")
+        client.bridge_dir.mkdir(parents=True, exist_ok=True)
+        client.ready_path.write_text('[{"process_id": 4242}]', encoding="utf-8")
+
+        ready = self.launch_with_fake_process(client)
+
+        self.assertEqual("fresh-run", ready["run_id"])
 
 
 class HeuristicPlannerTests(unittest.TestCase):
