@@ -93,6 +93,34 @@ QA_BRIDGE_OUTPUT=$PWD/QAArtifacts/bridge-runs/ab-9102-hybrid \
 
 deterministic benchmark gate는 여전히 `heuristic`만 받는다.
 
+## 3-2. 중단된 실행과 판정 복구
+
+LLM 실행은 rate limit(HTTP 429), 응답 잘림, 플레이어 크래시로 중단될 수 있다. 중단돼도 그때까지 기록된 관측은 `steps.jsonl`에 그대로 남아 있고, 오라클은 그 trace만으로 판정할 수 있다.
+
+- 오라클 `fail`은 **중단된 실행에서도 보고된다.** 실패는 기록된 관측이 불변식을 위반했기 때문에 발생하며 evidence ref가 그 관측을 가리킨다. trace가 잘렸다고 없던 위반이 생기지는 않는다.
+- 오라클 `pass`는 **중단된 실행에서 `not_evaluated`로 격하된다.** "여기까지는 위반이 없었다"는 "위반이 없다"가 아니다. `verdict.json`의 `trace_completeness`가 `partial`이면 이 판정이 앞부분만 보고 내려진 것이다.
+- `final_verdict`는 완주하지 않은 실행에서 항상 `ERROR`이며, 종료 코드도 그대로다. 결정론적 벤치마크 게이트는 여전히 완주한 heuristic 실행만 받는다.
+
+이미 쌓여 있는 아티팩트는 재평가할 수 있다.
+
+```sh
+uv run --locked python -m qa_smoke.reevaluate --dry-run QAArtifacts/bridge-runs/<run>/
+uv run --locked python -m qa_smoke.reevaluate QAArtifacts/bridge-runs/<run>/
+```
+
+`execution_status`는 절대 바뀌지 않는다. `steps.jsonl`은 append 모드로 열리므로 출력 디렉터리를 재사용하면 여러 세션이 한 파일에 쌓이는데, 재평가는 manifest의 `run_id`와 일치하는 행만 판정한다. 섞인 채로 평가하면 결함 주입 세션이 무결함 세션에 새어 들어가 **대조군 거짓 양성**을 만든다.
+
+## 3-3. LLM API 실패 처리
+
+일시적 실패는 실행을 끝내지 않는다.
+
+- 재시도 대상: HTTP 429, 5xx, 408, 425, 연결 오류, 타임아웃. 대기 시간은 `Retry-After` 헤더 → `x-ratelimit-reset-*` → 응답 본문의 `try again in ...` 순으로 읽는다. 실제 429는 본문에만 값을 담아 보내는 경우가 많다.
+- 재시도하지 않음: 400, 401, 403, 404, 413, 422. 설정 오류라서 재시도해도 같은 결과이며 quota만 소모한다.
+- 한계: 시도 3회(`--llm-max-attempts`), 회당 최대 20초, 요청당 누적 대기 45초(`--llm-retry-budget-seconds`). `--llm-max-attempts 1`은 재시도 이전 동작으로 되돌린다.
+- 계획 응답 상한은 700 토큰이며, 잘리면 1400으로 한 번 더 시도한 뒤 실패한다.
+
+재시도 통계는 `report.json`의 `metrics.api_usage`에 `llm_retries`, `llm_retry_wait_ms`, `llm_http_attempts`로 기록된다. 실패한 호출이 소모한 토큰도 함께 집계되므로, 다음 실행의 TPM 예산을 이 값으로 잡을 수 있다.
+
 ## 4. 동작과 종료 조건
 
 - planner는 매 프레임이 아니라 기본 6초 horizon, 중요한 event, stall 또는 terminal 상태에서 호출된다.
