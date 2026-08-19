@@ -1014,7 +1014,8 @@ Act as a QA engineer while you play. Before every state-changing game action, st
 Keep navigation reasoning in hypothesis and QA findings in qa_observation. An unexpected result starts a hypothesis; mark reproduction_attempted only when you deliberately repeated a relevant setup/action. A candidate becomes confirmed only after its own reproduction path, never from hidden evaluator data.
 For direct_steer and wait, normally request a duration no greater than {self.plan_horizon_seconds:.3f} simulation seconds.
 Return one JSON object only with keys: plan, hypothesis, qa_observation, tool, action, arguments, expected_effect, reflection.
-Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary concise. tool must be game, source_search, or source_read. Player mode must always use game."""
+Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary concise. tool must be game, source_search, or source_read. Player mode must always use game.
+QA also means judging each observation on its own, not only action versus effect. Check that the numbers in the current observation are mutually consistent and inside their natural range: a field named as a ratio or fraction must equal the pair of fields it summarizes and must stay between 0 and 1; counts and totals must not be negative; a part must not exceed its whole; a relative vector must equal the other entity's position minus the player's position. Advisory summaries such as a danger score are scores, not invariants; do not report them. A matched transition says nothing about whether the state itself is valid, so an observation that fails one of these checks is a QA finding even when your last action produced exactly the effect you expected. In that case set reflection.status=unexpected with a short stable candidate_id, and in qa_observation name the offending field, its value, and the values it contradicts. Look at that field again on later observations and set reproduction_attempted=true when you do."""
 
     def _planning_payload(
         self,
@@ -1134,7 +1135,7 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
             "max_tokens": max_tokens,
         }
         if self.api_url.startswith("https://api.openai.com/"):
-            body["prompt_cache_key"] = f"vsc-gameplay-qa-{self.mode}-{self.model}-v3"
+            body["prompt_cache_key"] = f"vsc-gameplay-qa-{self.mode}-{self.model}-v4"
         request = urllib.request.Request(
             self.api_url,
             data=json.dumps(body).encode("utf-8"),

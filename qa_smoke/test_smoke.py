@@ -1000,7 +1000,7 @@ class ReportingTests(unittest.TestCase):
             model="gpt-4o-mini",
         )
 
-        self.assertEqual("qa-planning/v4", recorder.prompt_version)
+        self.assertEqual("qa-planning/v5", recorder.prompt_version)
 
     def test_llm_contract_failure_is_not_classified_as_infrastructure_error(self) -> None:
         recorder = RunRecorder(
@@ -3403,6 +3403,29 @@ class BridgeAssistGuardTests(unittest.TestCase):
         for claim in NO_ASSIST_PROMPT_CLAIMS:
             self.assertIn(claim, prompt)
 
+    def test_the_prompt_asks_for_single_observation_invariant_checks(self) -> None:
+        """The agent scored `matched` 17 times because that was the question asked.
+
+        Nothing in the prompt used to mention consistency, range or invariants, so a
+        correct action with a corrupt observation was legitimately "as expected".
+        """
+        for bridge_assist in (False, True):
+            with self.subTest(bridge_assist=bridge_assist):
+                planner = LLMPlanner(
+                    "qa", "test-model", TestCharter(bridge_assist=bridge_assist), 5.0,
+                    api_key="test-key",
+                )
+                prompt = planner._planning_system_prompt()
+
+                self.assertIn(
+                    "A matched transition says nothing about whether the state itself is valid",
+                    prompt,
+                )
+                self.assertIn("reflection.status=unexpected", prompt)
+                # Invariant classes only: no field, value or subsystem is named.
+                self.assertNotIn("health_ratio", prompt)
+                self.assertNotIn("1.25", prompt)
+
     def test_scenario_fingerprints_are_stable(self) -> None:
         """Charter fields added for hybrid must not reach CharterDefinition.
 
@@ -3596,8 +3619,8 @@ class BridgeAssistGuardTests(unittest.TestCase):
         base = RunRecorder(output_dir=TEST_TEMP_ROOT / "pv-llm", seed=1, mode="qa", policy="llm")
         hybrid = RunRecorder(output_dir=TEST_TEMP_ROOT / "pv-hybrid", seed=1, mode="qa", policy="hybrid")
 
-        self.assertEqual("qa-planning/v4", base.effective_prompt_version())
-        self.assertEqual("qa-planning/v4-hybrid", hybrid.effective_prompt_version())
+        self.assertEqual("qa-planning/v5", base.effective_prompt_version())
+        self.assertEqual("qa-planning/v5-hybrid", hybrid.effective_prompt_version())
 
     def test_hybrid_charter_declares_the_automatic_avoidance(self) -> None:
         control = TestCharter(bridge_assist=True).as_dict()["control_policy"]
