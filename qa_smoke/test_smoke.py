@@ -41,7 +41,7 @@ from .run import (
     normalize_decision,
     terminal_stop_reason,
 )
-from .scenarios import Scenario, ScenarioContractError, load_scenario
+from .scenarios import Scenario, ScenarioContractError, load_scenario, scenario_fingerprint
 from .source_tools import SourceTools
 
 
@@ -1594,6 +1594,268 @@ class ScenarioContractTests(unittest.TestCase):
         self.assertEqual("smoke", first_args.preset)
         self.assertTrue(first_args.headless)
 
+    def write_gate_run(
+        self,
+        scenario: Scenario,
+        *,
+        suffix: str = "primary",
+        oracle_verdict: str | None = None,
+        event_type: str = "horizon_complete",
+        decision_arguments: dict[str, object] | None = None,
+        player_health: float = 50.0,
+    ) -> benchmark_module.RunResult:
+        output = TEST_TEMP_ROOT / "deterministic-gate" / suffix / scenario.id
+        output.mkdir(parents=True, exist_ok=True)
+        observation_id = f"{scenario.id}-observation"
+        event_id = f"{scenario.id}-event"
+        step = {
+            "decision": {
+                "action": "steer",
+                "arguments": decision_arguments or {"x": 1.0, "y": 0.0},
+            },
+            "observation": {
+                "observation_id": observation_id,
+                "scene": "Level 1",
+                "phase": "active_gameplay",
+                "player": {
+                    "present": True,
+                    "health": player_health,
+                    "max_health": 100.0,
+                    "health_ratio": player_health / 100.0,
+                    "level": 3,
+                    "exp": 4.0,
+                    "next_level_exp": 10.0,
+                    "exp_ratio": 0.4,
+                },
+                "progress": {"kills": 7, "level_time": 3.0},
+                "inventory": {"abilities": []},
+                "event_state": {"event_id": event_id, "type": event_type},
+            },
+        }
+        (output / "steps.jsonl").write_text(
+            json.dumps(step) + "\n",
+            encoding="utf-8",
+        )
+        (output / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "scenario_id": scenario.id,
+                    "seed": 9101,
+                    "scenario_fingerprint": scenario_fingerprint(scenario),
+                    "preset": scenario.preset,
+                    "mode": "qa",
+                    "policy": "heuristic",
+                    "fault_id": scenario.ground_truth.fault_id,
+                }
+            ),
+            encoding="utf-8",
+        )
+        expected_oracle = "fail" if scenario.ground_truth.fault_id else "pass"
+        (output / "verdict.json").write_text(
+            json.dumps(
+                {
+                    "execution_status": "completed",
+                    "coverage_status": "reached",
+                    "oracle_verdict": oracle_verdict or expected_oracle,
+                    "evidence_refs": [observation_id, event_id],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return benchmark_module.RunResult(scenario.id, 9101, output, 0)
+
+    def test_deterministic_gate_requires_six_faults_and_three_clean_controls(
+        self,
+    ) -> None:
+        scenario_ids = (
+            "easy-health-ratio",
+            "easy-relative-position",
+            "medium-upgrade-effect",
+            "medium-chest-transition",
+            "hard-experience-drift",
+            "hard-restart-currency",
+            "control-valid-observation",
+            "control-normal-transitions",
+            "control-long-progression",
+        )
+        scenarios = [load_scenario(scenario_id) for scenario_id in scenario_ids]
+        results = [self.write_gate_run(scenario) for scenario in scenarios]
+
+        summary = benchmark_module.verify_deterministic_gate(scenarios, results)
+
+        self.assertEqual(6, summary["faults_detected"])
+        self.assertEqual(3, summary["controls_passed"])
+        self.assertEqual(0, summary["control_false_positives"])
+
+    def test_deterministic_gate_rejects_unresolvable_evidence(self) -> None:
+        scenarios = [
+            load_scenario(scenario_id)
+            for scenario_id in benchmark_module.DETERMINISTIC_GATE_SCENARIO_IDS
+        ]
+        results = [self.write_gate_run(scenario) for scenario in scenarios]
+        result = results[0]
+        verdict_path = result.output_dir / "verdict.json"
+        verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+        verdict["evidence_refs"] = ["missing-observation"]
+        verdict_path.write_text(json.dumps(verdict), encoding="utf-8")
+
+        with self.assertRaisesRegex(ScenarioContractError, "unresolvable evidence"):
+            benchmark_module.verify_deterministic_gate(scenarios, results)
+
+    def test_deterministic_gate_rejects_a_partial_scenario_set(self) -> None:
+        scenario = load_scenario("easy-health-ratio")
+        result = self.write_gate_run(scenario)
+
+        with self.assertRaisesRegex(ScenarioContractError, "exact approved scenario set"):
+            benchmark_module.verify_deterministic_gate([scenario], [result])
+
+    def test_deterministic_gate_rejects_a_nonheuristic_artifact(self) -> None:
+        scenarios = [
+            load_scenario(scenario_id)
+            for scenario_id in benchmark_module.DETERMINISTIC_GATE_SCENARIO_IDS
+        ]
+        results = [self.write_gate_run(scenario) for scenario in scenarios]
+        manifest_path = results[0].output_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["policy"] = "llm"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertRaisesRegex(ScenarioContractError, "qa heuristic artifact"):
+            benchmark_module.verify_deterministic_gate(scenarios, results)
+
+    def test_deterministic_gate_cli_requires_qa_heuristic_and_one_seed(self) -> None:
+        scenarios = [
+            load_scenario(scenario_id)
+            for scenario_id in benchmark_module.DETERMINISTIC_GATE_SCENARIO_IDS
+        ]
+
+        benchmark_module.validate_deterministic_gate_request(
+            scenarios,
+            [9101],
+            mode="qa",
+            policy="heuristic",
+        )
+        invalid_requests = (
+            (scenarios, None, "qa", "heuristic"),
+            (scenarios, [9101, 9102], "qa", "heuristic"),
+            (scenarios, [9101], "player", "heuristic"),
+            (scenarios, [9101], "qa", "llm"),
+        )
+        for requested_scenarios, seeds, mode, policy in invalid_requests:
+            with self.subTest(seeds=seeds, mode=mode, policy=policy):
+                with self.assertRaises(ScenarioContractError):
+                    benchmark_module.validate_deterministic_gate_request(
+                        requested_scenarios,
+                        seeds,
+                        mode=mode,
+                        policy=policy,
+                    )
+
+        args = benchmark_module.parse_args(
+            [
+                "--game-exe",
+                "player.app",
+                "--output",
+                "artifacts",
+                "--deterministic-gate",
+            ]
+        )
+        self.assertTrue(args.deterministic_gate)
+
+    def test_deterministic_gate_cli_propagates_verifier_failure(self) -> None:
+        args = argparse.Namespace(
+            project_root=Path.cwd(),
+            scenario=[],
+            seed=[9101],
+            mode="qa",
+            policy="heuristic",
+            game_exe=Path("player.app"),
+            output=Path("artifacts"),
+            model="",
+            api_url=None,
+            headless=True,
+            quiet=True,
+            deterministic_gate=True,
+        )
+        scenarios = [
+            load_scenario(scenario_id)
+            for scenario_id in benchmark_module.DETERMINISTIC_GATE_SCENARIO_IDS
+        ]
+        with (
+            patch.object(benchmark_module, "parse_args", return_value=args),
+            patch.object(benchmark_module, "load_scenarios", return_value=scenarios),
+            patch.object(benchmark_module, "run_benchmark", return_value=[]) as run,
+            patch.object(
+                benchmark_module,
+                "verify_deterministic_gate",
+                side_effect=ScenarioContractError("gate failed"),
+            ) as verify,
+            patch("builtins.print"),
+            self.assertRaises(SystemExit) as exit_error,
+        ):
+            benchmark_module.main()
+
+        self.assertEqual(2, exit_error.exception.code)
+        run.assert_called_once()
+        verify.assert_called_once_with(scenarios, [])
+
+    def test_replay_verifier_ignores_run_ids_but_rejects_transition_drift(self) -> None:
+        scenario = load_scenario("easy-health-ratio")
+        first = self.write_gate_run(scenario, suffix="replay-a")
+        matching = self.write_gate_run(scenario, suffix="replay-b")
+
+        benchmark_module.verify_replay(first, matching)
+
+        divergent = self.write_gate_run(
+            scenario,
+            suffix="replay-c",
+            event_type="danger_spike",
+        )
+        with self.assertRaisesRegex(ScenarioContractError, "transition sequence"):
+            benchmark_module.verify_replay(first, divergent)
+
+    def test_replay_verifier_rejects_identity_and_state_drift(self) -> None:
+        scenario = load_scenario("easy-health-ratio")
+        first = self.write_gate_run(scenario, suffix="replay-state-a")
+        argument_drift = self.write_gate_run(
+            scenario,
+            suffix="replay-state-b",
+            decision_arguments={"x": -1.0, "y": 0.0},
+        )
+        with self.assertRaisesRegex(ScenarioContractError, "transition sequence"):
+            benchmark_module.verify_replay(first, argument_drift)
+
+        health_drift = self.write_gate_run(
+            scenario,
+            suffix="replay-state-c",
+            player_health=40.0,
+        )
+        with self.assertRaisesRegex(ScenarioContractError, "transition sequence"):
+            benchmark_module.verify_replay(first, health_drift)
+
+        failed = self.write_gate_run(scenario, suffix="replay-state-d")
+        failed = benchmark_module.RunResult(
+            failed.scenario_id,
+            failed.seed,
+            failed.output_dir,
+            1,
+        )
+        with self.assertRaisesRegex(ScenarioContractError, "non-zero"):
+            benchmark_module.verify_replay(first, failed)
+
+    def test_replay_verifier_requires_complete_manifest_configuration(self) -> None:
+        scenario = load_scenario("easy-health-ratio")
+        first = self.write_gate_run(scenario, suffix="replay-config-a")
+        second = self.write_gate_run(scenario, suffix="replay-config-b")
+        for result in (first, second):
+            manifest_path = result.output_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            del manifest["policy"]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertRaisesRegex(ScenarioContractError, "required configuration"):
+            benchmark_module.verify_replay(first, second)
+
 
 class EvaluationTests(unittest.TestCase):
     @staticmethod
@@ -1755,6 +2017,106 @@ class EvaluationTests(unittest.TestCase):
                 result = evaluate_oracle(load_scenario(scenario_id), transitions)
                 self.assertEqual("fail", result.verdict)
                 self.assertTrue(result.evidence_refs)
+
+    def test_experience_oracle_allows_the_upgrade_dialog_boundary(self) -> None:
+        transitions = [
+            self.transition(
+                "obs-upgrade-open",
+                player={
+                    "present": True,
+                    "health": 100.0,
+                    "max_health": 100.0,
+                    "health_ratio": 1.0,
+                    "level": 3,
+                    "exp": 5.0,
+                    "next_level_exp": 5.0,
+                    "exp_ratio": 1.0,
+                },
+                phase="upgrade_selection",
+            ),
+            self.transition(
+                "obs-upgrade-applied",
+                action="select_upgrade",
+                player={
+                    "present": True,
+                    "health": 100.0,
+                    "max_health": 100.0,
+                    "health_ratio": 1.0,
+                    "level": 3,
+                    "exp": 5.0,
+                    "next_level_exp": 20.0,
+                    "exp_ratio": 0.25,
+                },
+                phase="active_gameplay",
+            ),
+        ]
+
+        result = evaluate_oracle(
+            load_scenario("control-long-progression"),
+            transitions,
+        )
+
+        self.assertEqual("pass", result.verdict)
+
+    def test_health_oracle_allows_consistent_game_over_damage_overshoot(self) -> None:
+        transitions = [
+            self.transition(
+                "obs-game-over",
+                player={
+                    "present": True,
+                    "alive": False,
+                    "health": -1.0,
+                    "max_health": 100.0,
+                    "health_ratio": -0.01,
+                },
+                phase="game_over",
+            )
+        ]
+
+        result = evaluate_oracle(
+            load_scenario("control-valid-observation"),
+            transitions,
+        )
+
+        self.assertEqual("pass", result.verdict)
+
+    def test_health_oracle_rejects_consistent_out_of_range_active_health(self) -> None:
+        transitions = [
+            self.transition(
+                "obs-active-invalid-health",
+                player={
+                    "present": True,
+                    "alive": True,
+                    "health": -1.0,
+                    "max_health": 100.0,
+                    "health_ratio": -0.01,
+                },
+                phase="active_gameplay",
+            )
+        ]
+
+        result = evaluate_oracle(load_scenario("control-valid-observation"), transitions)
+
+        self.assertEqual("fail", result.verdict)
+
+    def test_experience_oracle_rejects_invalid_upgrade_dialog_values(self) -> None:
+        transitions = [
+            self.transition(
+                "obs-upgrade-invalid",
+                player={
+                    "present": True,
+                    "level": 3,
+                    "exp": 13.0,
+                    "next_level_exp": 20.0,
+                    "exp_ratio": 0.5,
+                },
+                phase="upgrade_selection",
+            )
+        ]
+
+        result = evaluate_oracle(load_scenario("hard-experience-drift"), transitions)
+
+        self.assertEqual("fail", result.verdict)
 
 
 if __name__ == "__main__":

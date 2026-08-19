@@ -183,9 +183,18 @@ def _health_ratio_consistency(transitions: list[Transition]) -> tuple[bool, list
         health = float(player.get("health", 0.0) or 0.0)
         ratio = float(player.get("health_ratio", math.nan))
         expected = health / maximum if maximum > 0 else 0.0
-        if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0 or not math.isclose(
+        formula_consistent = math.isfinite(ratio) and math.isclose(
             ratio, expected, rel_tol=1e-5, abs_tol=1e-5
-        ):
+        )
+        bounded = maximum > 0 and 0.0 <= health <= maximum and 0.0 <= ratio <= 1.0
+        game_over_overshoot = (
+            _observation(transition).get("phase") == "game_over"
+            and player.get("alive") is False
+            and maximum > 0
+            and health < 0.0
+            and ratio < 0.0
+        )
+        if not formula_consistent or not (bounded or game_over_overshoot):
             return False, _refs_for(transition), "reported health_ratio is inconsistent"
     evidence = _refs_for(relevant[-1]) if relevant else _fallback_refs(transitions)
     return True, evidence, "health values are internally consistent"
@@ -268,7 +277,8 @@ def _chest_state_transition(transitions: list[Transition]) -> tuple[bool, list[s
 def _experience_conservation(transitions: list[Transition]) -> tuple[bool, list[str], str]:
     relevant: list[Transition] = []
     for transition in transitions:
-        player = _observation(transition).get("player") or {}
+        observation = _observation(transition)
+        player = observation.get("player") or {}
         if not player.get("present"):
             continue
         relevant.append(transition)
@@ -276,9 +286,13 @@ def _experience_conservation(transitions: list[Transition]) -> tuple[bool, list[
         required = float(player.get("next_level_exp", 0.0) or 0.0)
         ratio = float(player.get("exp_ratio", math.nan))
         expected = experience / required if required > 0 else 0.0
-        if experience < 0 or required <= 0 or experience >= required or not math.isclose(
-            ratio, expected, rel_tol=1e-5, abs_tol=1e-5
-        ):
+        finite = all(math.isfinite(value) for value in (experience, required, ratio))
+        ratio_consistent = math.isclose(ratio, expected, rel_tol=1e-5, abs_tol=1e-5)
+        if observation.get("phase") == "upgrade_selection":
+            valid_range = experience == required and ratio == 1.0
+        else:
+            valid_range = 0.0 <= experience < required
+        if not finite or required <= 0 or not valid_range or not ratio_consistent:
             return False, _refs_for(transition), "experience progression invariant is violated"
     evidence = _refs_for(relevant[-1]) if relevant else _fallback_refs(transitions)
     return True, evidence, "experience progression invariants hold"

@@ -1,10 +1,21 @@
 using System;
+using UnityEngine;
 
 namespace Vampire.QA
 {
     public static class QABridgeModels
     {
         public const string ProtocolVersion = "1.4";
+    }
+
+    public static class QABridgeSimulationClock
+    {
+        private const int GameplayStepsPerSecond = 60;
+
+        public static void Configure(float timeScale)
+        {
+            Time.captureFramerate = Mathf.Max(1, Mathf.RoundToInt(GameplayStepsPerSecond * timeScale));
+        }
     }
 
     public readonly struct QABridgeLaunchOptions

@@ -97,6 +97,7 @@ namespace Vampire.QA
                 return;
             }
 
+            QABridgeSimulationClock.Configure(runTimeScale);
             Directory.CreateDirectory(bridgeDirectory);
             commandPath = Path.Combine(bridgeDirectory, "command.json");
             responseDirectory = Path.Combine(bridgeDirectory, "responses");

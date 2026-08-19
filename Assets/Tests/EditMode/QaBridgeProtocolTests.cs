@@ -1,4 +1,5 @@
 using NUnit.Framework;
+using UnityEngine;
 using Vampire.QA;
 
 namespace Vampire.Tests.EditMode
@@ -38,6 +39,23 @@ namespace Vampire.Tests.EditMode
             Assert.That(options.IsRequested, Is.False);
             Assert.That(options.RunId, Is.Not.Empty);
             Assert.That(options.ScenarioId, Is.Empty);
+        }
+
+        [Test]
+        public void Simulation_clock_keeps_a_sixty_hertz_gameplay_step_at_accelerated_time_scale()
+        {
+            int previousCaptureFramerate = Time.captureFramerate;
+            try
+            {
+                QABridgeSimulationClock.Configure(4f);
+
+                Assert.That(Time.captureFramerate, Is.EqualTo(240));
+                Assert.That(Time.captureDeltaTime * 4f, Is.EqualTo(1f / 60f).Within(0.0001f));
+            }
+            finally
+            {
+                Time.captureFramerate = previousCaptureFramerate;
+            }
         }
     }
 }
