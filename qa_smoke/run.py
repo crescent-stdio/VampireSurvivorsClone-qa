@@ -85,6 +85,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--api-url", default=os.environ.get("QA_API_URL"))
     parser.add_argument("--scenario")
     parser.add_argument(
+        "--bridge-scenario-id",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--fault",
         default="",
         help="Explicit QA fault to inject; clean runs leave this empty.",
@@ -145,6 +150,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def resolve_run_arguments(args: argparse.Namespace) -> argparse.Namespace:
     args.scenario_definition = None
     args.preset = ""
+    args.bridge_scenario_id = args.bridge_scenario_id or args.scenario or ""
     # hybrid is llm planning plus a per-frame bridge assist, so it shares every
     # llm-only code path. --policy is not scenario-owned, so this holds for both branches.
     args.uses_llm_planner = args.policy in ("llm", "hybrid")
@@ -534,7 +540,11 @@ def run_session(args: argparse.Namespace) -> int:
     output_dir = args.output.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     run_id = uuid.uuid4().hex
-    scenario_id = str(getattr(args, "scenario", "") or "")
+    scenario_id = str(
+        getattr(args, "bridge_scenario_id", None)
+        or getattr(args, "scenario", "")
+        or ""
+    )
     try:
         charter = charter_from_args(args)
     except Exception as error:

@@ -83,6 +83,7 @@ def _run_v4_suite(args: argparse.Namespace, root: Path, *, injected: bool) -> Pa
             "--mode", "qa",
             "--policy", "heuristic",
             "--scenario", legacy.id,
+            "--bridge-scenario-id", scenario.id,
             "--seed", str(selected_seed),
         ]
         fault_id = str((ground_truth.get(scenario.id) or {}).get("fault_id") or "") if injected else ""

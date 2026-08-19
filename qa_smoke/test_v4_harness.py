@@ -264,6 +264,17 @@ class VerdictAndDiffTests(unittest.TestCase):
         self.assertEqual("", clean.fault)
         self.assertEqual("health_ratio_out_of_range", injected.fault)
 
+    def test_bridge_scenario_id_can_be_overridden_for_v4_fault_scope(self) -> None:
+        args = run_module.parse_args(
+            [
+                "--game-exe", "player.app", "--output", "artifacts",
+                "--scenario", "easy-health-ratio",
+                "--bridge-scenario-id", "easy-hp-on-hit",
+            ]
+        )
+
+        self.assertEqual("easy-hp-on-hit", args.bridge_scenario_id)
+
     def test_cli_exposes_run_and_baseline_commands(self) -> None:
         run_args = parse_cli(["run", "--build", "player.app", "--suite", "v4-core"])
         baseline_args = parse_cli(["baseline", "set", "artifacts/run"])
