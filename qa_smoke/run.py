@@ -12,7 +12,8 @@ from typing import Any, Sequence
 
 from .adapters import VampireSurvivorsAdapter
 from .charter import DEFAULT_OBJECTIVE, TestCharter
-from .evaluation import scenario_verdict_axes
+from .detection import DetectionResult, score_agent_detection
+from .evaluation import fault_evidence_refs, scenario_verdict_axes
 from .hypotheses import HypothesisTracker
 from .planners import (
     HeuristicPlanner,
@@ -527,6 +528,9 @@ def build_session_verdict(
     recorder: RunRecorder,
     fatal_error: str | None,
     last_observation: dict[str, Any],
+    *,
+    llm_assessment: dict[str, Any] | None = None,
+    hypotheses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if fatal_error is None:
         execution_status = "completed"
@@ -545,20 +549,37 @@ def build_session_verdict(
     # proven there is proven. scenario_verdict_axes downgrades a partial pass;
     # it returns None when the trace holds nothing judgeable, in which case the
     # defaults above stand and execution_status is left alone.
+    trace_completeness = "complete" if execution_status == "completed" else "partial"
+    detection = DetectionResult(
+        status="not_evaluated", reason="no scenario ground truth for this run"
+    )
     if scenario is not None:
         axes = scenario_verdict_axes(scenario, recorder.steps, execution_status)
         if axes is not None:
             coverage_status = axes.coverage_status
             oracle_verdict = axes.oracle_verdict
             evidence_refs = axes.evidence_refs
+        # Identity comes from the recorder, not args: what was actually injected
+        # (recorder.fault_id) rather than what the scenario was designed around.
+        detection = score_agent_detection(
+            fault_id=recorder.fault_id,
+            policy=recorder.policy,
+            trace_completeness=trace_completeness,
+            oracle_verdict=oracle_verdict,
+            transitions=recorder.steps,
+            fault_refs=fault_evidence_refs(scenario, recorder.steps),
+            hypotheses=hypotheses,
+            llm_assessment=llm_assessment,
+        )
+    recorder.detection = detection
     return build_run_verdict(
         execution_status=execution_status,
         coverage_status=coverage_status,
         oracle_verdict=oracle_verdict,
-        agent_detection="not_evaluated",
+        agent_detection=detection.status,
         evidence_refs=evidence_refs,
         anomalies=recorder.anomalies,
-        trace_completeness="complete" if execution_status == "completed" else "partial",
+        trace_completeness=trace_completeness,
     )
 
 
@@ -999,7 +1020,16 @@ def run_session(args: argparse.Namespace) -> int:
         except Exception as error:
             recorder.anomalies.append({"step": len(recorder.steps), "kind": "llm_report_failed", "severity": "medium", "evidence": str(error)})
     try:
-        verdict = build_session_verdict(args, recorder, fatal_error, last_observation)
+        verdict = build_session_verdict(
+            args,
+            recorder,
+            fatal_error,
+            last_observation,
+            llm_assessment=llm_assessment,
+            # snapshot(), not confirmed(): a later `matched` on the same candidate_id
+            # demotes a candidate to rejected, which would erase a real find.
+            hypotheses=hypothesis_tracker.snapshot(),
+        )
     except Exception as error:
         fatal_error = fatal_error or f"EvaluationContractError: {error}"
         verdict = build_run_verdict(

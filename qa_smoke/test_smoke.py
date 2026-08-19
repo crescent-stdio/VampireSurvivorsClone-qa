@@ -2461,6 +2461,89 @@ def claim_step(step: int, run_id: str, text: str, refs: list[str]) -> dict[str, 
 FINDING = "health_ratio reads 1.25 which is inconsistent with health 98 of max_health 100"
 
 
+class AgentDetectionVerdictTests(unittest.TestCase):
+    """The scored axis has to reach verdict.json and its own artifact."""
+
+    def recorder(self, name: str, rows: list[dict[str, object]], fault_id: str | None) -> RunRecorder:
+        recorder = RunRecorder(
+            TEST_TEMP_ROOT / name, "qa", "llm", 9102, model="gpt-4o-mini", fault_id=fault_id
+        )
+        recorder.steps = rows
+        return recorder
+
+    def scenario_args(self) -> argparse.Namespace:
+        return argparse.Namespace(scenario_definition=load_scenario("easy-health-ratio"))
+
+    def test_a_silent_agent_on_a_fault_run_is_scored_a_miss(self) -> None:
+        rows = trace("run-fault", ratio_is_faulty=True)
+
+        verdict = run_module.build_session_verdict(
+            self.scenario_args(),
+            self.recorder("detect-miss", rows, "health_ratio_out_of_range"),
+            None,
+            {},
+        )
+
+        self.assertEqual("fail", verdict["oracle_verdict"])
+        self.assertEqual("miss", verdict["agent_detection"])
+
+    def test_an_agent_that_names_the_defect_is_scored_a_match(self) -> None:
+        rows = trace("run-fault2", ratio_is_faulty=True)
+        rows[2]["decision"] = {
+            "qa_observation": FINDING,
+            "reflection": {"status": "unexpected", "summary": "", "candidate_id": "c-1",
+                           "evidence_refs": ["run-fault2-obs-00000002"],
+                           "reproduction_attempted": False},
+        }
+
+        verdict = run_module.build_session_verdict(
+            self.scenario_args(),
+            self.recorder("detect-match", rows, "health_ratio_out_of_range"),
+            None,
+            {},
+        )
+
+        self.assertEqual("match", verdict["agent_detection"])
+
+    def test_the_detection_artifact_records_its_own_authority(self) -> None:
+        recorder = self.recorder(
+            "detect-artifact", trace("run-fault3", ratio_is_faulty=True), "health_ratio_out_of_range"
+        )
+        verdict = run_module.build_session_verdict(self.scenario_args(), recorder, None, {})
+        recorder.write_channel_artifacts(verdict, {})
+
+        payload = json.loads(
+            (recorder.output_dir / "agent-detection.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("qa-agent-detection/v1", payload["schema_version"])
+        self.assertEqual("miss", payload["status"])
+        self.assertIn("sole authority", payload["authority_note"])
+        self.assertEqual(
+            "", (recorder.output_dir / "annotations.jsonl").read_text(encoding="utf-8")
+        )
+
+    def test_the_detection_axis_never_moves_the_final_verdict(self) -> None:
+        """The game's verdict must not depend on how well the agent narrated it."""
+        rows = trace("run-fault4", ratio_is_faulty=True)
+        base = run_module.build_session_verdict(
+            self.scenario_args(), self.recorder("detect-fv-a", rows, "health_ratio_out_of_range"), None, {}
+        )
+        found = list(rows)
+        found[2] = dict(found[2])
+        found[2]["decision"] = {
+            "qa_observation": FINDING,
+            "reflection": {"status": "unexpected", "summary": "", "candidate_id": "c-1",
+                           "evidence_refs": ["run-fault4-obs-00000002"],
+                           "reproduction_attempted": False},
+        }
+        detected = run_module.build_session_verdict(
+            self.scenario_args(), self.recorder("detect-fv-b", found, "health_ratio_out_of_range"), None, {}
+        )
+
+        self.assertNotEqual(base["agent_detection"], detected["agent_detection"])
+        self.assertEqual(base["final_verdict"], detected["final_verdict"])
+
+
 class AgentDetectionScoringTests(unittest.TestCase):
     def score(self, **overrides: object) -> object:
         kwargs: dict[str, object] = {

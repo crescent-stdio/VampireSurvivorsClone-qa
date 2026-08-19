@@ -20,6 +20,8 @@ ORACLE_VERDICTS = {"pass", "fail", "not_evaluated"}
 AGENT_DETECTIONS = {"match", "miss", "false_positive", "not_evaluated"}
 # "partial" marks a verdict judged from the prefix of an aborted run.
 TRACE_COMPLETENESS = {"complete", "partial"}
+from .detection import AUTHORITY_NOTE as DETECTION_AUTHORITY_NOTE
+
 ALWAYS_ON_FAILURE_KINDS = {
     "crash",
     "timeout",
@@ -223,6 +225,7 @@ class RunRecorder:
     assist_frames_total_seen: int = 0
     assist_deflection_total_seen: float = 0.0
     verdict_axes: dict[str, Any] | None = None
+    detection: Any = None
 
     def __post_init__(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -313,7 +316,35 @@ class RunRecorder:
                 json.dumps(payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+        if self.detection is not None:
+            self._write_detection()
+        # Left empty on purpose: annotations.jsonl is filled by human reviewers.
         (self.output_dir / "annotations.jsonl").touch(exist_ok=True)
+
+    def _write_detection(self) -> None:
+        """Record the automatic agent-detection score beside the verdict.
+
+        Deliberately not named *request*.jsonl: the deterministic gate globs those
+        for a fault-id leak scan, and this file names the injected fault the same
+        way manifest.json already does.
+        """
+        payload = {
+            "schema_version": "qa-agent-detection/v1",
+            "run_id": self.run_id,
+            "scenario_id": self.scenario_id,
+            "fault_id": self.fault_id,
+            "policy": self.policy,
+            "prompt_version": self.effective_prompt_version(),
+            **(
+                self.detection.model_dump()
+                if hasattr(self.detection, "model_dump")
+                else dict(self.detection)
+            ),
+            "authority_note": DETECTION_AUTHORITY_NOTE,
+        }
+        (self.output_dir / "agent-detection.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
 
     def api_usage_totals(self) -> dict[str, Any]:
         keys = (
