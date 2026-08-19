@@ -676,7 +676,10 @@ class LLMPlannerTests(unittest.TestCase):
             {"available_actions": ["observe"]}, 2, [previous], 0
         )
 
-        self.assertEqual(previous["observed_delta"], payload["observed_delta"])
+        self.assertEqual(
+            previous["observed_delta"]["changes"],
+            payload["prior_outcome"]["observed_delta"]["changes"],
+        )
         self.assertTrue(payload["action_contract"]["has_previous_transition"])
 
     def test_observed_delta_reports_only_changed_tracked_values(self) -> None:

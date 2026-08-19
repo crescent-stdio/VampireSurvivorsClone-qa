@@ -62,6 +62,115 @@ def compute_observed_delta(
     }
 
 
+def compact_inventory(inventory: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep only inventory counts and owned ability levels for planning context."""
+    source = inventory if isinstance(inventory, dict) else {}
+    slots = []
+    for item in source.get("slots") or []:
+        if not isinstance(item, dict):
+            continue
+        slots.append(
+            {
+                "index": item.get("index"),
+                "type": item.get("type"),
+                "count": item.get("count", 0),
+                "pending_count": item.get("pending_count", 0),
+            }
+        )
+    abilities = []
+    for item in source.get("abilities") or []:
+        if not isinstance(item, dict) or not item.get("owned"):
+            continue
+        abilities.append(
+            {
+                "name": item.get("name") or item.get("type") or "",
+                "level": item.get("level", 0),
+            }
+        )
+    return {"slots": slots, "abilities": abilities}
+
+
+def compact_observed_delta(
+    observed_delta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compact only the inventory branch while preserving deterministic delta IDs."""
+    source = observed_delta if isinstance(observed_delta, dict) else {}
+    changes = []
+    for change in source.get("changes") or []:
+        if not isinstance(change, dict):
+            continue
+        path = str(change.get("path") or "")
+        compacted = {"path": path}
+        if path == "inventory":
+            compacted["before"] = compact_inventory(change.get("before"))
+            compacted["after"] = compact_inventory(change.get("after"))
+        else:
+            if "before" in change:
+                compacted["before"] = change["before"]
+            if "after" in change:
+                compacted["after"] = change["after"]
+        changes.append(compacted)
+    return {
+        "before_observation_id": str(source.get("before_observation_id") or ""),
+        "after_observation_id": str(source.get("after_observation_id") or ""),
+        "changes": changes,
+    }
+
+
+def compact_planning_transition(
+    transition: dict[str, Any],
+    *,
+    include_latest_details: bool,
+) -> dict[str, Any]:
+    """Select the transition fields needed for current or committed planning context."""
+    source = transition if isinstance(transition, dict) else {}
+    decision = source.get("decision") or source.get("game_action") or {}
+    decision = decision if isinstance(decision, dict) else {}
+    arguments = decision.get("arguments") or {}
+    arguments = arguments if isinstance(arguments, dict) else {}
+    action = {
+        "tool": str(decision.get("tool") or "game"),
+        "action": str(decision.get("action") or ""),
+    }
+    for key in ("intent", "target_id"):
+        if key in arguments:
+            action[key] = arguments[key]
+    if include_latest_details:
+        for key in ("x", "y", "duration", "index"):
+            if key in arguments:
+                action[key] = arguments[key]
+
+    observed_delta = compact_observed_delta(source.get("observed_delta"))
+    observation = source.get("observation") or {}
+    observation = observation if isinstance(observation, dict) else {}
+    event_state = source.get("event_state") or observation.get("event_state") or {}
+    event_state = event_state if isinstance(event_state, dict) else {}
+    observation_id = str(
+        source.get("observation_id")
+        or observation.get("observation_id")
+        or observed_delta.get("after_observation_id")
+        or ""
+    )
+    event_id = str(event_state.get("event_id") or "")
+    inventory = source.get("inventory") or observation.get("inventory") or {}
+    compacted = {
+        "step": source.get("step"),
+        "observation_id": observation_id,
+        "action": action,
+        "observed_delta": observed_delta,
+        "inventory": compact_inventory(inventory),
+        "navigation": dict(source.get("navigation") or {}),
+    }
+    if event_id:
+        compacted["event_id"] = event_id
+    if include_latest_details:
+        compacted["expected_effect"] = str(decision.get("expected_effect") or "")
+        compacted["reflection"] = dict(decision.get("reflection") or {})
+        if action["tool"] in ("source_search", "source_read") and "result" in source:
+            compacted["source_tool_result"] = source["result"]
+    return compacted
+
+
 def observation_phase(observation: dict[str, Any]) -> str:
     """Return an explicit gameplay phase, including compatibility with protocol 1.2."""
     phase = str(observation.get("phase") or "").strip().lower()
@@ -528,7 +637,7 @@ def compact_observation(observation: dict[str, Any], max_threats: int = 8, max_c
         "world": compact_world,
         "progress": observation.get("progress") or {},
         "menu": observation.get("menu") or {},
-        "inventory": observation.get("inventory") or {},
+        "inventory": compact_inventory(observation.get("inventory")),
         "controller": observation.get("controller") or {},
         "event_state": observation.get("event_state") or {},
         "available_actions": observation.get("available_actions") or [],
@@ -696,7 +805,7 @@ During active gameplay use direct_steer. You alone must decide whether to contin
 Unity does NOT automatically avoid enemies, choose a chest, attract toward a chest, enforce the requested heading, or alter your direction. It only holds your chosen vector every frame and detects events. Use world.threat_entities, danger_score, escape_vector, and chest relative vectors to choose x/y yourself.
 When intent=collect_chest, aim x/y toward that target's relative_x/relative_y (normally the normalized target vector); do not claim collection while moving away from it. When danger is high, an evade vector should materially align with escape_vector. Choose full 2D movement, not only a cardinal axis.
 The horizon can end early on a chest entering close-control range, chest collection, low health, danger spikes, stuck detection, level-up, death, or another event. Re-plan from event_state and controller state.
-Act as a QA engineer while you play. Before every state-changing game action, state a concrete expected_effect. On the next planning step, compare observed_delta with that expectation in reflection. Use action_contract.has_previous_transition, not the numeric step, to decide reflection.status. When it is false, use not_applicable with empty evidence_refs and candidate_id. When it is true, never use not_applicable. Copy only exact observation_id or event_id strings listed in reflection_contract.allowed_evidence_refs. uncertain may describe an unresolved risk and may leave candidate_id empty. unexpected always requires a stable non-empty candidate_id.
+Act as a QA engineer while you play. Before every state-changing game action, state a concrete expected_effect. On the next planning step, compare the compact prior outcome with that expectation in reflection. Use action_contract.has_previous_transition, not the numeric step, to decide reflection.status. When it is false, use not_applicable with empty evidence_refs and candidate_id. When it is true, never use not_applicable. Return evidence_refs as an empty array; the runner deterministically inserts the latest allowed transition IDs before validation. uncertain may describe an unresolved risk and may leave candidate_id empty. unexpected always requires a stable non-empty candidate_id.
 Keep navigation reasoning in hypothesis and QA findings in qa_observation. An unexpected result starts a hypothesis; mark reproduction_attempted only when you deliberately repeated a relevant setup/action. A candidate becomes confirmed only after its own reproduction path, never from hidden evaluator data.
 For direct_steer and wait, normally request a duration no greater than {self.plan_horizon_seconds:.3f} simulation seconds.
 Return one JSON object only with keys: plan, hypothesis, qa_observation, tool, action, arguments, expected_effect, reflection.
