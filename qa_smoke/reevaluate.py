@@ -19,9 +19,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .evaluation import scenario_verdict_axes
+from .detection import AUTHORITY_NOTE, score_agent_detection
+from .evaluation import fault_evidence_refs, scenario_verdict_axes
+from .hypotheses import HypothesisTracker
 from .reporting import final_verdict
-from .scenarios import ScenarioContractError, load_scenario
+from .scenarios import ScenarioContractError, load_scenario, load_v4_scenarios
 
 
 class ReevaluationSkipped(Exception):
@@ -59,16 +61,56 @@ def transitions_for_run(
     return [row for row in transitions if str(row.get("run_id") or "") == run_id]
 
 
+def resolve_scenario(scenario_id: str):
+    """Resolve a v1 id directly, or a v4 id through its legacy scenario.
+
+    v4 runs record the v4 id in the manifest while driving the legacy scenario, so
+    looking only at the v1 registry skipped every v4 artifact.
+    """
+    try:
+        return load_scenario(scenario_id)
+    except (ScenarioContractError, OSError) as error:
+        try:
+            v4 = {item.id: item for item in load_v4_scenarios()}[scenario_id]
+            return load_scenario(v4.legacy_scenario_id)
+        except (KeyError, ScenarioContractError, OSError, AttributeError):
+            raise ReevaluationSkipped(f"unknown scenario {scenario_id!r}: {error}") from error
+
+
+def replay_hypotheses(transitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rebuild hypothesis states by replaying the tracker over the trace.
+
+    The per-row hypothesis_state snapshots are point-in-time and miss later
+    demotions, so replaying the same class over the same rows in the same order is
+    what keeps the offline score identical to the live one.
+    """
+    tracker = HypothesisTracker()
+    for transition in transitions:
+        decision = transition.get("decision")
+        if isinstance(decision, dict):
+            try:
+                tracker.observe_decision(decision)
+            except (ValueError, TypeError):
+                continue
+    return tracker.snapshot()
+
+
+def read_assessment(run_dir: Path) -> dict[str, Any] | None:
+    try:
+        critic = json.loads((run_dir / "critic.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    assessment = critic.get("llm_assessment")
+    return assessment if isinstance(assessment, dict) else None
+
+
 def reevaluate_run(run_dir: Path) -> dict[str, Any]:
     """Return the rewritten verdict for one run directory."""
     manifest, verdict, transitions = load_run(run_dir)
     scenario_id = str(manifest.get("scenario_id") or "")
     if not scenario_id:
         raise ReevaluationSkipped("run has no scenario_id; there is no oracle to apply")
-    try:
-        scenario = load_scenario(scenario_id)
-    except (ScenarioContractError, OSError) as error:
-        raise ReevaluationSkipped(f"unknown scenario {scenario_id!r}: {error}") from error
+    scenario = resolve_scenario(scenario_id)
 
     # execution_status records why the run ended and is never revised here.
     execution_status = str(verdict.get("execution_status") or "infrastructure_error")
@@ -91,11 +133,38 @@ def reevaluate_run(run_dir: Path) -> dict[str, Any]:
         axes.oracle_verdict,
         [],
     )
+    detection = score_agent_detection(
+        fault_id=manifest.get("fault_id"),
+        policy=str(manifest.get("policy") or ""),
+        trace_completeness=updated["trace_completeness"],
+        oracle_verdict=axes.oracle_verdict,
+        transitions=transitions,
+        fault_refs=fault_evidence_refs(scenario, transitions),
+        hypotheses=replay_hypotheses(transitions),
+        llm_assessment=read_assessment(run_dir),
+    )
+    updated["agent_detection"] = detection.status
+    updated["_detection_payload"] = {
+        "schema_version": "qa-agent-detection/v1",
+        "run_id": manifest.get("run_id"),
+        "scenario_id": manifest.get("scenario_id"),
+        "fault_id": manifest.get("fault_id"),
+        "policy": manifest.get("policy"),
+        "prompt_version": manifest.get("prompt_version"),
+        **detection.model_dump(),
+        "authority_note": AUTHORITY_NOTE,
+    }
     return updated
 
 
 def describe_change(before: dict[str, Any], after: dict[str, Any]) -> str:
-    fields = ("coverage_status", "oracle_verdict", "final_verdict", "trace_completeness")
+    fields = (
+        "coverage_status",
+        "oracle_verdict",
+        "agent_detection",
+        "final_verdict",
+        "trace_completeness",
+    )
     changes = [
         f"{name}: {before.get(name, 'absent')} -> {after.get(name)}"
         for name in fields
@@ -122,6 +191,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ReevaluationSkipped as error:
             print(f"[skip] {run_dir}: {error}", flush=True)
             continue
+        # Separate the sidecar before comparing, so a re-run of an already-scored
+        # directory compares verdict to verdict and reports no change.
+        detection_payload = after.pop("_detection_payload", None)
         summary = describe_change(before, after)
         if args.dry_run:
             print(f"[dry-run] {run_dir}: {summary}", flush=True)
@@ -132,6 +204,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         (run_dir / "verdict.json").write_text(
             json.dumps(after, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
+        if detection_payload is not None:
+            (run_dir / "agent-detection.json").write_text(
+                json.dumps(detection_payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
         rewritten += 1
         print(f"[rewrote] {run_dir}: {summary}", flush=True)
     return 0 if rewritten or args.dry_run else 0

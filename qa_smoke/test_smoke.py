@@ -3329,6 +3329,52 @@ class ReevaluateTests(unittest.TestCase):
 
         self.assertEqual(first, (run_dir / "verdict.json").read_text(encoding="utf-8"))
 
+    def test_stored_runs_are_scored_for_agent_detection(self) -> None:
+        run_dir = self.write_run("reeval-detect", execution_status="completed")
+        (run_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "run-a",
+                    "scenario_id": "easy-health-ratio",
+                    "policy": "llm",
+                    "fault_id": "health_ratio_out_of_range",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        updated = reevaluate_module.reevaluate_run(run_dir)
+
+        self.assertEqual("miss", updated["agent_detection"])
+        self.assertIn("_detection_payload", updated)
+
+    def test_a_v4_scenario_id_resolves_through_its_legacy_scenario(self) -> None:
+        scenario = reevaluate_module.resolve_scenario("easy-hp-on-hit")
+
+        self.assertIsNotNone(scenario)
+
+    def test_scoring_uses_only_this_runs_rows(self) -> None:
+        """A fault session concatenated into a control run must not score it."""
+        run_dir = self.write_run(
+            "reeval-detect-mixed",
+            run_id="run-clean",
+            execution_status="completed",
+            rows=trace("run-clean", ratio_is_faulty=False),
+        )
+        (run_dir / "manifest.json").write_text(
+            json.dumps(
+                {"run_id": "run-clean", "scenario_id": "easy-health-ratio", "policy": "llm", "fault_id": None}
+            ),
+            encoding="utf-8",
+        )
+        with (run_dir / "steps.jsonl").open("a", encoding="utf-8") as handle:
+            for row in trace("run-faulty", ratio_is_faulty=True):
+                handle.write(json.dumps({**row, "run_id": "run-faulty"}) + "\n")
+
+        updated = reevaluate_module.reevaluate_run(run_dir)
+
+        self.assertNotEqual("false_positive", updated["agent_detection"])
+
     def test_dry_run_writes_nothing(self) -> None:
         run_dir = self.write_run("reeval-dry")
         before = (run_dir / "verdict.json").read_text(encoding="utf-8")
