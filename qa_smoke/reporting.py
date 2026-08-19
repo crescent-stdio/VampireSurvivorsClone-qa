@@ -165,6 +165,13 @@ class RunRecorder:
     repair_contract_rejections: int = 0
     navigation_evaluations: list[dict[str, Any]] = field(default_factory=list)
     continuous_control_horizons: int = 0
+    assist_horizons: int = 0
+    assist_frames: int = 0
+    assist_control_frames: int = 0
+    assist_deflection_sum: float = 0.0
+    assist_max_deflection: float = 0.0
+    assist_frames_total_seen: int = 0
+    assist_deflection_total_seen: float = 0.0
     verdict_axes: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
@@ -244,7 +251,7 @@ class RunRecorder:
             "mode": self.mode,
             "policy": self.policy,
             "model": self.model,
-            "prompt_version": self.prompt_version,
+            "prompt_version": self.effective_prompt_version(),
             "fault_id": self.fault_id,
         }
         for name, payload in (
@@ -359,6 +366,7 @@ class RunRecorder:
             intent = str((decision.get("arguments") or {}).get("intent") or "unspecified")
             self.intent_counts[intent] = self.intent_counts.get(intent, 0) + 1
             self._evaluate_navigation(decision, observation)
+            self._accumulate_assist(observation)
         event_type = str(event_state.get("type") or "")
         if event_type:
             self.event_counts[event_type] = self.event_counts.get(event_type, 0) + 1
@@ -373,6 +381,60 @@ class RunRecorder:
             except (TypeError, ValueError):
                 pass
         self.previous_level_time = level_time
+
+    def effective_prompt_version(self) -> str:
+        """hybrid branches the system prompt, so the manifest must not claim v4."""
+        return f"{self.prompt_version}-hybrid" if self.policy == "hybrid" else self.prompt_version
+
+    @property
+    def uses_llm_planner(self) -> bool:
+        """hybrid is llm planning plus a bridge assist, so it shares the llm checks."""
+        return self.policy in ("llm", "hybrid")
+
+    def _accumulate_assist(self, observation: dict[str, Any]) -> None:
+        """Fold one horizon's bridge-assist telemetry into the run totals.
+
+        Frame counts come from the run-cumulative controller totals rather than the
+        per-horizon fields: the observation is written before a planning hold runs,
+        so hold frames are only visible as a delta on the next observation.
+        """
+        controller = observation.get("controller") or {}
+        if not controller.get("assist_enabled"):
+            return
+        self.assist_horizons += 1
+        try:
+            frames_total = int(controller.get("assist_frames_total") or 0)
+            deflection_total = float(controller.get("assist_deflection_degrees_total") or 0.0)
+            self.assist_control_frames += int(controller.get("control_frames") or 0)
+            self.assist_max_deflection = max(
+                self.assist_max_deflection,
+                float(controller.get("assist_max_deflection_degrees") or 0.0),
+            )
+        except (TypeError, ValueError):
+            return
+        self.assist_frames += max(0, frames_total - self.assist_frames_total_seen)
+        self.assist_deflection_sum += max(0.0, deflection_total - self.assist_deflection_total_seen)
+        self.assist_frames_total_seen = max(self.assist_frames_total_seen, frames_total)
+        self.assist_deflection_total_seen = max(self.assist_deflection_total_seen, deflection_total)
+
+    def assist_metrics(self) -> dict[str, Any]:
+        return {
+            "enabled": self.assist_horizons > 0,
+            "horizons": self.assist_horizons,
+            "assist_frames": self.assist_frames,
+            "control_frames": self.assist_control_frames,
+            "assist_frame_ratio": (
+                round(self.assist_frames / self.assist_control_frames, 4)
+                if self.assist_control_frames
+                else 0.0
+            ),
+            "mean_deflection_degrees": (
+                round(self.assist_deflection_sum / self.assist_frames, 3)
+                if self.assist_frames
+                else 0.0
+            ),
+            "max_deflection_degrees": round(self.assist_max_deflection, 3),
+        }
 
     def _evaluate_navigation(self, decision: dict[str, Any], observation: dict[str, Any]) -> None:
         arguments = decision.get("arguments") or {}
@@ -499,8 +561,8 @@ class RunRecorder:
             self._check("death_detected", self.death_seen, f"death_seen={self.death_seen}", optional=not self.death_seen),
             self._check("restart_after_death", self.restart_seen, f"restart_seen={self.restart_seen}", optional=not self.death_seen),
             self._check(
-                "llm_direct_control" if self.policy == "llm" else "baseline_steering",
-                self.direct_control_horizons > 0 if self.policy == "llm" else self.steering_horizons > 0,
+                "llm_direct_control" if self.uses_llm_planner else "baseline_steering",
+                self.direct_control_horizons > 0 if self.uses_llm_planner else self.steering_horizons > 0,
                 f"direct_control_horizons={self.direct_control_horizons}, total_steering_horizons={self.steering_horizons}",
             ),
             self._check(
@@ -536,7 +598,7 @@ class RunRecorder:
             ),
             self._check("artifacts_written", True, "steps.jsonl, report.json, and report.md"),
         ]
-        if self.policy == "llm":
+        if self.uses_llm_planner:
             llm_anomalies = [
                 anomaly for anomaly in self.anomalies
                 if str(anomaly.get("kind") or "").startswith("llm_")
@@ -582,6 +644,7 @@ class RunRecorder:
                 "event_counts": self.event_counts,
                 "api_usage": self.api_usage_totals(),
                 "chest_navigation": chest_navigation,
+                "bridge_assist": self.assist_metrics(),
             },
             "smoke_checks": checks,
             "rule_based_anomalies": self.anomalies,
@@ -700,6 +763,7 @@ class RunRecorder:
             f"- Max level / kills: `{report['metrics']['max_level']}` / `{report['metrics']['max_kills']}`",
             f"- Steering horizons / chest collections: `{report['metrics']['steering_horizons']}` / `{report['metrics']['chest_collections']}`",
             f"- Direct LLM control horizons: `{report['metrics']['direct_control_horizons']}`",
+            f"- Bridge survival assist: `{json.dumps(report['metrics'].get('bridge_assist') or {}, ensure_ascii=False)}`",
             f"- Horizons that continued during API planning: `{report['metrics'].get('continuous_control_horizons', 0)}`",
             f"- Planner intents: `{json.dumps(report['metrics'].get('planner_intent_counts') or {}, ensure_ascii=False)}`",
             "",

@@ -2457,6 +2457,80 @@ class BridgeAssistGuardTests(unittest.TestCase):
         self.assertEqual(9102, args.seed)
         self.assertTrue(run_module.charter_from_args(args).as_dict()["control_policy"]["automatic_enemy_avoidance"])
 
+    def test_recorder_aggregates_bridge_assist_metrics(self) -> None:
+        recorder = RunRecorder(
+            output_dir=TEST_TEMP_ROOT / "assist-metrics",
+            seed=9102,
+            mode="qa",
+            policy="hybrid",
+        )
+        decision = {
+            "tool": "game",
+            "action": "direct_steer",
+            "arguments": {"x": 1.0, "y": 0.0, "intent": "evade"},
+        }
+        # Two horizons. The controller totals are run-cumulative, so the second
+        # observation's contribution is the delta, which is how planning-hold frames
+        # (invisible in the per-horizon fields) get counted.
+        for frames_total, deflection_total, per_horizon_max in ((180, 3600.0, 25.0), (300, 6600.0, 41.0)):
+            recorder.record(
+                step=0,
+                decision=decision,
+                observation={
+                    "ok": True,
+                    "controller": {
+                        "assist_enabled": True,
+                        "assist_frames_total": frames_total,
+                        "assist_deflection_degrees_total": deflection_total,
+                        "control_frames": 200,
+                        "assist_max_deflection_degrees": per_horizon_max,
+                    },
+                },
+                elapsed=0.0,
+            )
+
+        assist = recorder.assist_metrics()
+        self.assertTrue(assist["enabled"])
+        self.assertEqual(2, assist["horizons"])
+        self.assertEqual(300, assist["assist_frames"])
+        self.assertEqual(400, assist["control_frames"])
+        self.assertEqual(22.0, assist["mean_deflection_degrees"])
+        self.assertEqual(41.0, assist["max_deflection_degrees"])
+
+    def test_recorder_reports_no_assist_for_the_llm_policy(self) -> None:
+        recorder = RunRecorder(
+            output_dir=TEST_TEMP_ROOT / "assist-metrics-llm",
+            seed=9102,
+            mode="qa",
+            policy="llm",
+        )
+        recorder.record(
+            step=0,
+            decision={"tool": "game", "action": "direct_steer", "arguments": {"x": 1.0, "y": 0.0}},
+            observation={"ok": True, "controller": {"assist_enabled": False}},
+            elapsed=0.0,
+        )
+
+        self.assertEqual(
+            {
+                "enabled": False,
+                "horizons": 0,
+                "assist_frames": 0,
+                "control_frames": 0,
+                "assist_frame_ratio": 0.0,
+                "mean_deflection_degrees": 0.0,
+                "max_deflection_degrees": 0.0,
+            },
+            recorder.assist_metrics(),
+        )
+
+    def test_hybrid_manifest_reports_the_hybrid_prompt_version(self) -> None:
+        base = RunRecorder(output_dir=TEST_TEMP_ROOT / "pv-llm", seed=1, mode="qa", policy="llm")
+        hybrid = RunRecorder(output_dir=TEST_TEMP_ROOT / "pv-hybrid", seed=1, mode="qa", policy="hybrid")
+
+        self.assertEqual("qa-planning/v4", base.effective_prompt_version())
+        self.assertEqual("qa-planning/v4-hybrid", hybrid.effective_prompt_version())
+
     def test_hybrid_charter_declares_the_automatic_avoidance(self) -> None:
         control = TestCharter(bridge_assist=True).as_dict()["control_policy"]
 
