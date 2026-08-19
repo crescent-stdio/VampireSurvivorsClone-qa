@@ -11,7 +11,7 @@ namespace Vampire.Tests.EditMode
         {
             Assert.That(new QAReadyState().protocol_version, Is.EqualTo(QABridgeModels.ProtocolVersion));
             Assert.That(new QAObservation().protocol_version, Is.EqualTo(QABridgeModels.ProtocolVersion));
-            Assert.That(QABridgeModels.ProtocolVersion, Is.EqualTo("1.4"));
+            Assert.That(QABridgeModels.ProtocolVersion, Is.EqualTo("1.5"));
         }
 
         [Test]

@@ -93,7 +93,7 @@ class BridgeClientTests(unittest.TestCase):
         after the reset rather than being pre-written by the test.
         """
         payload = {
-            "protocol_version": "1.4",
+            "protocol_version": "1.5",
             "run_id": client.run_id,
             "scenario_id": client.scenario_id,
             "ready": True,
@@ -205,7 +205,7 @@ class BridgeClientTests(unittest.TestCase):
             client.ready_path.write_text(
                 json.dumps(
                     {
-                        "protocol_version": "1.4",
+                        "protocol_version": "1.5",
                         "run_id": "previous-run",
                         "scenario_id": client.scenario_id,
                         "ready": True,
@@ -235,7 +235,7 @@ class BridgeClientTests(unittest.TestCase):
         client.ready_path.write_text(
             json.dumps(
                 {
-                    "protocol_version": "1.4",
+                    "protocol_version": "1.5",
                     "run_id": "previous-run",
                     "scenario_id": client.scenario_id,
                     "ready": True,
@@ -266,7 +266,7 @@ class BridgeClientTests(unittest.TestCase):
         client.ready_path.write_text(
             json.dumps(
                 {
-                    "protocol_version": "1.4",
+                    "protocol_version": "1.5",
                     "run_id": "previous-run",
                     "scenario_id": client.scenario_id,
                     "ready": True,
@@ -1515,7 +1515,7 @@ class BridgeProtocolTests(unittest.TestCase):
                 client._write_json_atomic(
                     client.response_path(command["id"]),
                     {
-                        "protocol_version": "1.4",
+                        "protocol_version": "1.5",
                         "run_id": client.run_id,
                         "scenario_id": client.scenario_id,
                         "observation_id": observation_id,

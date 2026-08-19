@@ -5,7 +5,7 @@ namespace Vampire.QA
 {
     public static class QABridgeModels
     {
-        public const string ProtocolVersion = "1.4";
+        public const string ProtocolVersion = "1.5";
     }
 
     public static class QABridgeSimulationClock

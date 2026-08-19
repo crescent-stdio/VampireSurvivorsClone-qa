@@ -21,7 +21,7 @@ class BridgeContractError(BridgeError):
 
 
 class BridgeClient:
-    PROTOCOL_VERSION = "1.4"
+    PROTOCOL_VERSION = "1.5"
 
     def __init__(
         self,
