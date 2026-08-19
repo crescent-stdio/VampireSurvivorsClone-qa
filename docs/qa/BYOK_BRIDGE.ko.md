@@ -121,6 +121,41 @@ uv run --locked python -m qa_smoke.reevaluate QAArtifacts/bridge-runs/<run>/
 
 재시도 통계는 `report.json`의 `metrics.api_usage`에 `llm_retries`, `llm_retry_wait_ms`, `llm_http_attempts`로 기록된다. 실패한 호출이 소모한 토큰도 함께 집계되므로, 다음 실행의 TPM 예산을 이 값으로 잡을 수 있다.
 
+## 3-4. agent_detection: 에이전트가 결함을 찾았는가
+
+`oracle_verdict`와 `agent_detection`은 서로 다른 질문이다.
+
+- `oracle_verdict: fail` = **결함이 존재한다.** 사람이 작성한 규칙 기반 불변식 검사기가 관측에서 위반을 찾았다는 뜻이다.
+- `agent_detection: match` = **에이전트가 그걸 보고했다.** 둘은 독립이며, 실제로 첫 측정에서 모든 LLM 실행이 `oracle_verdict: fail` + `agent_detection: miss`였다.
+
+판정은 `config/qa-detection-rubric.json`의 결정론적 키워드 루브릭으로 내린다. 결함마다 `topic_terms`(어느 하위 시스템인가)와 `symptom_terms`(무엇이 잘못됐는가)를 두고, **같은 텍스트 안에서 양쪽이 모두 맞아야** 후보로 인정한다. 에이전트는 관측의 18번 중 17번에서 "health"를 쓰므로 topic만으로는 서술과 보고를 구분할 수 없다.
+
+채점 대상은 **에이전트가 직접 쓴 자유 텍스트뿐**이다(`plan`, `hypothesis`, `qa_observation`, `expected_effect`, `reflection.summary`, 가설 statement, 최종 보고). `decision.arguments`는 제외한다 — 차터가 매 `direct_steer`에 `interrupt_health_ratio`를 주입하므로, 통째로 스캔하면 아무것도 보고하지 않은 실행에서 18스텝 중 16번이 걸린다.
+
+| 상황 | 결과 |
+|---|---|
+| `--policy heuristic` | `not_evaluated` (에이전트 텍스트 채널 자체가 없음) |
+| 결함 없음 + 확정 가설/버그 후보 보고 | `false_positive` |
+| 결함 없음 + 침묵 | `not_evaluated` (대조군의 침묵은 정답이지 성과가 아님) |
+| 에이전트가 관측할 수 없는 결함 | `not_evaluated` + 사유 |
+| 오라클이 통과했거나 위반 전이가 없음 | `not_evaluated` |
+| 키워드 적중 + 오라클이 지적한 전이 인용 | **`match`** |
+| 부분 trace | `not_evaluated` (앞부분만으로 "보고한 적 없음"을 증명할 수 없음) |
+| 그 외 | **`miss`** |
+
+결함이 주입된 실행에서는 `false_positive`가 나오지 않는다. 다른 결함을 자신 있게 보고한 에이전트는 `miss`다 — 주입된 것을 못 찾은 건 사실이고, 그 다른 주장의 타당성 판단은 사람 리뷰어의 몫이다.
+
+`health_bar_desync`와 `experience_display_drift`는 `observable_in_agent_channel: false`다. 둘 다 raw 값과 화면 표시값의 불일치인데 `state_channels`가 `player_view`를 에이전트 관측에서 제거하므로 **원리적으로 탐지할 수 없다.** 이를 `miss`로 채점하면 에이전트 능력이 아니라 채널 설계를 측정하게 된다.
+
+### 한계를 분명히
+
+- `match`는 "에이전트가 버그를 찾았다"가 아니라 **"에이전트가 결함을 지목하는 표현을 쓰면서 오라클이 문제 삼는 전이를 인용했다"**는 뜻이다. `agent-detection.json`이 이를 명시한다.
+- `annotations.jsonl`과 `aggregate_annotations`(리뷰어 3명 다수결)가 **버그 타당성의 유일한 권위**로 남는다. 자동 채점은 별도 축이며 그쪽에 병합되지 않는다.
+- 키워드 방식이라 프롬프트 문구에 따라 값이 흔들린다. `agent-detection.json`에 `rubric_version`과 `prompt_version`을 함께 기록하니, 탐지율은 **이 둘이 고정된 범위 안에서만** 비교할 수 있다.
+- `agent_detection`은 `final_verdict`에 영향을 주지 않는다. 게임의 판정이 에이전트의 서술 능력에 좌우돼선 안 된다.
+
+저장된 아티팩트는 `python -m qa_smoke.reevaluate`로 함께 채점된다.
+
 ## 4. 동작과 종료 조건
 
 - planner는 매 프레임이 아니라 기본 6초 horizon, 중요한 event, stall 또는 terminal 상태에서 호출된다.
