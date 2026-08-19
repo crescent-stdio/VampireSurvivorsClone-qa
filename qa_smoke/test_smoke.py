@@ -2277,5 +2277,92 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual("fail", result.verdict)
 
 
+# Guard tests for the hybrid bridge assist (--policy hybrid).
+#
+# These pin the behavior that must NOT change when the per-frame survival assist
+# lands: the pure-llm control policy declaration, the cached system prompt prefix,
+# the scenario fingerprints, and the deterministic gate's heuristic-only rule.
+LEGACY_CONTROL_POLICY = {
+    "planner_authority": "llm_when_policy_is_llm",
+    "automatic_enemy_avoidance": False,
+    "automatic_chest_targeting": False,
+    "automatic_direction_correction": False,
+    "bridge_role": "hold_the_llm_vector_and_detect_events_only",
+    "priority_order": [
+        "survive",
+        "collect_reachable_chests",
+        "net_heading_progress",
+        "coverage",
+    ],
+}
+
+NO_ASSIST_PROMPT_CLAIMS = (
+    "The executor never silently corrects your vector.",
+    "Unity does NOT automatically avoid enemies, choose a chest, attract toward a "
+    "chest, enforce the requested heading, or alter your direction. It only holds "
+    "your chosen vector every frame and detects events.",
+)
+
+APPROVED_SCENARIO_FINGERPRINTS = {
+    "easy-health-ratio": "f6ec3bd7803262bdcb7cd6e47f2221f9200a7e29ebfcd866bc2d3667b674a419",
+    "easy-relative-position": "3fd96bdd7fafe56eedd3cc694bbc2063c7f056620c479f79661dfbd9a909dd6e",
+    "medium-upgrade-effect": "5dfee63a99e24e03768d02ad7248d6e4320d2ba493581effa263e91f9e976e13",
+    "medium-chest-transition": "85d785eed36d4ab222ce3cf82d7dfbfe39d3500f4a9a9e3ffdf0884928b062d2",
+    "hard-experience-drift": "3db768e89df56af3612b2ccc6a314756280d6d359e266d3acce38a32a3e1d982",
+    "hard-restart-currency": "287589be5eaf4074b45d14d9ce03ed7f3461ac0898ed8b5c710947cef2906caf",
+    "control-valid-observation": "368b548b4ab9e04b7ee4154ae87b894f4d3bc9cc6973eebfabc25a964bcd7643",
+    "control-normal-transitions": "efd037b6eacca55e8affeee6b5ea9fa451e5c6a547bb63b8a98a28aab879523f",
+    "control-long-progression": "458d405383e7339d53596562eda9611d0baaa3e566966b88c3dff720f147975f",
+}
+
+
+class BridgeAssistGuardTests(unittest.TestCase):
+    def test_default_charter_control_policy_is_unchanged(self) -> None:
+        """The pure-llm charter must keep advertising zero bridge intervention."""
+        self.assertEqual(
+            LEGACY_CONTROL_POLICY, TestCharter().as_dict()["control_policy"]
+        )
+
+    def test_llm_prompt_declares_no_bridge_correction(self) -> None:
+        """The cached prompt prefix states the bridge never alters the vector.
+
+        Both claims become false under --policy hybrid, so both must be made
+        conditional rather than edited in place.
+        """
+        planner = LLMPlanner("qa", "test-model", TestCharter(), 5.0, api_key="test-key")
+        prompt = planner._planning_system_prompt()
+
+        for claim in NO_ASSIST_PROMPT_CLAIMS:
+            self.assertIn(claim, prompt)
+
+    def test_scenario_fingerprints_are_stable(self) -> None:
+        """Charter fields added for hybrid must not reach CharterDefinition.
+
+        scenario_fingerprint hashes the scenario model dump; changing it would
+        invalidate the deterministic gate against every stored artifact.
+        """
+        for scenario_id, expected in APPROVED_SCENARIO_FINGERPRINTS.items():
+            with self.subTest(scenario=scenario_id):
+                self.assertEqual(
+                    expected, scenario_fingerprint(load_scenario(scenario_id))
+                )
+
+    def test_deterministic_gate_cli_rejects_a_hybrid_request(self) -> None:
+        scenarios = [
+            load_scenario(scenario_id)
+            for scenario_id in benchmark_module.DETERMINISTIC_GATE_SCENARIO_IDS
+        ]
+
+        with self.assertRaisesRegex(
+            ScenarioContractError, "qa mode and heuristic policy"
+        ):
+            benchmark_module.validate_deterministic_gate_request(
+                scenarios,
+                [9101],
+                mode="qa",
+                policy="hybrid",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
