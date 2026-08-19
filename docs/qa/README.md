@@ -31,7 +31,18 @@ Build scenes are exactly Main Menu (index 0), Level 1 (index 1), then QA Gamepla
 - [uv](https://docs.astral.sh/uv/) `0.12.x`; the committed `.python-version` selects Python `3.10.12`, the upper bound supported by ML-Agents 1.1.0.
 - PyTorch `2.8.0`, the latest version supported by the pinned ML-Agents trainer. CPU is the default; set `QA_TORCH_DEVICE=mps` only when PyTorch reports MPS as available.
 - Locked ML-Agents Python packages. `scripts/qa/setup.sh` runs `uv sync --locked --extra trainer`. ML-Agents is Apache-2.0 licensed; verify organizational dependency policy before distribution.
+- `uv sync --locked` installs the pinned development tools, including pre-commit. Run `uv run --locked pre-commit install` once per clone to enable the Git hook.
 - `OPENAI_API_KEY` only for the opt-in LLM path. Never store it in repository files or artifacts.
+
+### Pre-commit
+
+The pre-commit configuration validates repository files, POSIX shell syntax, and Python tests. Unity-managed directories such as `Assets/`, `ProjectSettings/`, and `Packages/` are excluded so their serialized content is not rewritten by hooks.
+
+```sh
+uv sync --locked
+uv run --locked pre-commit install
+uv run --locked pre-commit run --all-files
+```
 
 ## Operator commands
 

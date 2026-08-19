@@ -1,0 +1,26 @@
+exclude: ^(?:Assets|Library|Logs|ProjectSettings|Packages|UserSettings|QAArtifacts|\.understand-anything)/
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      - id: shell-syntax
+        name: Validate POSIX shell syntax
+        entry: sh -n
+        language: system
+        types: [shell]
+
+      - id: pytest
+        name: Run Python tests
+        entry: uv run --locked pytest -q
+        language: system
+        pass_filenames: false
+        types: [python]
