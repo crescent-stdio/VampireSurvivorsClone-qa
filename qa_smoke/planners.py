@@ -10,7 +10,7 @@ import time
 from typing import Any, Protocol
 
 from .charter import TestCharter
-from .memory import SessionMemory
+from .memory import PlanningHistory
 
 
 TRACKED_DELTA_PATHS = (
@@ -774,6 +774,11 @@ class LLMPlanner:
         if not self.api_key:
             raise ValueError("LLM policy requires QA_API_KEY or OPENAI_API_KEY")
         self.last_usage: dict[str, int] = {}
+        self._planning_history = PlanningHistory()
+        self._pending_user_content: str | None = None
+        self._pending_tool_context: list[dict[str, Any]] | None = None
+        self._pending_cache_boundary = False
+        self._cache_boundary_pending = True
 
     def plan(
         self,
@@ -784,9 +789,23 @@ class LLMPlanner:
     ) -> dict[str, Any]:
         system = self._planning_system_prompt()
         payload = self._planning_payload(observation, step, tool_context, source_steps_remaining)
-        schema = build_decision_response_schema(payload["action_contract"])
+        contract = {
+            **payload["action_contract"],
+            "reflection_contract": payload["reflection_contract"],
+        }
+        schema = build_decision_response_schema(contract)
+        user_content = json.dumps(payload, ensure_ascii=False)
+        cache_boundary = self._cache_boundary_pending or step == 0
+        self._pending_user_content = user_content
+        self._pending_tool_context = list(tool_context)
+        self._pending_cache_boundary = cache_boundary
         return self._request(
-            system, json.dumps(payload, ensure_ascii=False), max_tokens=300, response_schema=schema
+            system,
+            user_content,
+            max_tokens=300,
+            response_schema=schema,
+            messages=self._planning_request_messages(user_content),
+            cache_boundary=cache_boundary,
         )
 
     def repair_plan(
@@ -798,18 +817,43 @@ class LLMPlanner:
         contract_error: str,
         source_steps_remaining: int = 0,
     ) -> dict[str, Any]:
-        system = self._planning_system_prompt() + (
-            "\nYour previous response violated the current action contract. Correct it once. "
-            "Do not repeat or explain the invalid call; return only a valid JSON decision. "
-            "Preserve valid gameplay tool, action, and arguments. Correct only the fields named by contract_error. "
-            "Do not invent evidence IDs or candidate IDs."
-        )
+        if self._pending_user_content is None or self._pending_tool_context is None:
+            raise RuntimeError("repair_plan requires a pending plan request")
+        system = self._planning_system_prompt()
         payload = self._planning_payload(observation, step, tool_context, source_steps_remaining)
-        payload["invalid_decision"] = invalid_decision
-        payload["contract_error"] = contract_error
-        schema = build_decision_response_schema(payload["action_contract"])
+        contract = {
+            **payload["action_contract"],
+            "reflection_contract": payload["reflection_contract"],
+        }
+        schema = build_decision_response_schema(contract)
+        correction_content = json.dumps(
+            {
+                "instruction": (
+                    "Correct the previous response once. Return only a valid JSON decision. "
+                    "Preserve valid gameplay tool, action, and arguments; correct only the fields "
+                    "named by contract_error. Do not invent evidence IDs or candidate IDs."
+                ),
+                "contract_error": contract_error,
+            },
+            ensure_ascii=False,
+        )
+        repair_messages = self._planning_request_messages(self._pending_user_content)
+        repair_messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": json.dumps(invalid_decision, ensure_ascii=False),
+                },
+                {"role": "user", "content": correction_content},
+            ]
+        )
         return self._request(
-            system, json.dumps(payload, ensure_ascii=False), max_tokens=300, response_schema=schema
+            system,
+            correction_content,
+            max_tokens=300,
+            response_schema=schema,
+            messages=repair_messages,
+            cache_boundary=self._pending_cache_boundary,
         )
 
     def _planning_system_prompt(self) -> str:
@@ -885,8 +929,49 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
             "fatal_error": context.get("fatal_error"),
         }
         return self._request(
-            system, json.dumps(agent_context, ensure_ascii=False), max_tokens=1400
+            system,
+            json.dumps(agent_context, ensure_ascii=False),
+            max_tokens=1400,
+            include_planning_history=False,
         )
+
+    def _planning_context_messages(self) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": self._planning_system_prompt()},
+            {
+                "role": "system",
+                "content": json.dumps(
+                    {"test_charter": self.charter.as_dict()},
+                    ensure_ascii=False,
+                ),
+            },
+            {
+                "role": "system",
+                "content": json.dumps(
+                    {"checkpoint_summary": self._planning_history.checkpoint_summary()},
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+    def _planning_request_messages(self, current_user: str) -> list[dict[str, str]]:
+        messages = self._planning_context_messages()
+        messages.extend(self._planning_history.messages())
+        messages.append({"role": "user", "content": current_user})
+        return messages
+
+    def commit_plan(self, decision: dict[str, Any]) -> None:
+        if self._pending_user_content is None or self._pending_tool_context is None:
+            raise RuntimeError("commit_plan requires a pending plan request")
+        rolled_over = self._planning_history.commit(
+            self._pending_user_content,
+            json.dumps(decision, ensure_ascii=False),
+            self._pending_tool_context,
+        )
+        self._pending_user_content = None
+        self._pending_tool_context = None
+        self._pending_cache_boundary = False
+        self._cache_boundary_pending = rolled_over
 
     def _request(
         self,
@@ -894,18 +979,26 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
         user: str,
         max_tokens: int = 300,
         response_schema: dict[str, Any] | None = None,
+        messages: list[dict[str, str]] | None = None,
+        include_planning_history: bool = True,
+        cache_boundary: bool = False,
     ) -> dict[str, Any]:
+        if messages is None:
+            if include_planning_history:
+                messages = self._planning_request_messages(user)
+            else:
+                messages = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ]
         body = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            "messages": messages,
             "response_format": self._response_format(response_schema),
             "max_tokens": max_tokens,
         }
         if self.api_url.startswith("https://api.openai.com/"):
-            body["prompt_cache_key"] = f"vsc-gameplay-qa-{self.mode}-{self.model}-v2"
+            body["prompt_cache_key"] = f"vsc-gameplay-qa-{self.mode}-{self.model}-v3"
         request = urllib.request.Request(
             self.api_url,
             data=json.dumps(body).encode("utf-8"),
@@ -922,6 +1015,7 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
         self.last_usage = self._normalize_usage(response_body.get("usage") or {})
         self.last_usage["latency_ms"] = max(0, round((time.monotonic() - request_started) * 1000))
         self.last_usage["request_count"] = 1
+        self.last_usage["cache_boundary"] = int(bool(cache_boundary))
         choice = response_body["choices"][0]
         if choice.get("finish_reason") == "length":
             raise RuntimeError("LLM response was truncated at the output token limit")
@@ -969,6 +1063,10 @@ Keep plan, hypothesis, qa_observation, expected_effect, and reflection.summary c
                 normalized[key] = max(0, int(value or 0))
             except (TypeError, ValueError):
                 normalized[key] = 0
+        normalized["uncached_prompt_tokens"] = max(
+            0,
+            normalized["prompt_tokens"] - normalized["cached_tokens"],
+        )
         if normalized["total_tokens"] == 0:
             normalized["total_tokens"] = normalized["prompt_tokens"] + normalized["completion_tokens"]
         return normalized

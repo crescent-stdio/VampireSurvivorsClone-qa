@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import math
 from collections import Counter
@@ -201,3 +202,66 @@ class SessionMemory:
             values.append(value)
         if len(values) > limit:
             del values[: len(values) - limit]
+
+
+class PlanningHistory:
+    """Store committed planner exchanges and periodically checkpoint older transitions."""
+
+    MAX_ACCEPTED_EXCHANGES = 24
+    RETAINED_EXCHANGES = 12
+
+    def __init__(self) -> None:
+        self._messages: list[dict[str, str]] = []
+        self._accepted_count = 0
+        self._transition_history: list[dict[str, Any]] = []
+        self._checkpoint: dict[str, Any] = SessionMemory(
+            recent_limit=self.RETAINED_EXCHANGES
+        ).summary()
+
+    def messages(self) -> list[dict[str, str]]:
+        return copy.deepcopy(self._messages)
+
+    def checkpoint_summary(self) -> dict[str, Any]:
+        return copy.deepcopy(self._checkpoint)
+
+    def commit(
+        self,
+        user_content: str,
+        assistant_content: str,
+        tool_context: list[dict[str, Any]],
+    ) -> bool:
+        self._remember_transitions(tool_context)
+        self._messages.extend(
+            [
+                {"role": "user", "content": str(user_content)},
+                {"role": "assistant", "content": str(assistant_content)},
+            ]
+        )
+        self._accepted_count += 1
+        rolled_over = self._should_roll_over(self._accepted_count)
+        if rolled_over:
+            self._checkpoint = SessionMemory.from_transitions(
+                self._transition_history,
+                recent_limit=self.RETAINED_EXCHANGES,
+            ).summary()
+            self._messages = self._messages[-(self.RETAINED_EXCHANGES * 2) :]
+        return rolled_over
+
+    @classmethod
+    def _should_roll_over(cls, accepted_count: int) -> bool:
+        first_rollover = cls.MAX_ACCEPTED_EXCHANGES + 1
+        return accepted_count >= first_rollover and (
+            accepted_count - first_rollover
+        ) % cls.RETAINED_EXCHANGES == 0
+
+    def _remember_transitions(self, tool_context: list[dict[str, Any]]) -> None:
+        if not tool_context:
+            return
+        copied = copy.deepcopy(tool_context)
+        if (
+            len(copied) >= len(self._transition_history)
+            and copied[: len(self._transition_history)] == self._transition_history
+        ):
+            self._transition_history = copied
+            return
+        self._transition_history.append(copied[-1])

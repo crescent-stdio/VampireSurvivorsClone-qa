@@ -383,9 +383,14 @@ class LLMPlannerTests(unittest.TestCase):
         response = {"plan": "test", "hypothesis": "", "tool": "game", "action": "observe", "arguments": {}}
         with patch.object(planner, "_request", return_value=response) as request:
             planner.plan({"available_actions": ["observe"]}, 3, [])
-        payload = json.loads(request.call_args.args[1])
-        self.assertEqual("Survive and probe the east boundary", payload["test_charter"]["objective"])
-        self.assertEqual("east", payload["test_charter"]["constraints"]["movement"])
+        messages = request.call_args.kwargs["messages"]
+        charter_message = next(
+            json.loads(message["content"])
+            for message in messages
+            if message["role"] == "system" and "test_charter" in message["content"]
+        )
+        self.assertEqual("Survive and probe the east boundary", charter_message["test_charter"]["objective"])
+        self.assertEqual("east", charter_message["test_charter"]["constraints"]["movement"])
         system_prompt = request.call_args.args[0]
         self.assertIn("does NOT automatically avoid enemies", system_prompt)
         self.assertIn("direct_steer", system_prompt)
@@ -456,6 +461,16 @@ class LLMPlannerTests(unittest.TestCase):
             "arguments": {"x": 1.0, "y": 0.0, "duration": 5.0},
         }
         with patch.object(planner, "_request", return_value=invalid_decision) as request:
+            planner.plan(
+                {
+                    "paused": True,
+                    "player": {"present": True, "alive": True},
+                    "menu": {},
+                    "available_actions": ["direct_steer"],
+                },
+                2,
+                [{"observation_id": "obs-2", "event_state": {}}],
+            )
             planner.repair_plan(
                 {
                     "paused": True,
@@ -815,7 +830,7 @@ class ReportingTests(unittest.TestCase):
             model="gpt-4o-mini",
         )
 
-        self.assertEqual("qa-planning/v3", recorder.prompt_version)
+        self.assertEqual("qa-planning/v4", recorder.prompt_version)
 
     def test_llm_contract_failure_is_not_classified_as_infrastructure_error(self) -> None:
         recorder = RunRecorder(
@@ -1022,6 +1037,11 @@ class ReportingTests(unittest.TestCase):
             },
             0.2,
             {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "request_count": 2},
+        )
+        recorder.add_api_usage(
+            "planning_request",
+            {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "request_count": 2},
+            step=1,
         )
         report = recorder.build_report(None)
         self.assertEqual(1, report["metrics"]["chest_collections"])
@@ -1291,8 +1311,9 @@ class SessionMemoryTests(unittest.TestCase):
             {"available_actions": ["observe"]}, 10, transitions, 0
         )
 
-        self.assertEqual(6, len(payload["recent_transitions"]))
-        self.assertIn("event_counts", payload["session_memory"])
+        self.assertNotIn("recent_transitions", payload)
+        self.assertNotIn("session_memory", payload)
+        self.assertEqual(9, payload["prior_outcome"]["step"])
 
 
 class BridgeProtocolTests(unittest.TestCase):

@@ -550,6 +550,7 @@ def run_session(args: argparse.Namespace) -> int:
     )
     restarts_used = 0
     stalled_steps = 0
+    planning_window_started: float | None = None
 
     try:
         if not args.quiet:
@@ -601,10 +602,20 @@ def run_session(args: argparse.Namespace) -> int:
             if not args.quiet and args.policy == "llm":
                 print(f"[step {step:02d}] Waiting for LLM plan...", flush=True)
             source_steps_remaining = max(0, args.max_source_steps - source_steps)
+            if args.policy == "llm" and planning_window_started is None:
+                planning_window_started = time.monotonic()
             raw_decision = canonicalize_decision_arguments(
                 planner.plan(last_observation, step, tool_context, source_steps_remaining)
             )
             planning_usage = planner.take_last_usage()
+            initial_cache_boundary = bool(planning_usage.pop("cache_boundary", 0))
+            if args.policy == "llm":
+                recorder.add_api_usage(
+                    "planning_request",
+                    planning_usage,
+                    step,
+                    cache_boundary=initial_cache_boundary,
+                )
             if raw_decision.get("_syntax_normalizations"):
                 record_contract_event(
                     output_dir,
@@ -694,7 +705,6 @@ def run_session(args: argparse.Namespace) -> int:
                                 "contract": contract,
                             },
                         )
-                        recorder.add_api_usage("planning_rejected", planning_usage, step)
                         recorder.anomalies.append(
                             {
                                 "step": step,
@@ -707,6 +717,8 @@ def run_session(args: argparse.Namespace) -> int:
                             "LLM repeated an invalid action after one corrective retry: " + repair_error
                         )
                     raw_decision = repaired_decision
+            if isinstance(planner, LLMPlanner):
+                planner.commit_plan(raw_decision)
             hypothesis_state = hypothesis_tracker.observe_decision(raw_decision)
             decision = normalize_decision(
                 raw_decision,
@@ -832,6 +844,12 @@ def run_session(args: argparse.Namespace) -> int:
         fatal_error = f"{type(error).__name__}: {error}"
     finally:
         client.close()
+
+    if planning_window_started is not None:
+        recorder.planning_window_wall_seconds = max(
+            0.0,
+            time.monotonic() - planning_window_started,
+        )
 
     assessment_context = {
         "mode": args.mode,

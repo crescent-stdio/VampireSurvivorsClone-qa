@@ -136,7 +136,7 @@ class RunRecorder:
     scenario_fingerprint: str = ""
     fault_id: str | None = None
     protocol_version: str = "1.4"
-    prompt_version: str = "qa-planning/v3"
+    prompt_version: str = "qa-planning/v4"
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     steps: list[dict[str, Any]] = field(default_factory=list)
     anomalies: list[dict[str, Any]] = field(default_factory=list)
@@ -160,6 +160,9 @@ class RunRecorder:
     min_chest_distance: float | None = None
     event_counts: dict[str, int] = field(default_factory=dict)
     api_usage_events: list[dict[str, Any]] = field(default_factory=list)
+    planning_window_wall_seconds: float = 0.0
+    initial_contract_rejections: int = 0
+    repair_contract_rejections: int = 0
     navigation_evaluations: list[dict[str, Any]] = field(default_factory=list)
     continuous_control_horizons: int = 0
     verdict_axes: dict[str, Any] | None = None
@@ -195,12 +198,33 @@ class RunRecorder:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self._update_coverage(decision, observation)
         self._detect_anomalies(step, observation)
-        self.add_api_usage("planning", api_usage or {}, step)
 
-    def add_api_usage(self, phase: str, usage: dict[str, int], step: int | None = None) -> None:
+    def add_api_usage(
+        self,
+        phase: str,
+        usage: dict[str, int],
+        step: int | None = None,
+        *,
+        cache_boundary: bool = False,
+    ) -> None:
         if not usage:
             return
-        self.api_usage_events.append({"phase": phase, "step": step, **usage})
+        event_usage = dict(usage)
+        event_usage.pop("cache_boundary", None)
+        if "uncached_prompt_tokens" not in event_usage:
+            event_usage["uncached_prompt_tokens"] = max(
+                0,
+                int(event_usage.get("prompt_tokens", 0) or 0)
+                - int(event_usage.get("cached_tokens", 0) or 0),
+            )
+        self.api_usage_events.append(
+            {
+                "phase": phase,
+                "step": step,
+                "cache_boundary": bool(cache_boundary),
+                **event_usage,
+            }
+        )
 
     def write_channel_artifacts(
         self,
@@ -237,7 +261,7 @@ class RunRecorder:
     def api_usage_totals(self) -> dict[str, Any]:
         keys = (
             "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens",
-            "cache_write_tokens", "reasoning_tokens", "latency_ms",
+            "uncached_prompt_tokens", "cache_write_tokens", "reasoning_tokens", "latency_ms",
         )
         totals = {key: sum(int(event.get(key, 0) or 0) for event in self.api_usage_events) for key in keys}
         totals["calls"] = sum(
@@ -246,6 +270,61 @@ class RunRecorder:
         totals["mean_latency_ms"] = (
             round(totals["latency_ms"] / totals["calls"], 1) if totals["calls"] else 0.0
         )
+        planning_events = [
+            event
+            for event in self.api_usage_events
+            if event.get("phase") in {"planning_request", "repair_request"}
+        ]
+        eligible_planning_events = [
+            event
+            for event in planning_events
+            if (
+                (event.get("step") is None or int(event.get("step")) != 0)
+                and not bool(event.get("cache_boundary"))
+            )
+        ]
+        planning_calls = sum(
+            max(1, int(event.get("request_count", 1) or 1))
+            for event in planning_events
+        )
+        eligible_planning_calls = sum(
+            max(1, int(event.get("request_count", 1) or 1))
+            for event in eligible_planning_events
+        )
+        eligible_prompt_tokens = sum(
+            int(event.get("prompt_tokens", 0) or 0)
+            for event in eligible_planning_events
+        )
+        eligible_cached_tokens = sum(
+            int(event.get("cached_tokens", 0) or 0)
+            for event in eligible_planning_events
+        )
+        eligible_uncached_tokens = sum(
+            int(event.get("uncached_prompt_tokens", 0) or 0)
+            for event in eligible_planning_events
+        )
+        planning_latency_ms = sum(
+            int(event.get("latency_ms", 0) or 0) for event in planning_events
+        )
+        totals["planning_requests"] = planning_calls
+        totals["average_uncached_prompt_tokens"] = round(
+            eligible_uncached_tokens / eligible_planning_calls,
+            1,
+        ) if eligible_planning_calls else 0.0
+        totals["planning_cache_ratio"] = round(
+            eligible_cached_tokens / eligible_prompt_tokens,
+            3,
+        ) if eligible_prompt_tokens else 0.0
+        totals["planning_mean_latency_ms"] = round(
+            planning_latency_ms / planning_calls,
+            1,
+        ) if planning_calls else 0.0
+        totals["llm_wait_ratio"] = round(
+            planning_latency_ms / (self.planning_window_wall_seconds * 1000.0),
+            3,
+        ) if planning_events and self.planning_window_wall_seconds > 0 else 0.0
+        totals["initial_contract_rejections"] = self.initial_contract_rejections
+        totals["repair_contract_rejections"] = self.repair_contract_rejections
         return totals
 
     def _update_coverage(self, decision: dict[str, Any], observation: dict[str, Any]) -> None:
