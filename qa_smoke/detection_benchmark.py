@@ -511,6 +511,25 @@ def _numeric_equal(value: Any, target: int | float, integer_values: bool) -> boo
     return math.isclose(float(numeric), float(target), rel_tol=0.0, abs_tol=FLOAT_TOLERANCE)
 
 
+def _target_relation_is_violated(target: NumericTarget) -> bool:
+    expected = target.expected_value
+    observed = target.observed_value
+    if target.comparison == "==":
+        return _numeric_equal(observed, expected, target.integer_values)
+    if target.comparison == "!=":
+        return not _numeric_equal(observed, expected, target.integer_values)
+    tolerance = 0.0 if target.integer_values else FLOAT_TOLERANCE
+    if target.comparison == ">":
+        return observed > expected + tolerance
+    if target.comparison == ">=":
+        return observed >= expected - tolerance
+    if target.comparison == "<":
+        return observed < expected - tolerance
+    if target.comparison == "<=":
+        return observed <= expected + tolerance
+    return False
+
+
 def _available_evidence_refs(transitions: Sequence[dict[str, Any]]) -> set[str]:
     references: set[str] = set()
     for transition in transitions:
@@ -565,6 +584,8 @@ def score_trace(trace: TraceEvaluation) -> TraceScore:
 
     initial_status = _initial_status(trace)
     targets = private_numeric_targets(trace.fault_id, trace.transitions)
+    if trace.variant == "fault":
+        targets = [target for target in targets if _target_relation_is_violated(target)]
     target_findings: list[dict[str, Any]] = []
     incidental: list[dict[str, Any]] = []
     pass_votes: list[bool] = []

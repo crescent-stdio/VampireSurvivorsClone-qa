@@ -375,6 +375,55 @@ def test_clean_false_positive_requires_the_private_target_relation() -> None:
     assert len(tn.incidental_candidates) == 3
 
 
+def test_fault_trace_scores_only_violated_post_activation_relations() -> None:
+    transitions = [
+        {
+            "observation": {
+                "observation_id": "obs-view-before",
+                "player": {"present": True, "health": 10.0, "max_health": 10.0},
+                "player_view": {"health": 10.0, "health_ratio": 1.0},
+            }
+        },
+        {
+            "observation": {
+                "observation_id": "obs-view-after",
+                "player": {"present": True, "health": 8.0, "max_health": 10.0},
+                "player_view": {"health": 10.0, "health_ratio": 1.0},
+            }
+        },
+    ]
+    pre_activation_false_alert = numeric_finding(
+        "player_view.health", "!=", 10.0, 10.0, ["obs-view-before"]
+    )
+    post_activation_violation = numeric_finding(
+        "player_view.health", "!=", 8.0, 10.0, ["obs-view-after"]
+    )
+
+    pre_only = benchmark.score_trace(
+        benchmark.TraceEvaluation.fault(
+            "pre-only",
+            "health_bar_desync",
+            transitions,
+            [artifact(pre_activation_false_alert), artifact(pre_activation_false_alert), artifact()],
+        )
+    )
+    post = benchmark.score_trace(
+        benchmark.TraceEvaluation.fault(
+            "post",
+            "health_bar_desync",
+            transitions,
+            [artifact(post_activation_violation), artifact(post_activation_violation), artifact()],
+        )
+    )
+
+    assert pre_only.status == "FN"
+    assert len(pre_only.incidental_candidates) == 2
+    assert {relation["evidence_refs"][0] for relation in pre_only.target_relations} == {
+        "obs-view-after"
+    }
+    assert post.status == "TP"
+
+
 @pytest.mark.parametrize(
     ("variant", "execution", "coverage", "oracle", "transitions", "passes", "expected"),
     (

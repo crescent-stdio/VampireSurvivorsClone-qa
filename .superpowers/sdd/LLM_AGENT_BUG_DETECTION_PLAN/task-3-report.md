@@ -162,10 +162,10 @@ exit code 0
 
 ## Concerns
 
-- The macro interval is reported as the equal-weight mean of the included per-fault
-  Wilson lower and upper bounds. Per-fault and micro intervals are ordinary binomial
-  Wilson intervals; the macro bound is explicitly stratified by the same equal fault
-  weighting as the primary point estimate.
+- Equal-weight macro detection intentionally has no `wilson_95` field because a
+  binomial Wilson interval is not defined for that macro average. Per-fault and micro
+  binomial rates retain Wilson 95% intervals; runtime Markdown renders macro CI as
+  `N/A`.
 - The pure layer assumes Task 4 passes raw evaluator transitions alongside normalized
   inspection artifacts. It intentionally does not read campaign files or reconstruct
   missing transition evidence.
@@ -316,3 +316,93 @@ exit code 0
   the numeric-only, real-field rule rather than being inferred from absence or text.
 - Repository-wide pre-commit pytest still requires the unrelated optional `trainer`
   dependency (`torch`); the required fresh `qa_smoke` suite passes independently.
+
+## Review Fix Round 2
+
+Base commit: `90a18f0 fix(qa): correct private detection score contracts`
+
+Planned fix subject: `fix(qa): exclude nonviolated fault relations`
+
+### Files
+
+- Modified `qa_smoke/detection_benchmark.py`.
+- Modified `qa_smoke/test_detection_benchmark.py`.
+- Appended this review-fix record and corrected the stale macro-Wilson concern in
+  `.superpowers/sdd/LLM_AGENT_BUG_DETECTION_PLAN/task-3-report.md`.
+
+### Root cause and correction
+
+The private builders correctly described inspectable numeric relations, but fault
+scoring treated every built relation as a TP candidate. A trace may contain normal
+pre-activation observations before the injection becomes visible. A false inspector
+alert matching that normal relation could therefore win two votes and become TP even
+though it did not identify an injected violation.
+
+Fault scoring now applies one comparison-aware eligibility filter to every builder.
+Only relations whose encoded anomaly comparison actually holds for the trace values
+remain target candidates. Float relations use the established `1e-5` tolerance and
+integer relations remain exact. Clean scoring is unchanged so a false alert against a
+passing private clean relation can still be FP. Findings against filtered normal fault
+relations are preserved as incidental candidates.
+
+### RED evidence
+
+```text
+$ .venv/bin/pytest -q \
+  qa_smoke/test_detection_benchmark.py::test_fault_trace_scores_only_violated_post_activation_relations
+FAILED: two pre-activation player_view.health false alerts produced TP instead of FN
+1 failed in 0.17s
+```
+
+### GREEN evidence
+
+```text
+$ .venv/bin/pytest -q \
+  qa_smoke/test_detection_benchmark.py::test_fault_trace_scores_only_violated_post_activation_relations
+.                                                                        [100%]
+1 passed in 0.10s
+```
+
+```text
+$ .venv/bin/pytest -q qa_smoke/test_detection_benchmark.py
+................................                                         [100%]
+32 passed in 0.15s
+```
+
+```text
+$ .venv/bin/pytest -q qa_smoke
+........................................................................ [ 24%]
+........................................................................ [ 48%]
+........................................................................ [ 72%]
+........................................................................ [ 96%]
+............                                                             [100%]
+300 passed in 1.24s
+```
+
+```text
+$ .venv/bin/python -m compileall -q \
+    qa_smoke/detection_benchmark.py qa_smoke/test_detection_benchmark.py
+$ git diff --check
+exit code 0
+```
+
+### Self-review
+
+- The regression contains both a synchronized pre-activation observation and a
+  desynchronized post-activation observation in one fault trace. Two passes reporting
+  only the normal relation yield FN and remain incidental; two passes reporting the
+  post-activation relation yield TP.
+- The existing complete literal target table still passes for all 11 faults, proving
+  each injected violation encoding survives the uniform filter (`!=`, `>=`, `<=`, and
+  `<` cases are represented).
+- Clean FP semantics, evidence-universe validation, invalid trace accounting, fixed
+  three-slot agreement, aggregate metrics, and Markdown consistency remain covered.
+- No Task 4 orchestration, Unity/model calls, model versions, or unrelated code changed.
+
+### Remaining concerns
+
+- The existing numeric-only limitation for a selected, previously unowned upgrade
+  remains: absence does not create a real post-action numeric field and is classified
+  `UNOBSERVABLE`.
+- Repository-wide pre-commit pytest still requires optional `torch`; focused and full
+  required `qa_smoke` suites pass independently.
