@@ -136,6 +136,21 @@ def sanitize_agent_channel(value: Any) -> Any:
     return None if sanitized is _DROP else sanitized
 
 
+def sanitize_error_type(value: str | None) -> str | None:
+    """Keep only a bounded public exception class identifier."""
+
+    if value is None:
+        return None
+    if (
+        0 < len(value) <= 128
+        and value.isascii()
+        and (value[0].isalpha() or value[0] == "_")
+        and all(character.isalnum() or character == "_" for character in value)
+    ):
+        return value
+    return "Exception"
+
+
 class SessionMemory:
     def __init__(self, recent_limit: int = 6, token_budget: int = 800) -> None:
         if recent_limit < 1:

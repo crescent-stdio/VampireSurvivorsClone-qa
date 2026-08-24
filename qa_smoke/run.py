@@ -14,6 +14,7 @@ from .adapters import VampireSurvivorsAdapter
 from .charter import DEFAULT_OBJECTIVE, TestCharter
 from .detection import DetectionResult, score_agent_detection
 from .inspector import build_inspection_payload, inspect_trace
+from .memory import sanitize_error_type
 from .evaluation import fault_evidence_refs, scenario_verdict_axes
 from .hypotheses import HypothesisTracker
 from .planners import (
@@ -53,6 +54,29 @@ SCENARIO_OWNED_ARGUMENTS = {
     "max_simulation_seconds": "--max-simulation-seconds",
     "max_steps": "--max-steps",
 }
+
+
+def _public_exception_summary(error: Exception) -> str:
+    error_type = sanitize_error_type(type(error).__name__) or "Exception"
+    return f"{error_type}: details redacted"
+
+
+def _public_run_arguments(args: argparse.Namespace) -> dict[str, Any]:
+    """Serialize reproducibility inputs without credentials or private endpoints."""
+
+    serialized = {
+        key: value
+        for key, value in vars(args).items()
+        if key not in {"api_url", "scenario_definition"}
+    }
+    serialized.update(
+        {
+            "game_exe": str(args.game_exe),
+            "project_root": str(args.project_root),
+            "output": str(args.output),
+        }
+    )
+    return serialized
 
 
 class LLMContractError(RuntimeError):
@@ -662,7 +686,10 @@ def run_session(args: argparse.Namespace) -> int:
         else:
             planner = HeuristicPlanner(args.plan_horizon_seconds, charter)
     except Exception as error:
-        report = recorder.build_report(None, f"{type(error).__name__}: {error}")
+        report = recorder.build_report(
+            None,
+            "LLMInitializationError: details redacted",
+        )
         recorder.write_report(report)
         print(json.dumps({"result": "fail", "report": str(output_dir / "report.json")}, ensure_ascii=False))
         return 1
@@ -705,18 +732,7 @@ def run_session(args: argparse.Namespace) -> int:
             faults=[args.fault] if args.fault else [],
         )
         recorder.launched = True
-        serialized_arguments = {
-            key: value
-            for key, value in vars(args).items()
-            if key != "scenario_definition"
-        }
-        serialized_arguments.update(
-            {
-                "game_exe": str(args.game_exe),
-                "project_root": str(args.project_root),
-                "output": str(args.output),
-            }
-        )
+        serialized_arguments = _public_run_arguments(args)
         (output_dir / "run.json").write_text(
             json.dumps(
                 {
@@ -992,7 +1008,7 @@ def run_session(args: argparse.Namespace) -> int:
             if recorder.total_simulation_time >= args.max_simulation_seconds:
                 break
     except Exception as error:
-        fatal_error = f"{type(error).__name__}: {error}"
+        fatal_error = _public_exception_summary(error)
     finally:
         episode_exit = client.stop()
         if episode_exit.kind != "normal":
@@ -1043,7 +1059,14 @@ def run_session(args: argparse.Namespace) -> int:
             finally:
                 drain_planner_usage(recorder, planner, "final_assessment")
         except Exception as error:
-            recorder.anomalies.append({"step": len(recorder.steps), "kind": "llm_report_failed", "severity": "medium", "evidence": str(error)})
+            recorder.anomalies.append(
+                {
+                    "step": len(recorder.steps),
+                    "kind": "llm_report_failed",
+                    "severity": "medium",
+                    "evidence": _public_exception_summary(error),
+                }
+            )
     inspection = None
     if args.inspector_model and recorder.steps:
         try:
@@ -1086,7 +1109,7 @@ def run_session(args: argparse.Namespace) -> int:
                     "step": len(recorder.steps),
                     "kind": "llm_inspection_failed",
                     "severity": "medium",
-                    "evidence": str(error),
+                    "evidence": _public_exception_summary(error),
                 }
             )
     try:
@@ -1102,7 +1125,7 @@ def run_session(args: argparse.Namespace) -> int:
             hypotheses=hypothesis_tracker.snapshot(),
         )
     except Exception as error:
-        fatal_error = fatal_error or f"EvaluationContractError: {error}"
+        fatal_error = fatal_error or "EvaluationContractError: details redacted"
         verdict = build_run_verdict(
             execution_status="contract_error",
             coverage_status="not_reached",
@@ -1140,7 +1163,12 @@ def main() -> None:
     try:
         args = parse_args()
     except ScenarioContractError as error:
-        print(json.dumps({"result": "contract_error", "error": str(error)}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {"result": "contract_error", "error": _public_exception_summary(error)},
+                ensure_ascii=False,
+            )
+        )
         sys.exit(2)
     sys.exit(run_session(args))
 

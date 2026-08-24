@@ -4,13 +4,19 @@ import json
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from . import cli as cli_module
 from . import exploration_campaign as exploration
-from .detection_campaign import CampaignContractError, InspectionResponse
+from . import run as run_module
+from .detection_campaign import (
+    CampaignContractError,
+    CampaignExecutionError,
+    InspectionResponse,
+)
 
 
 def observation(
@@ -101,6 +107,23 @@ def behavior_finding(
 
 def artifact(*findings: dict[str, Any]) -> dict[str, Any]:
     return {"schema_version": "qa-inspection/v2", "findings": list(findings)}
+
+
+def numeric_finding(
+    field: str,
+    reference: str = "obs-0000",
+    *,
+    comparison: str = "!=",
+) -> dict[str, Any]:
+    return {
+        "kind": "numeric",
+        "field": field,
+        "comparison": comparison,
+        "expected_value": 1.0,
+        "observed_value": 1.25,
+        "statement": f"{field} does not match its expected value.",
+        "evidence_refs": [reference],
+    }
 
 
 def make_record(
@@ -203,6 +226,7 @@ def test_aggregation_retains_one_of_three_and_tracks_planner_inspector_surfaces(
         "planner_only": 0,
         "inspector_only": 0,
         "shared": 1,
+        "runtime_oracle": 0,
         "union": 1,
     }
     candidate = report["candidates"][0]
@@ -286,6 +310,67 @@ def test_candidate_tiers_reproduction_and_priorities_are_deterministic() -> None
     ][0]["reproduced"] is False
 
 
+def test_priority_uses_whole_reason_tokens_instead_of_substrings() -> None:
+    record = make_record(
+        "core-combat-survival",
+        9101,
+        transitions=[transition(0), transition(1)],
+        passes=[
+            artifact(
+                behavior_finding(
+                    "health-did-not-change",
+                    statement="Health did not change after the hit.",
+                ),
+                behavior_finding(
+                    "runtime-hang",
+                    "obs-0001",
+                    statement="The player entered a hang state.",
+                ),
+            ),
+            artifact(),
+            artifact(),
+        ],
+    )
+
+    candidates = {
+        candidate["rule"]: candidate
+        for candidate in exploration.build_exploration_report([record], metadata={})[
+            "candidates"
+        ]
+    }
+
+    assert candidates["health-did-not-change"]["priority"] != "P0"
+    assert candidates["runtime-hang"]["priority"] == "P0"
+
+
+def test_duplicate_findings_merge_evidence_and_statements_without_extra_votes() -> None:
+    first = numeric_finding("player_view.health_ratio")
+    first["statement"] = "First observation statement."
+    second = numeric_finding(
+        "player_view.health_ratio",
+        "obs-0001",
+    )
+    second["observed_value"] = 1.5
+    second["statement"] = "Second observation statement."
+    record = make_record(
+        "core-combat-survival",
+        9101,
+        transitions=[transition(0), transition(1)],
+        passes=[artifact(first, second), artifact(), artifact()],
+    )
+
+    candidate = exploration.build_exploration_report([record], metadata={})[
+        "candidates"
+    ][0]
+
+    assert candidate["inspection_agreement_by_trace"] == {
+        record.opaque_trace_id: "1/3"
+    }
+    assert candidate["evidence"][0]["evidence_refs"] == ["obs-0000", "obs-0001"]
+    assert "First observation statement." in " ".join(candidate["statements"])
+    assert "Second observation statement." in " ".join(candidate["statements"])
+
+
 def test_harness_failures_are_excluded_and_zero_report_avoids_bug_free_claims() -> None:
     injected = make_record(
         "core-combat-survival",
@@ -298,7 +383,7 @@ def test_harness_failures_are_excluded_and_zero_report_avoids_bug_free_claims() 
         "core-combat-survival",
         9102,
         transitions=[transition(0)],
-        passes=[artifact(behavior_finding("also-excluded")), artifact(), artifact()],
+        passes=[artifact(), artifact(), artifact()],
         coverage_status="not_reached",
     )
     model_failure = make_record(
@@ -387,6 +472,21 @@ class FakeInspector:
         )
 
 
+class ResultBackend:
+    def __init__(self, result: exploration.ExplorationEpisodeResult) -> None:
+        self.result = result
+        self.calls = 0
+
+    def run_autonomous(self, spec, output_dir):
+        self.calls += 1
+        return self.result
+
+
+class RaisingBackend:
+    def run_autonomous(self, spec, output_dir):
+        raise RuntimeError("provider-secret-body-must-not-be-retained")
+
+
 def campaign_config(tmp_path: Path, *, resume: bool = False):
     build = tmp_path / "game-build"
     if not build.exists():
@@ -399,6 +499,227 @@ def campaign_config(tmp_path: Path, *, resume: bool = False):
         quiet=True,
         resume=resume,
     )
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        exploration.ExplorationEpisodeResult(
+            transitions=[transition(0)],
+            launch_faults=("health_ratio_out_of_range",),
+        ),
+        exploration.ExplorationEpisodeResult(
+            transitions=[transition(0)],
+            execution_status="bridge_failure",
+            error="BridgeProcessError",
+        ),
+        exploration.ExplorationEpisodeResult(
+            transitions=[transition(0)],
+            execution_status="model_failure",
+            error="LLMTransportError",
+        ),
+        exploration.ExplorationEpisodeResult(
+            transitions=[transition(0)],
+            execution_status="schema_error",
+            error="ValueError",
+        ),
+    ],
+)
+def test_dirty_or_required_execution_failure_makes_campaign_incomplete(
+    tmp_path: Path,
+    result: exploration.ExplorationEpisodeResult,
+) -> None:
+    settings = campaign_config(tmp_path)
+
+    with pytest.raises((CampaignContractError, CampaignExecutionError)):
+        exploration.run_exploration_campaign(
+            settings,
+            backend=ResultBackend(result),
+            inspector=FakeInspector(),
+        )
+
+    manifest = json.loads((settings.output / "campaign-manifest.json").read_text())
+    assert manifest["status"] == "incomplete"
+    assert not (settings.output / "exploration-report.json").exists()
+    assert not (settings.output / "exploration-report.ko.md").exists()
+
+
+def test_backend_failure_artifacts_keep_only_a_safe_error_type(tmp_path: Path) -> None:
+    settings = campaign_config(tmp_path)
+
+    with pytest.raises(CampaignExecutionError):
+        exploration.run_exploration_campaign(
+            settings,
+            backend=RaisingBackend(),
+            inspector=FakeInspector(),
+        )
+
+    public_artifacts = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            settings.output / "campaign-manifest.json",
+            settings.output / "checkpoint.json",
+            next(settings.output.glob("traces/**/episode-result.json")),
+        )
+    )
+    assert "RuntimeError" in public_artifacts
+    assert "provider-secret" not in public_artifacts
+
+
+def test_coverage_not_reached_remains_a_separately_reported_outcome(
+    tmp_path: Path,
+) -> None:
+    settings = campaign_config(tmp_path)
+    result = exploration.run_exploration_campaign(
+        settings,
+        backend=ResultBackend(
+            exploration.ExplorationEpisodeResult(
+                transitions=[transition(0)],
+                coverage_status="not_reached",
+            )
+        ),
+        inspector=FakeInspector(),
+    )
+
+    manifest = json.loads(result.manifest_path.read_text())
+    report = json.loads(result.report_path.read_text())
+    assert manifest["status"] == "complete"
+    assert report["summary"]["candidate_count"] == 0
+    assert report["summary"]["eligible_gameplay_traces"] == 0
+    assert {item["kind"] for item in report["harness_failures"]} == {
+        "coverage_failure"
+    }
+
+
+def test_coverage_gap_does_not_discard_an_evidence_valid_game_candidate() -> None:
+    record = make_record(
+        "long-multi-level-growth-upgrades",
+        9101,
+        transitions=[transition(0)],
+        passes=[artifact(behavior_finding("runtime-crash")), artifact(), artifact()],
+        coverage_status="not_reached",
+    )
+
+    report = exploration.build_exploration_report([record], metadata={})
+
+    assert report["summary"]["eligible_gameplay_traces"] == 0
+    assert report["summary"]["candidate_evidence_traces"] == 1
+    assert report["summary"]["candidate_count"] == 1
+    assert report["candidates"][0]["priority"] == "P0"
+    assert {item["kind"] for item in report["harness_failures"]} == {
+        "coverage_failure"
+    }
+
+
+def test_failed_resume_archives_stale_complete_reports(tmp_path: Path) -> None:
+    settings = campaign_config(tmp_path)
+    exploration.run_exploration_campaign(
+        settings,
+        backend=FakeBackend(),
+        inspector=FakeInspector(),
+    )
+    episode = next(settings.output.glob("traces/**/episode-result.json"))
+    episode.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(CampaignContractError):
+        exploration.run_exploration_campaign(
+            replace(settings, resume=True),
+            backend=ResultBackend(
+                exploration.ExplorationEpisodeResult(
+                    transitions=[transition(0)],
+                    launch_faults=("dirty",),
+                )
+            ),
+            inspector=FakeInspector(),
+        )
+
+    assert not (settings.output / "exploration-report.json").exists()
+    assert not (settings.output / "exploration-report.ko.md").exists()
+    assert list(settings.output.glob(".superseded-results/**/exploration-report.json"))
+
+
+def test_report_publication_failure_leaves_only_an_incomplete_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = campaign_config(tmp_path)
+    original_write_text = Path.write_text
+
+    def fail_markdown(self, data, *args, **kwargs):
+        if self.name == "exploration-report.ko.md":
+            raise OSError("publication failed")
+        return original_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_markdown)
+
+    with pytest.raises(OSError):
+        exploration.run_exploration_campaign(
+            settings,
+            backend=FakeBackend(),
+            inspector=FakeInspector(),
+        )
+
+    manifest = json.loads((settings.output / "campaign-manifest.json").read_text())
+    assert manifest["status"] == "incomplete"
+    assert not (settings.output / "exploration-report.json").exists()
+    assert not (settings.output / "exploration-report.ko.md").exists()
+    assert list(settings.output.glob(".superseded-results/**/exploration-report.json"))
+
+
+def test_explore_cli_returns_nonzero_for_incomplete_campaign(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("QA_API_KEY", "test-key")
+    settings = campaign_config(tmp_path)
+    parsed = cli_module.parse_cli(
+        [
+            "explore",
+            "--build",
+            str(settings.build),
+            "--project-root",
+            str(settings.project_root),
+            "--output",
+            str(settings.output),
+        ]
+    )
+
+    def fail_campaign(*args, **kwargs):
+        raise CampaignExecutionError("required unit failed")
+
+    monkeypatch.setattr(exploration, "run_exploration_campaign", fail_campaign)
+
+    assert cli_module._explore(parsed) == 2
+
+
+def test_explore_cli_records_safe_incomplete_manifest_on_inspector_init_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("QA_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    settings = campaign_config(tmp_path)
+    parsed = cli_module.parse_cli(
+        [
+            "explore",
+            "--build",
+            str(settings.build),
+            "--project-root",
+            str(settings.project_root),
+            "--output",
+            str(settings.output),
+        ]
+    )
+
+    assert cli_module._explore(parsed) == 2
+    manifest_text = (settings.output / "campaign-manifest.json").read_text()
+    manifest = json.loads(manifest_text)
+    assert manifest["status"] == "incomplete"
+    assert manifest["failure"] == {
+        "status": "model_failure",
+        "error_type": "ValueError",
+    }
+    assert "QA_API_KEY" not in manifest_text
 
 
 def test_campaign_runs_blind_clean_schedule_and_exactly_resumes_with_tamper_repair(
@@ -502,6 +823,463 @@ def test_resume_hash_includes_the_rubric_file(tmp_path: Path) -> None:
             backend=backend,
             inspector=inspector,
         )
+
+
+def test_campaign_identity_tracks_effective_endpoint_query_and_planner_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = campaign_config(tmp_path)
+    build_hash = exploration.hash_path(settings.build)
+    monkeypatch.setenv(
+        "QA_API_URL",
+        "https://user:secret@example.invalid/v1/chat/completions?api-version=1&token=hidden",
+    )
+    endpoint_v1 = exploration._campaign_hash(settings, build_hash)
+    public_endpoint_v1 = exploration._public_api_endpoint_hash(None)
+    monkeypatch.setenv(
+        "QA_API_URL",
+        "https://user:secret@example.invalid/v1/chat/completions?api-version=2&token=hidden",
+    )
+    endpoint_v2 = exploration._campaign_hash(settings, build_hash)
+    public_endpoint_v2 = exploration._public_api_endpoint_hash(None)
+
+    assert endpoint_v1 != endpoint_v2
+    assert public_endpoint_v1 == public_endpoint_v2
+    assert "secret" not in public_endpoint_v1
+    assert "hidden" not in public_endpoint_v1
+
+    completed = exploration.run_exploration_campaign(
+        settings,
+        backend=FakeBackend(),
+        inspector=FakeInspector(),
+    )
+    public_manifest = completed.manifest_path.read_text(encoding="utf-8")
+    assert "secret" not in public_manifest
+    assert "hidden" not in public_manifest
+    assert "api-version" not in public_manifest
+
+    prompt_before = exploration._steering_prompt_digest()
+
+    def changed_prompt(self):
+        return "changed steering prompt"
+
+    monkeypatch.setattr(
+        exploration.LLMPlanner,
+        "_planning_system_prompt",
+        changed_prompt,
+    )
+    prompt_after = exploration._steering_prompt_digest()
+
+    assert prompt_before != prompt_after
+    assert exploration._campaign_hash(settings, build_hash) != endpoint_v2
+
+
+def test_steering_identity_includes_all_effective_prompt_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called_files: set[str] = set()
+    original_file_hash = exploration._file_hash
+
+    def track_file_hash(path: Path) -> str:
+        called_files.add(Path(path).name)
+        return original_file_hash(path)
+
+    monkeypatch.setattr(exploration, "_file_hash", track_file_hash)
+    exploration._steering_prompt_digest()
+
+    assert {
+        "charter.py",
+        "memory.py",
+        "planners.py",
+        "reporting.py",
+        "run.py",
+        "state_channels.py",
+    } <= called_files
+    assert exploration.STEERING_PROMPT_TEMPLATE_VERSION == "qa-planning/v6"
+
+
+def test_campaign_identity_includes_inspection_normalizer_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = campaign_config(tmp_path)
+    build_hash = exploration.hash_path(settings.build)
+    before = exploration._campaign_hash(settings, build_hash)
+
+    monkeypatch.setattr(
+        exploration,
+        "INSPECTION_NORMALIZER_VERSION",
+        "changed-normalizer-version",
+        raising=False,
+    )
+
+    assert exploration._campaign_hash(settings, build_hash) != before
+
+
+def test_run_arguments_never_persist_the_private_api_endpoint() -> None:
+    arguments = run_module._public_run_arguments(
+        SimpleNamespace(
+            api_url=(
+                "https://user:secret@example.invalid/v1/chat/completions"
+                "?api-version=2&token=hidden"
+            ),
+            scenario_definition=None,
+            game_exe=Path("/tmp/game"),
+            project_root=Path("/tmp/project"),
+            output=Path("/tmp/output"),
+            policy="llm",
+        )
+    )
+
+    serialized = json.dumps(arguments)
+    assert "api_url" not in arguments
+    assert "secret" not in serialized
+    assert "hidden" not in serialized
+
+
+def test_real_run_planner_initialization_report_is_safely_classified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("QA_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    output = tmp_path / "planner-init-run"
+    args = run_module.parse_args(
+        [
+            "--game-exe",
+            str(tmp_path / "unused-game"),
+            "--project-root",
+            str(Path(__file__).resolve().parents[1]),
+            "--output",
+            str(output),
+            "--mode",
+            "qa",
+            "--policy",
+            "llm",
+            "--model",
+            exploration.STEERING_MODEL,
+            "--objective",
+            "Exercise planner initialization safely.",
+            "--quiet",
+        ]
+    )
+
+    assert run_module.run_session(args) == 1
+    report_text = (output / "report.json").read_text()
+    report = json.loads(report_text)
+    assert report["fatal_error"] == "LLMInitializationError: details redacted"
+    assert "QA_API_KEY" not in report_text
+
+    spec = exploration.build_track_a_schedule()[0]
+    loaded = exploration.BridgeExplorationBackend._load_result(spec, output)
+    assert loaded.execution_status == "model_failure"
+    assert loaded.error == "LLMInitializationError"
+
+
+def write_bridge_artifacts(
+    output: Path,
+    *,
+    transitions: list[dict[str, Any]] | None = None,
+    anomalies: list[dict[str, Any]] | None = None,
+    fatal_error: str | None = None,
+    write_session_files: bool = True,
+) -> None:
+    output.mkdir(parents=True, exist_ok=True)
+    report = {
+        "policy": "llm",
+        "fatal_error": fatal_error,
+        "rule_based_anomalies": anomalies or [],
+    }
+    (output / "report.json").write_text(json.dumps(report), encoding="utf-8")
+    if not write_session_files:
+        return
+    (output / "steps.jsonl").write_text(
+        "".join(json.dumps(item) + "\n" for item in (transitions or [])),
+        encoding="utf-8",
+    )
+    (output / "verdict.json").write_text(
+        json.dumps({"execution_status": "completed"}),
+        encoding="utf-8",
+    )
+    (output / "run.json").write_text(
+        json.dumps({"arguments": {"fault": ""}}),
+        encoding="utf-8",
+    )
+
+
+def test_terminal_anomaly_uses_last_or_trace_level_public_evidence(tmp_path: Path) -> None:
+    spec = exploration.build_track_a_schedule()[0]
+    output = tmp_path / "terminal"
+    write_bridge_artifacts(
+        output,
+        transitions=[transition(0)],
+        anomalies=[
+            {
+                "step": 1,
+                "kind": "hang",
+                "severity": "critical",
+                "evidence": "Player process entered a hang state.",
+            }
+        ],
+    )
+    result = exploration.BridgeExplorationBackend._load_result(spec, output)
+    record = exploration.ExplorationTraceRecord(
+        spec=spec,
+        opaque_trace_id="opaque-terminal",
+        result=result,
+        inspection_passes=[artifact(), artifact(), artifact()],
+    )
+
+    report = exploration.build_exploration_report([record], metadata={})
+    terminal = report["candidates"][0]
+    assert terminal["rule"] == "hang"
+    assert terminal["priority"] == "P0"
+    assert terminal["tier"] == "validated-invariant candidate"
+    assert terminal["evidence"][0]["evidence_refs"] == ["obs-0000"]
+    assert report["surface_counts"]["runtime_oracle"] == 1
+
+    empty_output = tmp_path / "empty-terminal"
+    write_bridge_artifacts(
+        empty_output,
+        transitions=[],
+        anomalies=[
+            {
+                "step": 0,
+                "kind": "crash",
+                "severity": "critical",
+                "evidence": "Player crashed before the first observation.",
+            }
+        ],
+    )
+    empty = exploration.BridgeExplorationBackend._load_result(spec, empty_output)
+    assert empty.trace_evidence_refs == (
+        "trace-termination-core-menu-level1-9101",
+    )
+    assert empty.invariant_validations[0]["evidence_refs"] == list(
+        empty.trace_evidence_refs
+    )
+    empty_record = exploration.ExplorationTraceRecord(
+        spec=spec,
+        opaque_trace_id="opaque-empty-terminal",
+        result=empty,
+        inspection_passes=[None, None, None],
+    )
+    empty_report = exploration.build_exploration_report([empty_record], metadata={})
+    assert empty_report["summary"]["candidate_count"] == 0
+    assert "schema_failure" in {
+        failure["kind"] for failure in empty_report["harness_failures"]
+    }
+
+
+def test_terminal_anomaly_falls_back_to_the_last_valid_observation(tmp_path: Path) -> None:
+    spec = exploration.build_track_a_schedule()[0]
+    output = tmp_path / "terminal-last-valid"
+    transition_without_observation = transition(1)
+    transition_without_observation["observation"] = {}
+    write_bridge_artifacts(
+        output,
+        transitions=[transition(0), transition_without_observation],
+        anomalies=[
+            {
+                "step": 2,
+                "kind": "crash",
+                "severity": "critical",
+                "evidence": "Player crashed after the last valid observation.",
+            }
+        ],
+    )
+
+    result = exploration.BridgeExplorationBackend._load_result(spec, output)
+
+    assert result.invariant_validations[0]["evidence_refs"] == ["obs-0000"]
+    assert not result.trace_evidence_refs
+
+
+def test_terminal_player_error_is_preserved_as_bridge_failure(
+    tmp_path: Path,
+) -> None:
+    spec = exploration.build_track_a_schedule()[0]
+    output = tmp_path / "terminal-error"
+    write_bridge_artifacts(
+        output,
+        transitions=[transition(0)],
+        anomalies=[
+            {
+                "step": 1,
+                "kind": "error",
+                "severity": "critical",
+                "evidence": "Player process could not be stopped or recovered.",
+            }
+        ],
+    )
+    result = exploration.BridgeExplorationBackend._load_result(spec, output)
+    assert not result.invariant_validations
+    assert result.harness_failures == (
+        {"kind": "bridge_failure", "detail": "player termination error"},
+    )
+
+
+def test_runtime_freeze_anomaly_is_preserved_as_hang_candidate(tmp_path: Path) -> None:
+    spec = exploration.build_track_a_schedule()[0]
+    output = tmp_path / "runtime-freeze"
+    write_bridge_artifacts(
+        output,
+        transitions=[transition(0)],
+        anomalies=[
+            {
+                "step": 0,
+                "kind": "freeze",
+                "severity": "critical",
+                "evidence": "Frame and simulation time did not advance.",
+            }
+        ],
+    )
+    result = exploration.BridgeExplorationBackend._load_result(spec, output)
+    record = exploration.ExplorationTraceRecord(
+        spec=spec,
+        opaque_trace_id="opaque-runtime-freeze",
+        result=result,
+        inspection_passes=[artifact(), artifact(), artifact()],
+    )
+
+    candidate = exploration.build_exploration_report([record], metadata={})[
+        "candidates"
+    ][0]
+    assert candidate["rule"] == "hang"
+    assert candidate["priority"] == "P0"
+
+
+def test_view_state_invariant_matches_only_the_same_numeric_relation(tmp_path: Path) -> None:
+    spec = exploration.build_track_a_schedule()[0]
+    output = tmp_path / "view-state"
+    write_bridge_artifacts(
+        output,
+        transitions=[transition(0)],
+        anomalies=[
+            {
+                "step": 0,
+                "kind": "view_state_match",
+                "severity": "high",
+                "evidence": "player_view.health_ratio=1.25 expected=1.0",
+            }
+        ],
+    )
+    result = exploration.BridgeExplorationBackend._load_result(spec, output)
+    record = exploration.ExplorationTraceRecord(
+        spec=spec,
+        opaque_trace_id="opaque-view-state",
+        result=result,
+        inspection_passes=[
+            artifact(
+                numeric_finding("player_view.health_ratio"),
+                numeric_finding("player_view.exp_ratio"),
+            ),
+            artifact(),
+            artifact(),
+        ],
+    )
+
+    candidates = {
+        candidate["field"]: candidate
+        for candidate in exploration.build_exploration_report([record], metadata={})[
+            "candidates"
+        ]
+    }
+    assert candidates["player_view.health_ratio"]["tier"] == (
+        "validated-invariant candidate"
+    )
+    assert candidates["player_view.exp_ratio"]["tier"] == (
+        "evidence-linked candidate"
+    )
+
+
+def test_report_only_planner_initialization_failure_remains_model_failure(
+    tmp_path: Path,
+) -> None:
+    spec = exploration.build_track_a_schedule()[0]
+    output = tmp_path / "planner-init"
+    write_bridge_artifacts(
+        output,
+        fatal_error=(
+            "ValueError: LLM policy requires QA_API_KEY; "
+            "provider-secret-body-must-not-be-retained"
+        ),
+        write_session_files=False,
+    )
+
+    result = exploration.BridgeExplorationBackend._load_result(spec, output)
+
+    assert result.execution_status == "model_failure"
+    assert result.error == "ValueError"
+    assert "provider-secret" not in json.dumps(result.to_dict())
+
+
+def test_report_only_llm_contract_failure_remains_schema_failure(tmp_path: Path) -> None:
+    spec = exploration.build_track_a_schedule()[0]
+    output = tmp_path / "planner-contract"
+    write_bridge_artifacts(
+        output,
+        fatal_error="LLMContractError: private malformed response body",
+        write_session_files=False,
+    )
+
+    result = exploration.BridgeExplorationBackend._load_result(spec, output)
+
+    assert result.execution_status == "schema_failure"
+    assert result.error == "LLMContractError"
+    assert "private malformed" not in json.dumps(result.to_dict())
+
+
+def test_provider_transport_failure_is_not_reclassified_by_private_body_words(
+    tmp_path: Path,
+) -> None:
+    spec = exploration.build_track_a_schedule()[0]
+    output = tmp_path / "provider-transport"
+    write_bridge_artifacts(
+        output,
+        fatal_error=(
+            "LLMTransportError: provider rejected response schema; private body"
+        ),
+        write_session_files=False,
+    )
+
+    result = exploration.BridgeExplorationBackend._load_result(spec, output)
+
+    assert result.execution_status == "model_failure"
+    assert result.error == "LLMTransportError"
+
+
+def test_markdown_preserves_tier_agreement_evidence_and_json_values() -> None:
+    finding = behavior_finding("progress-stalled")
+    record = make_record(
+        "core-combat-survival",
+        9101,
+        transitions=[transition(0)],
+        passes=[artifact(finding), artifact(finding), artifact()],
+        invariant_validations=[
+            {
+                "category": "behavior",
+                "rule": "progress-stalled",
+                "field": "",
+                "phase": "active_gameplay",
+                "event": "",
+                "evidence_refs": ["obs-0000"],
+            }
+        ],
+    )
+    report = exploration.build_exploration_report([record], metadata={})
+    candidate = report["candidates"][0]
+    markdown = exploration.render_exploration_markdown(report)
+
+    assert "validated-invariant candidate: 1" in markdown
+    assert "evidence-linked candidate: 0" in markdown
+    assert "2/3" in markdown
+    assert "obs-0000" in markdown
+    assert candidate["candidate_id"] in markdown
+    assert candidate["priority"] in markdown
+    assert ("예" if candidate["reproduced"] else "아니오") in markdown
 
 
 def test_cli_parses_explore_options_and_keeps_benchmark_detection_stable(tmp_path: Path) -> None:

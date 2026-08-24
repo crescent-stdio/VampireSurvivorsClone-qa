@@ -15,8 +15,11 @@ from .state_channels import build_agent_observation
 
 INSPECTION_SCHEMA_V1 = "qa-inspection/v1"
 INSPECTION_SCHEMA_V2 = "qa-inspection/v2"
+INSPECTION_NORMALIZER_VERSION = "qa-inspection-normalizer/v2"
 INSPECTION_CHUNK_SIZE = 32
 INSPECTION_CHUNK_OVERLAP = 2
+MAX_MERGED_FINDING_STATEMENT_CHARS = 2000
+_MERGED_STATEMENT_SEPARATOR = " | "
 
 
 INSPECTOR_SYSTEM_PROMPT = """You are a QA engineer auditing a recorded gameplay trace for internal inconsistencies.
@@ -168,6 +171,12 @@ def _deduplicate_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]
         existing["evidence_refs"] = list(
             dict.fromkeys([*existing["evidence_refs"], *finding["evidence_refs"]])
         )
+        statements = existing["statement"].split(_MERGED_STATEMENT_SEPARATOR)
+        statement = finding["statement"]
+        if statement not in statements:
+            merged = _MERGED_STATEMENT_SEPARATOR.join([*statements, statement])
+            if len(merged) <= MAX_MERGED_FINDING_STATEMENT_CHARS:
+                existing["statement"] = merged
     return list(deduplicated.values())
 
 

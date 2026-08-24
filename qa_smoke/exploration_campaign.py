@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -18,6 +19,7 @@ from .detection_campaign import (
     SEEDS,
     STEERING_MODEL,
     CampaignContractError,
+    CampaignExecutionError,
     CheckpointStore,
     InspectionCallBudget,
     InspectorAdapter,
@@ -33,7 +35,20 @@ from .detection_campaign import (
     hash_path,
     inspect_trace_pass,
 )
-from .inspector import INSPECTOR_SYSTEM_PROMPT, normalize_inspection_artifact
+from .inspector import (
+    INSPECTOR_SYSTEM_PROMPT,
+    INSPECTION_NORMALIZER_VERSION,
+    MAX_MERGED_FINDING_STATEMENT_CHARS,
+    normalize_inspection_artifact,
+)
+from .memory import sanitize_error_type as _sanitize_error_type
+from .planners import (
+    PLANNING_MAX_TOKENS,
+    LLMPlanner,
+    build_decision_response_schema,
+    resolve_llm_api_url,
+)
+from .reporting import RunRecorder
 from .run import parse_args as parse_run_args
 from .run import run_session
 
@@ -41,6 +56,11 @@ from .run import run_session
 EXPLORATION_REPORT_SCHEMA = "qa-exploration-report/v1"
 TRACK_A_PRESET = "smoke"
 PLANNED_INSPECTION_CALLS = 189
+STEERING_PROMPT_TEMPLATE_VERSION = str(
+    RunRecorder.__dataclass_fields__["prompt_version"].default
+)
+STEERING_PLAN_HORIZON_SECONDS = 5.0
+MAX_MARKDOWN_EVIDENCE_ROWS_PER_CANDIDATE = 12
 
 
 @dataclass(frozen=True)
@@ -138,6 +158,7 @@ class ExplorationEpisodeResult:
     launch_faults: tuple[str, ...] = ()
     invariant_validations: Sequence[dict[str, Any]] = field(default_factory=tuple)
     harness_failures: Sequence[dict[str, Any]] = field(default_factory=tuple)
+    trace_evidence_refs: Sequence[str] = field(default_factory=tuple)
     error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -148,6 +169,7 @@ class ExplorationEpisodeResult:
             "launch_faults": list(self.launch_faults),
             "invariant_validations": list(self.invariant_validations),
             "harness_failures": list(self.harness_failures),
+            "trace_evidence_refs": list(self.trace_evidence_refs),
             "error": self.error,
         }
 
@@ -161,6 +183,7 @@ class ExplorationEpisodeResult:
         launch_faults = value.get("launch_faults") or []
         validations = value.get("invariant_validations") or []
         failures = value.get("harness_failures") or []
+        trace_evidence_refs = value.get("trace_evidence_refs") or []
         if not isinstance(launch_faults, list) or any(
             not isinstance(item, str) for item in launch_faults
         ):
@@ -173,6 +196,10 @@ class ExplorationEpisodeResult:
             not isinstance(item, dict) for item in failures
         ):
             raise CampaignContractError("harness failures must be a list of objects")
+        if not isinstance(trace_evidence_refs, list) or any(
+            not isinstance(item, str) for item in trace_evidence_refs
+        ):
+            raise CampaignContractError("trace evidence refs must be a list of strings")
         return cls(
             transitions=transitions,
             execution_status=str(value.get("execution_status") or "schema_error"),
@@ -180,6 +207,7 @@ class ExplorationEpisodeResult:
             launch_faults=tuple(launch_faults),
             invariant_validations=tuple(validations),
             harness_failures=tuple(failures),
+            trace_evidence_refs=tuple(trace_evidence_refs),
             error=str(value.get("error") or ""),
         )
 
@@ -280,6 +308,7 @@ def _numeric_rule(comparison: Any) -> str:
 
 def _observation_context(
     transitions: Sequence[dict[str, Any]],
+    trace_evidence_refs: Sequence[str] = (),
 ) -> dict[str, tuple[str, str]]:
     contexts: dict[str, tuple[str, str]] = {}
     for transition in transitions:
@@ -297,6 +326,9 @@ def _observation_context(
         observation_id = str(raw.get("observation_id") or "").strip()
         if observation_id:
             contexts[observation_id] = (phase, event)
+    for evidence_ref in trace_evidence_refs:
+        if evidence_ref:
+            contexts[evidence_ref] = ("termination", "termination")
     return contexts
 
 
@@ -333,7 +365,10 @@ def _candidate_key(
 
 
 def _planner_occurrences(record: ExplorationTraceRecord) -> list[dict[str, Any]]:
-    contexts = _observation_context(record.result.transitions)
+    contexts = _observation_context(
+        record.result.transitions,
+        record.result.trace_evidence_refs,
+    )
     occurrences: list[dict[str, Any]] = []
     for transition in record.result.transitions:
         decision = transition.get("decision")
@@ -367,13 +402,16 @@ def _planner_occurrences(record: ExplorationTraceRecord) -> list[dict[str, Any]]
 
 
 def _inspector_occurrences(record: ExplorationTraceRecord) -> list[dict[str, Any]]:
-    contexts = _observation_context(record.result.transitions)
+    contexts = _observation_context(
+        record.result.transitions,
+        record.result.trace_evidence_refs,
+    )
     occurrences: list[dict[str, Any]] = []
     for pass_index, artifact in enumerate(record.inspection_passes, start=1):
         if artifact is None:
             continue
         normalized = normalize_inspection_artifact(artifact)
-        seen_in_pass: set[CandidateKey] = set()
+        seen_in_pass: dict[CandidateKey, dict[str, Any]] = {}
         for finding in normalized["findings"]:
             evidence = _evidence_context(finding.get("evidence_refs"), contexts)
             if evidence is None:
@@ -387,26 +425,37 @@ def _inspector_occurrences(record: ExplorationTraceRecord) -> list[dict[str, Any
                 rule = finding.get("rule") or ""
                 field_name = ""
             key = _candidate_key(category, rule, field_name, phase, event)
-            if key in seen_in_pass:
+            existing = seen_in_pass.get(key)
+            if existing is not None:
+                existing["evidence_refs"] = tuple(
+                    dict.fromkeys([*existing["evidence_refs"], *refs])
+                )
+                statement = str(finding.get("statement") or "").strip()
+                if statement and statement not in existing["statement"].split(" | "):
+                    merged = " | ".join([existing["statement"], statement])
+                    if len(merged) <= MAX_MERGED_FINDING_STATEMENT_CHARS:
+                        existing["statement"] = merged
                 continue
-            seen_in_pass.add(key)
-            occurrences.append(
-                {
-                    "key": key,
-                    "source": "inspector",
-                    "trace_id": record.opaque_trace_id,
-                    "mission_id": record.spec.mission_id,
-                    "seed": record.spec.seed,
-                    "statement": str(finding.get("statement") or "").strip(),
-                    "evidence_refs": refs,
-                    "pass_index": pass_index,
-                }
-            )
+            occurrence = {
+                "key": key,
+                "source": "inspector",
+                "trace_id": record.opaque_trace_id,
+                "mission_id": record.spec.mission_id,
+                "seed": record.spec.seed,
+                "statement": str(finding.get("statement") or "").strip(),
+                "evidence_refs": refs,
+                "pass_index": pass_index,
+            }
+            seen_in_pass[key] = occurrence
+            occurrences.append(occurrence)
     return occurrences
 
 
 def _normalized_invariant_keys(record: ExplorationTraceRecord) -> set[CandidateKey]:
-    contexts = _observation_context(record.result.transitions)
+    contexts = _observation_context(
+        record.result.transitions,
+        record.result.trace_evidence_refs,
+    )
     keys: set[CandidateKey] = set()
     for validation in record.result.invariant_validations:
         if not isinstance(validation, dict):
@@ -423,6 +472,43 @@ def _normalized_invariant_keys(record: ExplorationTraceRecord) -> set[CandidateK
             )
         )
     return keys
+
+
+def _runtime_oracle_occurrences(
+    record: ExplorationTraceRecord,
+) -> list[dict[str, Any]]:
+    contexts = _observation_context(
+        record.result.transitions,
+        record.result.trace_evidence_refs,
+    )
+    occurrences: list[dict[str, Any]] = []
+    for validation in record.result.invariant_validations:
+        if not isinstance(validation, dict) or not validation.get("emit_candidate"):
+            continue
+        evidence = _evidence_context(validation.get("evidence_refs"), contexts)
+        if evidence is None:
+            continue
+        refs, phase, event = evidence
+        key = _candidate_key(
+            validation.get("category"),
+            validation.get("rule"),
+            validation.get("field"),
+            validation.get("phase") or phase,
+            validation.get("event") or event,
+        )
+        occurrences.append(
+            {
+                "key": key,
+                "source": "runtime_oracle",
+                "trace_id": record.opaque_trace_id,
+                "mission_id": record.spec.mission_id,
+                "seed": record.spec.seed,
+                "statement": str(validation.get("statement") or "").strip(),
+                "evidence_refs": refs,
+                "pass_index": None,
+            }
+        )
+    return occurrences
 
 
 def _record_failures(record: ExplorationTraceRecord) -> list[dict[str, Any]]:
@@ -485,11 +571,10 @@ def _record_failures(record: ExplorationTraceRecord) -> list[dict[str, Any]]:
     return failures
 
 
-def _eligible(record: ExplorationTraceRecord) -> bool:
+def _candidate_eligible(record: ExplorationTraceRecord) -> bool:
     return (
         not record.result.launch_faults
         and record.result.execution_status == "completed"
-        and record.result.coverage_status == "reached"
         and bool(record.result.transitions)
         and not record.result.harness_failures
         and len(record.inspection_passes) == INSPECTION_REPETITIONS
@@ -497,9 +582,18 @@ def _eligible(record: ExplorationTraceRecord) -> bool:
     )
 
 
+def _coverage_eligible(record: ExplorationTraceRecord) -> bool:
+    return _candidate_eligible(record) and record.result.coverage_status == "reached"
+
+
 def _priority(key: CandidateKey, statements: Sequence[str], reproduced: bool) -> str:
     haystack = " ".join([*key, *statements]).lower()
-    if any(token in haystack for token in ("crash", "hang", "freeze", "unrecoverable")):
+    reason_tokens = set(re.findall(r"[a-z0-9]+", haystack))
+    if (
+        "crash" in reason_tokens
+        or "hang" in reason_tokens
+        or {"unrecoverable", "blocker"}.issubset(reason_tokens)
+    ):
         return "P0"
     if reproduced and any(
         token in haystack
@@ -542,12 +636,13 @@ def build_exploration_report(
     failures: list[dict[str, Any]] = []
     for record in records:
         failures.extend(_record_failures(record))
-        if not _eligible(record):
+        if not _candidate_eligible(record):
             continue
         invariant_keys.update(_normalized_invariant_keys(record))
         grouped_occurrences = [
             *_planner_occurrences(record),
             *_inspector_occurrences(record),
+            *_runtime_oracle_occurrences(record),
         ]
         for occurrence in grouped_occurrences:
             grouped[occurrence["key"]].append(occurrence)
@@ -556,12 +651,15 @@ def build_exploration_report(
     for key in sorted(grouped):
         occurrences = grouped[key]
         sources = {item["source"] for item in occurrences}
+        agent_sources = sources & {"planner", "inspector"}
         surface = (
             "shared"
-            if sources == {"planner", "inspector"}
+            if agent_sources == {"planner", "inspector"}
             else "planner_only"
-            if sources == {"planner"}
+            if agent_sources == {"planner"}
             else "inspector_only"
+            if agent_sources == {"inspector"}
+            else "runtime_oracle"
         )
         mission_seeds: dict[str, set[int]] = defaultdict(set)
         for occurrence in occurrences:
@@ -622,20 +720,26 @@ def build_exploration_report(
     surface_counter = Counter(candidate["surface"] for candidate in candidates)
     priority_counter = Counter(candidate["priority"] for candidate in candidates)
     tier_counter = Counter(candidate["tier"] for candidate in candidates)
-    eligible_count = sum(_eligible(record) for record in records)
+    eligible_count = sum(_coverage_eligible(record) for record in records)
+    candidate_evidence_count = sum(_candidate_eligible(record) for record in records)
     return {
         "schema_version": EXPLORATION_REPORT_SCHEMA,
         "metadata": dict(metadata),
         "summary": {
             "scheduled_traces": len(records),
             "eligible_gameplay_traces": eligible_count,
-            "excluded_harness_traces": len(records) - eligible_count,
+            "candidate_evidence_traces": candidate_evidence_count,
+            "coverage_not_reached_traces": sum(
+                record.result.coverage_status == "not_reached" for record in records
+            ),
+            "excluded_harness_traces": len(records) - candidate_evidence_count,
             "candidate_count": len(candidates),
         },
         "surface_counts": {
             "planner_only": surface_counter["planner_only"],
             "inspector_only": surface_counter["inspector_only"],
             "shared": surface_counter["shared"],
+            "runtime_oracle": surface_counter["runtime_oracle"],
             "union": len(candidates),
         },
         "tier_counts": {
@@ -660,9 +764,54 @@ def exploration_report_json(report: Mapping[str, Any]) -> str:
     return json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
+def _callable_code_digest(function: Any) -> str:
+    code = function.__code__
+    return _sha256(
+        {
+            "bytecode": code.co_code.hex(),
+            "constants": [repr(value) for value in code.co_consts],
+            "names": list(code.co_names),
+            "variables": list(code.co_varnames),
+        }
+    )
+
+
+def _steering_prompt_digest() -> str:
+    """Bind resume identity to the exact planner prompt construction code."""
+
+    dependency_files = (
+        "charter.py",
+        "memory.py",
+        "planners.py",
+        "reporting.py",
+        "run.py",
+        "state_channels.py",
+    )
+    return _sha256(
+        {
+            "version": STEERING_PROMPT_TEMPLATE_VERSION,
+            "dependencies": {
+                name: _file_hash(Path(__file__).with_name(name))
+                for name in dependency_files
+            },
+            "planning_system_prompt": _callable_code_digest(
+                LLMPlanner._planning_system_prompt
+            ),
+            "planning_context_messages": _callable_code_digest(
+                LLMPlanner._planning_context_messages
+            ),
+            "planning_payload": _callable_code_digest(LLMPlanner._planning_payload),
+            "decision_schema": _callable_code_digest(build_decision_response_schema),
+            "max_tokens": PLANNING_MAX_TOKENS,
+            "plan_horizon_seconds": STEERING_PLAN_HORIZON_SECONDS,
+        }
+    )
+
+
 def render_exploration_markdown(report: Mapping[str, Any]) -> str:
     summary = report.get("summary") or {}
     surfaces = report.get("surface_counts") or {}
+    tiers = report.get("tier_counts") or {}
     priorities = report.get("priority_counts") or {}
     candidates = report.get("candidates") or []
     failures = report.get("harness_failures") or []
@@ -674,8 +823,10 @@ def render_exploration_markdown(report: Mapping[str, Any]) -> str:
         "## 실행 요약",
         "",
         f"- 예약 trace: {summary.get('scheduled_traces', 0)}",
-        f"- 후보 집계 대상 trace: {summary.get('eligible_gameplay_traces', 0)}",
-        f"- harness/coverage 제외 trace: {summary.get('excluded_harness_traces', 0)}",
+        f"- coverage 목표 도달 trace: {summary.get('eligible_gameplay_traces', 0)}",
+        f"- 후보 증거가 유효한 trace: {summary.get('candidate_evidence_traces', 0)}",
+        f"- coverage 미도달 trace: {summary.get('coverage_not_reached_traces', 0)}",
+        f"- harness 제외 trace: {summary.get('excluded_harness_traces', 0)}",
         f"- 후보 합계: {summary.get('candidate_count', 0)}",
         "",
         "## 탐지 표면",
@@ -683,7 +834,13 @@ def render_exploration_markdown(report: Mapping[str, Any]) -> str:
         f"- planner-only: {surfaces.get('planner_only', 0)}",
         f"- inspector-only: {surfaces.get('inspector_only', 0)}",
         f"- shared: {surfaces.get('shared', 0)}",
+        f"- runtime-oracle: {surfaces.get('runtime_oracle', 0)}",
         f"- union: {surfaces.get('union', 0)}",
+        "",
+        "## 후보 등급",
+        "",
+        f"- validated-invariant candidate: {tiers.get('validated-invariant candidate', 0)}",
+        f"- evidence-linked candidate: {tiers.get('evidence-linked candidate', 0)}",
         "",
         "## 우선순위",
         "",
@@ -701,20 +858,46 @@ def render_exploration_markdown(report: Mapping[str, Any]) -> str:
     else:
         lines.extend(
             [
-                "| ID | 등급 | 우선순위 | 표면 | 재현 | 규칙 | phase/event |",
-                "|---|---|---|---|---|---|---|",
+                "| ID | 등급 | 우선순위 | 표면 | 재현 | 검사 합의 | 규칙 | phase/event |",
+                "|---|---|---|---|---|---|---|---|",
             ]
         )
         for candidate in candidates:
+            agreements = candidate.get("inspection_agreement_by_trace") or {}
+            agreement_label = ", ".join(
+                f"`{trace_id}`={agreement}"
+                for trace_id, agreement in sorted(agreements.items())
+            ) or "-"
             row = {
                 **candidate,
                 "reproduced_label": "예" if candidate.get("reproduced") else "아니오",
+                "agreement_label": agreement_label,
             }
             lines.append(
-                "| `{candidate_id}` | {tier} | **{priority}** | {surface} | {reproduced_label} | `{rule}` | `{phase}` / `{event}` |".format(
+                "| `{candidate_id}` | {tier} | **{priority}** | {surface} | {reproduced_label} | {agreement_label} | `{rule}` | `{phase}` / `{event}` |".format(
                     **row
                 )
             )
+        lines.extend(["", "### 후보별 증거", ""])
+        for candidate in candidates:
+            evidence = list(candidate.get("evidence") or [])
+            lines.append(f"- `{candidate.get('candidate_id', '-')}`")
+            for item in evidence[:MAX_MARKDOWN_EVIDENCE_ROWS_PER_CANDIDATE]:
+                refs = ", ".join(
+                    f"`{reference}`" for reference in item.get("evidence_refs") or []
+                ) or "-"
+                pass_label = (
+                    f", 검사 pass {item['inspection_pass']}"
+                    if "inspection_pass" in item
+                    else ""
+                )
+                lines.append(
+                    f"  - `{item.get('trace_id', '-')}` / {item.get('source', '-')}"
+                    f"{pass_label}: {refs}"
+                )
+            omitted = len(evidence) - MAX_MARKDOWN_EVIDENCE_ROWS_PER_CANDIDATE
+            if omitted > 0:
+                lines.append(f"  - 추가 증거 {omitted}건은 JSON 보고서에 보존됨")
     lines.extend(["", "## Harness 및 coverage 실패", ""])
     if not failures:
         lines.append("별도 harness 또는 coverage 실패가 없습니다.")
@@ -747,13 +930,17 @@ def _campaign_hash(config: ExplorationCampaignConfig, build_hash: str) -> str:
             "build_hash": build_hash,
             "build_path": str(config.build.resolve()),
             "project_root": str(config.project_root.resolve()),
-            "api_endpoint": _public_api_endpoint_hash(config.api_url),
+            "effective_api_endpoint": _sha256(resolve_llm_api_url(config.api_url)),
             "headless": config.headless,
             "quiet": config.quiet,
             "steering_model": STEERING_MODEL,
+            "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
+            "steering_prompt": _steering_prompt_digest(),
+            "steering_plan_horizon_seconds": STEERING_PLAN_HORIZON_SECONDS,
             "inspector_model": INSPECTOR_MODEL,
             "inspector_effort": INSPECTOR_EFFORT,
             "inspector_prompt": _sha256(INSPECTOR_SYSTEM_PROMPT),
+            "inspection_normalizer": INSPECTION_NORMALIZER_VERSION,
             "rubric": _file_hash(
                 config.project_root.resolve() / "config" / "qa-detection-rubric.json"
             ),
@@ -811,12 +998,12 @@ def _run_episode(
             transitions=[],
             execution_status="infrastructure_error",
             coverage_status="error",
-            error=f"{type(error).__name__}: {error}",
+            error=_sanitize_error_type(type(error).__name__) or "Exception",
         )
     _atomic_write_json(path, result.to_dict())
     if (
         result.execution_status == "completed"
-        and result.coverage_status == "reached"
+        and result.coverage_status in {"reached", "not_reached"}
         and not result.launch_faults
         and bool(result.transitions)
         and not result.harness_failures
@@ -829,6 +1016,33 @@ def _run_episode(
             result.error or result.coverage_status or result.execution_status,
         )
     return result, False
+
+
+def _validate_required_episode_result(
+    spec: ExplorationEpisodeSpec,
+    result: ExplorationEpisodeResult,
+) -> None:
+    if result.launch_faults:
+        raise CampaignContractError(
+            f"Track A clean-launch contract failed for {spec.unit_id}"
+        )
+    if result.execution_status != "completed":
+        raise CampaignExecutionError(
+            f"required exploration execution failed for {spec.unit_id}: "
+            f"{result.execution_status}"
+        )
+    if result.harness_failures:
+        raise CampaignExecutionError(
+            f"required exploration harness contract failed for {spec.unit_id}"
+        )
+    if not result.transitions:
+        raise CampaignExecutionError(
+            f"required exploration trace is empty for {spec.unit_id}"
+        )
+    if result.coverage_status not in {"reached", "not_reached"}:
+        raise CampaignExecutionError(
+            f"required exploration coverage contract failed for {spec.unit_id}"
+        )
 
 
 def _inspect_record(
@@ -889,8 +1103,90 @@ def _write_running_manifest(
                 "build": build_hash,
                 "config": campaign_hash,
                 "api_endpoint": _public_api_endpoint_hash(config.api_url),
+                "steering_prompt": _steering_prompt_digest(),
+                "inspection_normalizer": _sha256(INSPECTION_NORMALIZER_VERSION),
+            },
+            "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
+        },
+    )
+
+
+def _archive_published_results(output: Path) -> None:
+    sources = (
+        output / "campaign-manifest.json",
+        output / "exploration-report.json",
+        output / "exploration-report.ko.md",
+    )
+    existing = [source for source in sources if source.exists()]
+    if not existing:
+        return
+    archive = output / ".superseded-results" / uuid.uuid4().hex
+    for source in existing:
+        destination = archive / source.relative_to(output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(destination)
+
+
+def _write_incomplete_manifest(
+    *,
+    output: Path,
+    campaign_hash: str,
+    build_hash: str,
+    config: ExplorationCampaignConfig,
+    checkpoint: CheckpointStore,
+    failure_status: str,
+    error_type: str,
+) -> Path:
+    manifest_path = output / "campaign-manifest.json"
+    _atomic_write_json(
+        manifest_path,
+        {
+            "schema_version": CAMPAIGN_MANIFEST_SCHEMA,
+            "campaign_hash": campaign_hash,
+            "status": "incomplete",
+            "track": "A",
+            "hashes": {
+                "build": build_hash,
+                "config": campaign_hash,
+                "api_endpoint": _public_api_endpoint_hash(config.api_url),
+                "steering_prompt": _steering_prompt_digest(),
+                "inspection_normalizer": _sha256(INSPECTION_NORMALIZER_VERSION),
+            },
+            "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
+            "counts": {
+                "logical_inspection_calls": checkpoint.logical_calls,
+                "http_attempts": checkpoint.http_attempts,
+            },
+            "failure": {
+                "status": failure_status,
+                "error_type": error_type,
             },
         },
+    )
+    return manifest_path
+
+
+def record_exploration_initialization_failure(
+    config: ExplorationCampaignConfig,
+    error: Exception,
+) -> Path:
+    """Publish a safe incomplete Track A manifest before gameplay starts."""
+
+    build_hash = hash_path(config.build)
+    campaign_hash = _campaign_hash(config, build_hash)
+    output = config.output.resolve()
+    if output.exists() and any(output.iterdir()) and not config.resume:
+        raise CampaignContractError("non-empty exploration output requires --resume")
+    checkpoint = _prepare_campaign_output(output, campaign_hash)
+    _archive_published_results(output)
+    return _write_incomplete_manifest(
+        output=output,
+        campaign_hash=campaign_hash,
+        build_hash=build_hash,
+        config=config,
+        checkpoint=checkpoint,
+        failure_status="model_failure",
+        error_type=_sanitize_error_type(type(error).__name__) or "Exception",
     )
 
 
@@ -909,7 +1205,6 @@ def run_exploration_campaign(
         raise CampaignContractError("non-empty exploration output requires --resume")
     checkpoint = _prepare_campaign_output(output, campaign_hash)
     resumed = bool(checkpoint.units)
-    _write_running_manifest(output, campaign_hash, build_hash, config)
     budget = InspectionCallBudget(
         cap=LOGICAL_INSPECTION_CALL_CAP,
         logical_calls=checkpoint.logical_calls,
@@ -918,6 +1213,8 @@ def run_exploration_campaign(
     records: list[ExplorationTraceRecord] = []
     trace_manifest: list[dict[str, Any]] = []
     try:
+        _archive_published_results(output)
+        _write_running_manifest(output, campaign_hash, build_hash, config)
         for spec in build_track_a_schedule():
             result, episode_resumed = _run_episode(
                 spec=spec,
@@ -933,6 +1230,7 @@ def run_exploration_campaign(
                     output=output,
                     opaque_trace_id=opaque_id,
                 )
+            _validate_required_episode_result(spec, result)
             passes = _inspect_record(
                 opaque_trace_id=opaque_id,
                 result=result,
@@ -942,6 +1240,13 @@ def run_exploration_campaign(
                 budget=budget,
                 campaign_hash=campaign_hash,
             )
+            if (
+                len(passes) != INSPECTION_REPETITIONS
+                or any(artifact is None for artifact in passes)
+            ):
+                raise CampaignExecutionError(
+                    f"required exploration inspection failed for {spec.unit_id}"
+                )
             record = ExplorationTraceRecord(
                 spec=spec,
                 opaque_trace_id=opaque_id,
@@ -996,11 +1301,16 @@ def run_exploration_campaign(
                     "steering_model": _sha256(STEERING_MODEL),
                     "inspector_model": _sha256(INSPECTOR_MODEL),
                     "inspector_prompt": _sha256(INSPECTOR_SYSTEM_PROMPT),
+                    "steering_prompt": _steering_prompt_digest(),
+                    "inspection_normalizer": _sha256(
+                        INSPECTION_NORMALIZER_VERSION
+                    ),
                     "rubric": _file_hash(
                         config.project_root / "config" / "qa-detection-rubric.json"
                     ),
                     "api_endpoint": _public_api_endpoint_hash(config.api_url),
                 },
+                "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
                 "models": {
                     "steering": STEERING_MODEL,
                     "inspection": INSPECTOR_MODEL,
@@ -1015,6 +1325,12 @@ def run_exploration_campaign(
                     "scheduled_traces": len(records),
                     "eligible_gameplay_traces": report["summary"][
                         "eligible_gameplay_traces"
+                    ],
+                    "candidate_evidence_traces": report["summary"][
+                        "candidate_evidence_traces"
+                    ],
+                    "coverage_not_reached_traces": report["summary"][
+                        "coverage_not_reached_traces"
                     ],
                     "candidate_count": report["summary"]["candidate_count"],
                     "logical_inspection_calls": checkpoint.logical_calls,
@@ -1034,20 +1350,18 @@ def run_exploration_campaign(
             resumed=resumed,
         )
     except Exception as error:
-        _atomic_write_json(
-            output / "campaign-manifest.json",
-            {
-                "schema_version": CAMPAIGN_MANIFEST_SCHEMA,
-                "campaign_hash": campaign_hash,
-                "status": "incomplete",
-                "track": "A",
-                "hashes": {"build": build_hash, "config": campaign_hash},
-                "counts": {
-                    "logical_inspection_calls": checkpoint.logical_calls,
-                    "http_attempts": checkpoint.http_attempts,
-                },
-                "failure": {"error_type": type(error).__name__},
-            },
+        try:
+            _archive_published_results(output)
+        except OSError:
+            pass
+        _write_incomplete_manifest(
+            output=output,
+            campaign_hash=campaign_hash,
+            build_hash=build_hash,
+            config=config,
+            checkpoint=checkpoint,
+            failure_status="execution_failure",
+            error_type=_sanitize_error_type(type(error).__name__) or "Exception",
         )
         raise
 
@@ -1108,17 +1422,64 @@ def _mission_coverage_status(
     return "reached" if reached else "not_reached"
 
 
+def _terminal_reason(kind: str, severity: str) -> str | None:
+    tokens = set(re.findall(r"[a-z0-9]+", kind))
+    if "crash" in tokens:
+        return "crash"
+    if "hang" in tokens or "freeze" in tokens:
+        return "hang"
+    if severity == "critical" and "timeout" in tokens:
+        return "hang"
+    if {"unrecoverable", "blocker"}.issubset(tokens):
+        return "unrecoverable-blocker"
+    return None
+
+
+def _fatal_execution_status(error_type: str, fatal_error: str) -> str:
+    normalized_type = error_type.lower()
+    if "bridge" in normalized_type:
+        return "bridge_failure"
+    if any(
+        token in normalized_type
+        for token in (
+            "llmcontract",
+            "evaluationcontract",
+            "scenariocontract",
+            "schema",
+            "jsondecode",
+            "validationerror",
+        )
+    ):
+        return "schema_failure"
+    if any(
+        token in normalized_type
+        for token in ("llm", "provider", "openai", "model")
+    ):
+        return "model_failure"
+    if normalized_type == "valueerror" and any(
+        marker in fatal_error.lower()
+        for marker in ("llm policy", "qa_api_key", "openai_api_key", "provider")
+    ):
+        return "model_failure"
+    return "infrastructure_failure"
+
+
 def _anomaly_artifacts(
+    spec: ExplorationEpisodeSpec,
     transitions: Sequence[dict[str, Any]],
     report: Mapping[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     validations: list[dict[str, Any]] = []
     harness: list[dict[str, Any]] = []
+    trace_evidence_refs: list[str] = []
     for anomaly in report.get("rule_based_anomalies") or []:
         if not isinstance(anomaly, dict):
             continue
         kind = _normalize_token(anomaly.get("kind"))
         if kind.startswith("llm_"):
+            harness.append(
+                {"kind": "model_failure", "detail": "LLM runtime anomaly"}
+            )
             continue
         if kind == "bridge_action_failed":
             harness.append(
@@ -1129,19 +1490,49 @@ def _anomaly_artifacts(
             step = int(anomaly.get("step", 0))
         except (TypeError, ValueError):
             continue
-        if not (0 <= step < len(transitions)):
+        if not (0 <= step <= len(transitions)):
             continue
-        observation_value = transitions[step].get("observation") or {}
+        if kind == "error" and step == len(transitions):
+            harness.append(
+                {"kind": "bridge_failure", "detail": "player termination error"}
+            )
+            continue
+        transition_index = min(step, len(transitions) - 1)
+        observation_value = (
+            transitions[transition_index].get("observation") or {}
+            if transition_index >= 0
+            else {}
+        )
         observation_id = str(observation_value.get("observation_id") or "")
+        if not observation_id and step == len(transitions):
+            for transition in reversed(transitions):
+                candidate_observation = transition.get("observation") or {}
+                candidate_id = str(candidate_observation.get("observation_id") or "")
+                if candidate_id:
+                    observation_value = candidate_observation
+                    observation_id = candidate_id
+                    break
         if not observation_id:
-            continue
+            observation_id = f"trace-termination-{spec.mission_id}-{spec.seed}"
+            trace_evidence_refs.append(observation_id)
         field_name = ""
         category = "behavior"
         rule = kind
+        emit_candidate = False
         if kind == "view_state_match":
             category = "numeric"
-            rule = "numeric-relation"
+            rule = "numeric-not-equal"
             field_name = "player_view.health_ratio"
+        else:
+            failure_reason = _terminal_reason(
+                kind,
+                _normalize_token(anomaly.get("severity")),
+            )
+            if failure_reason is not None:
+                rule = failure_reason
+                emit_candidate = True
+            elif step == len(transitions):
+                continue
         validations.append(
             {
                 "category": category,
@@ -1152,9 +1543,11 @@ def _anomaly_artifacts(
                     (observation_value.get("event_state") or {}).get("type") or ""
                 ),
                 "evidence_refs": [observation_id],
+                "statement": str(anomaly.get("evidence") or "").strip(),
+                "emit_candidate": emit_candidate,
             }
         )
-    return validations, harness
+    return validations, harness, list(dict.fromkeys(trace_evidence_refs))
 
 
 class BridgeExplorationBackend:
@@ -1202,6 +1595,8 @@ class BridgeExplorationBackend:
             str(spec.max_steps),
             "--max-source-steps",
             "0",
+            "--plan-horizon-seconds",
+            str(STEERING_PLAN_HORIZON_SECONDS),
             "--inspector-model",
             "",
         ]
@@ -1223,6 +1618,25 @@ class BridgeExplorationBackend:
         output_dir: Path,
     ) -> ExplorationEpisodeResult:
         try:
+            report = _read_json_object(output_dir / "report.json")
+        except (CampaignContractError, OSError, json.JSONDecodeError, ValueError) as error:
+            return ExplorationEpisodeResult(
+                transitions=[],
+                execution_status="schema_error",
+                coverage_status="error",
+                error=_sanitize_error_type(type(error).__name__) or "Exception",
+            )
+        fatal_error = str(report.get("fatal_error") or "").strip()
+        if fatal_error:
+            raw_error_type = fatal_error.partition(":")[0].strip()
+            error_type = _sanitize_error_type(raw_error_type) or "Exception"
+            return ExplorationEpisodeResult(
+                transitions=[],
+                execution_status=_fatal_execution_status(error_type, fatal_error),
+                coverage_status="error",
+                error=error_type,
+            )
+        try:
             transitions = [
                 json.loads(line)
                 for line in (output_dir / "steps.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1230,7 +1644,6 @@ class BridgeExplorationBackend:
             ]
             if any(not isinstance(item, dict) for item in transitions):
                 raise ValueError("steps.jsonl must contain JSON objects")
-            report = _read_json_object(output_dir / "report.json")
             verdict = _read_json_object(output_dir / "verdict.json")
             run = _read_json_object(output_dir / "run.json")
         except (CampaignContractError, OSError, json.JSONDecodeError, ValueError) as error:
@@ -1238,11 +1651,15 @@ class BridgeExplorationBackend:
                 transitions=[],
                 execution_status="schema_error",
                 coverage_status="error",
-                error=f"invalid session artifact: {error}",
+                error=_sanitize_error_type(type(error).__name__) or "Exception",
             )
         arguments = run.get("arguments") or {}
         launch_fault = str(arguments.get("fault") or "").strip()
-        validations, harness = _anomaly_artifacts(transitions, report)
+        validations, harness, trace_evidence_refs = _anomaly_artifacts(
+            spec,
+            transitions,
+            report,
+        )
         return ExplorationEpisodeResult(
             transitions=transitions,
             execution_status=str(verdict.get("execution_status") or "infrastructure_error"),
@@ -1250,7 +1667,8 @@ class BridgeExplorationBackend:
             launch_faults=(launch_fault,) if launch_fault else (),
             invariant_validations=tuple(validations),
             harness_failures=tuple(harness),
-            error=str(report.get("fatal_error") or ""),
+            trace_evidence_refs=tuple(trace_evidence_refs),
+            error="",
         )
 
 
@@ -1266,6 +1684,7 @@ __all__ = [
     "build_track_a_schedule",
     "exploration_report_json",
     "render_exploration_markdown",
+    "record_exploration_initialization_failure",
     "run_exploration_campaign",
     "validate_track_a_spec",
 ]

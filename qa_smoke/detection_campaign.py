@@ -29,11 +29,13 @@ from .inspector import (
     INSPECTOR_SYSTEM_PROMPT,
     INSPECTION_CHUNK_OVERLAP,
     INSPECTION_CHUNK_SIZE,
+    INSPECTION_NORMALIZER_VERSION,
     INSPECTION_SCHEMA_V2,
     build_inspection_chunks,
     normalize_inspection_artifact,
     validate_inspection_artifact_v2,
 )
+from .memory import sanitize_error_type as _sanitize_error_type
 from .planners import LLMPlanner, observation_phase, resolve_llm_api_url
 from .run import execute_game_action, parse_args as parse_run_args, run_session
 from .scenarios import load_scenarios, load_v4_ground_truth, load_v4_scenarios
@@ -58,19 +60,6 @@ NEUTRAL_REACHABILITY_GOAL = (
     "Reach ordinary gameplay state needed for generic QA observation, while surviving when possible."
 )
 TRACK_A_MAX_STEP_BUDGETS = (20, 40, 80, 80, 80, 80, 80, 80)
-
-
-def _sanitize_error_type(value: str | None) -> str | None:
-    if value is None:
-        return None
-    if (
-        0 < len(value) <= 128
-        and value.isascii()
-        and (value[0].isalpha() or value[0] == "_")
-        and all(character.isalnum() or character == "_" for character in value)
-    ):
-        return value
-    return "Exception"
 
 
 class CampaignContractError(RuntimeError):
@@ -845,6 +834,7 @@ def inspect_trace_pass(
             "model": INSPECTOR_MODEL,
             "effort": INSPECTOR_EFFORT,
             "prompt": _sha256(INSPECTOR_SYSTEM_PROMPT),
+            "normalizer": INSPECTION_NORMALIZER_VERSION,
             "chunks": [_sha256(chunk) for chunk in chunks],
         }
     )
