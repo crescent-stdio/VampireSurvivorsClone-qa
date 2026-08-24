@@ -32,6 +32,17 @@ def parse_cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     _add_run_options(validate_parser)
     validate_parser.set_defaults(command="validate-faults")
 
+    detection_parser = subparsers.add_parser(
+        "benchmark-detection",
+        help="Run the blind clean/fault detection benchmark.",
+    )
+    detection_parser.add_argument("--build", type=Path, required=True)
+    detection_parser.add_argument("--project-root", type=Path, default=Path.cwd())
+    detection_parser.add_argument("--output", type=Path, required=True)
+    detection_parser.add_argument("--api-url", default=None)
+    detection_parser.add_argument("--headless", action="store_true")
+    detection_parser.add_argument("--quiet", action="store_true")
+
     baseline_parser = subparsers.add_parser("baseline", help="Manage an explicit regression baseline.")
     baseline_subparsers = baseline_parser.add_subparsers(dest="baseline_action", required=True)
     set_parser = baseline_subparsers.add_parser("set", help="Approve a run directory as baseline.")
@@ -345,10 +356,46 @@ def _baseline_set(args: argparse.Namespace) -> int:
     return 0
 
 
+def _benchmark_detection(args: argparse.Namespace) -> int:
+    from .detection_campaign import (
+        BenchmarkCampaignConfig,
+        BridgeCampaignBackend,
+        LLMInspectorAdapter,
+        run_detection_campaign,
+    )
+
+    config = BenchmarkCampaignConfig(
+        build=args.build,
+        project_root=args.project_root,
+        output=args.output,
+        headless=args.headless,
+        quiet=args.quiet,
+        api_url=args.api_url,
+    )
+    result = run_detection_campaign(
+        config,
+        backend=BridgeCampaignBackend(config),
+        inspector=LLMInspectorAdapter(api_url=args.api_url),
+    )
+    print(
+        json.dumps(
+            {
+                "manifest": str(result.manifest_path),
+                "pairs": len(result.pairs),
+                "resumed": result.resumed,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_cli(argv)
     if args.command == "baseline":
         code = _baseline_set(args)
+    elif args.command == "benchmark-detection":
+        code = _benchmark_detection(args)
     else:
         code = _run_command(args)
     raise SystemExit(code)
