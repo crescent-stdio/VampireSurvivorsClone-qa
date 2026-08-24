@@ -6,6 +6,7 @@ from typing import Any, Callable, Literal, Protocol
 import uuid
 
 from .bridge_client import BridgeClient
+from .memory import sanitize_error_type
 
 
 ExitKind = Literal["normal", "crash", "timeout", "error"]
@@ -114,11 +115,12 @@ class VampireSurvivorsAdapter:
         try:
             bridge.close()
         except TimeoutError as error:
-            return EpisodeExit(kind="timeout", return_code=return_code, detail=str(error))
+            error_type = sanitize_error_type(type(error).__name__) or "Exception"
+            return EpisodeExit(kind="timeout", return_code=return_code, detail=error_type)
         except Exception as error:  # pragma: no cover - defensive bridge boundary
-            if "timed out" in str(error).lower() or "timeout" in str(error).lower():
-                return EpisodeExit(kind="timeout", return_code=return_code, detail=str(error))
-            return EpisodeExit(kind="error", return_code=return_code, detail=str(error))
+            error_type = sanitize_error_type(type(error).__name__) or "Exception"
+            kind: ExitKind = "timeout" if error_type == "TimeoutExpired" else "error"
+            return EpisodeExit(kind=kind, return_code=return_code, detail=error_type)
         finally:
             self._bridge = None
         if return_code not in (None, 0):

@@ -12,6 +12,7 @@ import pytest
 from . import cli as cli_module
 from . import exploration_campaign as exploration
 from . import run as run_module
+from .adapters import VampireSurvivorsAdapter
 from .detection_campaign import (
     CampaignContractError,
     CampaignExecutionError,
@@ -326,6 +327,11 @@ def test_priority_uses_whole_reason_tokens_instead_of_substrings() -> None:
                     "obs-0001",
                     statement="The player entered a hang state.",
                 ),
+                behavior_finding(
+                    "render-freeze",
+                    "obs-0001",
+                    statement="The rendered game entered a freeze state.",
+                ),
             ),
             artifact(),
             artifact(),
@@ -341,6 +347,7 @@ def test_priority_uses_whole_reason_tokens_instead_of_substrings() -> None:
 
     assert candidates["health-did-not-change"]["priority"] != "P0"
     assert candidates["runtime-hang"]["priority"] == "P0"
+    assert candidates["render-freeze"]["priority"] == "P0"
 
 
 def test_duplicate_findings_merge_evidence_and_statements_without_extra_votes() -> None:
@@ -666,6 +673,42 @@ def test_report_publication_failure_leaves_only_an_incomplete_manifest(
     assert list(settings.output.glob(".superseded-results/**/exploration-report.json"))
 
 
+def test_archive_failure_invalidates_stale_complete_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = campaign_config(tmp_path)
+    exploration.run_exploration_campaign(
+        settings,
+        backend=FakeBackend(),
+        inspector=FakeInspector(),
+    )
+
+    def fail_archive(output: Path) -> None:
+        raise OSError("archive failed at /private/qa token=fake-secret")
+
+    monkeypatch.setattr(exploration, "_archive_published_results", fail_archive)
+
+    with pytest.raises(OSError):
+        exploration.run_exploration_campaign(
+            replace(settings, resume=True),
+            backend=FakeBackend(),
+            inspector=FakeInspector(),
+        )
+
+    manifest_text = (settings.output / "campaign-manifest.json").read_text()
+    manifest = json.loads(manifest_text)
+    assert manifest["status"] == "incomplete"
+    assert manifest["failure"] == {
+        "status": "publication_cleanup_failure",
+        "error_type": "OSError",
+    }
+    assert not (settings.output / "exploration-report.json").exists()
+    assert not (settings.output / "exploration-report.ko.md").exists()
+    assert "/private/qa" not in manifest_text
+    assert "fake-secret" not in manifest_text
+
+
 def test_explore_cli_returns_nonzero_for_incomplete_campaign(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -690,6 +733,56 @@ def test_explore_cli_returns_nonzero_for_incomplete_campaign(
     monkeypatch.setattr(exploration, "run_exploration_campaign", fail_campaign)
 
     assert cli_module._explore(parsed) == 2
+
+
+def test_explore_cli_sanitizes_publication_exception_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("QA_API_KEY", "test-key")
+    settings = campaign_config(tmp_path)
+    exploration.run_exploration_campaign(
+        settings,
+        backend=FakeBackend(),
+        inspector=FakeInspector(),
+    )
+    parsed = cli_module.parse_cli(
+        [
+            "explore",
+            "--build",
+            str(settings.build),
+            "--project-root",
+            str(settings.project_root),
+            "--output",
+            str(settings.output),
+            "--resume",
+            "--headless",
+            "--quiet",
+        ]
+    )
+
+    def fail_archive(output: Path) -> None:
+        raise OSError("archive failed at /private/qa token=fake-secret")
+
+    monkeypatch.setattr(exploration, "_archive_published_results", fail_archive)
+
+    assert cli_module._explore(parsed) == 2
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.err) == {
+        "status": "incomplete",
+        "error_type": "OSError",
+    }
+    assert "Traceback" not in captured.err
+    assert "/private/qa" not in captured.err
+    assert "fake-secret" not in captured.err
+    manifest_text = (settings.output / "campaign-manifest.json").read_text()
+    assert json.loads(manifest_text)["failure"]["status"] == (
+        "publication_cleanup_failure"
+    )
+    assert "/private/qa" not in manifest_text
+    assert "fake-secret" not in manifest_text
 
 
 def test_explore_cli_records_safe_incomplete_manifest_on_inspector_init_failure(
@@ -978,6 +1071,133 @@ def test_real_run_planner_initialization_report_is_safely_classified(
     assert loaded.error == "LLMInitializationError"
 
 
+def test_terminal_exception_details_are_sanitized_across_public_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_message = "timeout at /private/qa/player token=fake-secret"
+
+    class LeakyTimeoutBridge:
+        def __init__(self, **kwargs: Any) -> None:
+            self.process = SimpleNamespace(returncode=None)
+            self.command_count = 0
+
+        def launch(self) -> dict[str, Any]:
+            return {"ready": True}
+
+        def command(self, action: str, **parameters: Any) -> dict[str, Any]:
+            self.command_count += 1
+            state = observation(f"obs-{self.command_count:04d}")
+            state.update(
+                {
+                    "ok": True,
+                    "scene": "Level1",
+                    "frame": self.command_count,
+                    "available_actions": ["wait"],
+                }
+            )
+            state["progress"]["level_time"] = float(self.command_count)
+            return state
+
+        def close(self) -> None:
+            raise TimeoutError(secret_message)
+
+    class LeakyErrorBridge(LeakyTimeoutBridge):
+        def close(self) -> None:
+            raise RuntimeError(secret_message)
+
+    error_adapter = VampireSurvivorsAdapter(
+        game_exe=tmp_path / "unused-error-game",
+        session_dir=tmp_path / "unused-error-session",
+        mode="qa",
+        bridge_factory=LeakyErrorBridge,
+    )
+    error_adapter.start(seed=9101, preset="smoke", faults=[])
+    error_exit = error_adapter.stop()
+    assert error_exit.kind == "error"
+    assert error_exit.detail == "RuntimeError"
+    assert secret_message not in error_exit.detail
+
+    def adapter_factory(**kwargs: Any) -> VampireSurvivorsAdapter:
+        return VampireSurvivorsAdapter(
+            **kwargs,
+            bridge_factory=LeakyTimeoutBridge,
+        )
+
+    monkeypatch.setattr(run_module, "VampireSurvivorsAdapter", adapter_factory)
+    run_output = tmp_path / "terminal-exception-run"
+    args = run_module.parse_args(
+        [
+            "--game-exe",
+            str(tmp_path / "unused-game"),
+            "--project-root",
+            str(Path(__file__).resolve().parents[1]),
+            "--output",
+            str(run_output),
+            "--mode",
+            "qa",
+            "--policy",
+            "heuristic",
+            "--objective",
+            "Exercise safe terminal exception handling.",
+            "--max-steps",
+            "1",
+            "--quiet",
+        ]
+    )
+
+    run_module.run_session(args)
+
+    run_artifacts = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(run_output.iterdir())
+        if path.is_file()
+    )
+    assert secret_message not in run_artifacts
+    assert "/private/qa/player" not in run_artifacts
+    assert "fake-secret" not in run_artifacts
+    assert "TimeoutError" in run_artifacts
+
+    spec = exploration.build_track_a_schedule()[0]
+    loaded = exploration.BridgeExplorationBackend._load_result(spec, run_output)
+    record = exploration.ExplorationTraceRecord(
+        spec=spec,
+        opaque_trace_id="opaque-terminal-timeout",
+        result=loaded,
+        inspection_passes=[artifact(), artifact(), artifact()],
+    )
+    report = exploration.build_exploration_report([record], metadata={})
+    assert report["harness_failures"] == []
+    assert report["candidates"][0]["rule"] == "hang"
+    assert report["candidates"][0]["priority"] == "P0"
+
+    campaign_root = tmp_path / "checkpoint-campaign"
+    campaign_root.mkdir()
+    settings = campaign_config(campaign_root)
+    build_hash = exploration.hash_path(settings.build)
+    campaign_hash = exploration._campaign_hash(settings, build_hash)
+    checkpoint = exploration._prepare_campaign_output(settings.output, campaign_hash)
+    exploration._run_episode(
+        spec=spec,
+        output=settings.output,
+        backend=ResultBackend(loaded),
+        checkpoint=checkpoint,
+        campaign_hash=campaign_hash,
+    )
+    exploration_artifacts = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(settings.output.rglob("*"))
+        if path.is_file()
+    )
+    public_report = (
+        exploration.exploration_report_json(report)
+        + exploration.render_exploration_markdown(report)
+    )
+    assert secret_message not in exploration_artifacts + public_report
+    assert "/private/qa/player" not in exploration_artifacts + public_report
+    assert "fake-secret" not in exploration_artifacts + public_report
+
+
 def write_bridge_artifacts(
     output: Path,
     *,
@@ -1039,6 +1259,10 @@ def test_terminal_anomaly_uses_last_or_trace_level_public_evidence(tmp_path: Pat
     assert terminal["tier"] == "validated-invariant candidate"
     assert terminal["evidence"][0]["evidence_refs"] == ["obs-0000"]
     assert report["surface_counts"]["runtime_oracle"] == 1
+    assert report["surface_counts"]["union"] == 0
+    markdown = exploration.render_exploration_markdown(report)
+    assert "- LLM union: 0" in markdown
+    assert "- runtime-oracle-only (별도): 1" in markdown
 
     empty_output = tmp_path / "empty-terminal"
     write_bridge_artifacts(
@@ -1149,6 +1373,47 @@ def test_runtime_freeze_anomaly_is_preserved_as_hang_candidate(tmp_path: Path) -
     ][0]
     assert candidate["rule"] == "hang"
     assert candidate["priority"] == "P0"
+    assert candidate["statements"] == ["Frame and simulation time did not advance."]
+
+
+def test_runtime_oracle_validates_matching_llm_candidate_without_inflating_union(
+    tmp_path: Path,
+) -> None:
+    spec = exploration.build_track_a_schedule()[0]
+    output = tmp_path / "runtime-inspector-match"
+    write_bridge_artifacts(
+        output,
+        transitions=[transition(0)],
+        anomalies=[
+            {
+                "step": 1,
+                "kind": "hang",
+                "severity": "critical",
+                "evidence": "Player process entered a hang state.",
+            }
+        ],
+    )
+    result = exploration.BridgeExplorationBackend._load_result(spec, output)
+    record = exploration.ExplorationTraceRecord(
+        spec=spec,
+        opaque_trace_id="opaque-runtime-inspector-match",
+        result=result,
+        inspection_passes=[artifact(behavior_finding("hang")), artifact(), artifact()],
+    )
+
+    report = exploration.build_exploration_report([record], metadata={})
+
+    assert report["surface_counts"] == {
+        "planner_only": 0,
+        "inspector_only": 1,
+        "shared": 0,
+        "runtime_oracle": 0,
+        "union": 1,
+    }
+    candidate = report["candidates"][0]
+    assert candidate["surface"] == "inspector_only"
+    assert candidate["runtime_oracle_supported"] is True
+    assert candidate["tier"] == "validated-invariant candidate"
 
 
 def test_view_state_invariant_matches_only_the_same_numeric_relation(tmp_path: Path) -> None:

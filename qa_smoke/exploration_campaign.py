@@ -592,6 +592,7 @@ def _priority(key: CandidateKey, statements: Sequence[str], reproduced: bool) ->
     if (
         "crash" in reason_tokens
         or "hang" in reason_tokens
+        or "freeze" in reason_tokens
         or {"unrecoverable", "blocker"}.issubset(reason_tokens)
     ):
         return "P0"
@@ -705,6 +706,7 @@ def build_exploration_report(
                     else "evidence-linked candidate"
                 ),
                 "surface": surface,
+                "runtime_oracle_supported": key in invariant_keys,
                 "reproduced": reproduced,
                 "priority": _priority(key, statements, reproduced),
                 "inspection_agreement_by_trace": agreements,
@@ -740,7 +742,11 @@ def build_exploration_report(
             "inspector_only": surface_counter["inspector_only"],
             "shared": surface_counter["shared"],
             "runtime_oracle": surface_counter["runtime_oracle"],
-            "union": len(candidates),
+            "union": (
+                surface_counter["planner_only"]
+                + surface_counter["inspector_only"]
+                + surface_counter["shared"]
+            ),
         },
         "tier_counts": {
             "validated-invariant candidate": tier_counter[
@@ -829,13 +835,13 @@ def render_exploration_markdown(report: Mapping[str, Any]) -> str:
         f"- harness 제외 trace: {summary.get('excluded_harness_traces', 0)}",
         f"- 후보 합계: {summary.get('candidate_count', 0)}",
         "",
-        "## 탐지 표면",
+        "## LLM 탐지 표면",
         "",
         f"- planner-only: {surfaces.get('planner_only', 0)}",
         f"- inspector-only: {surfaces.get('inspector_only', 0)}",
         f"- shared: {surfaces.get('shared', 0)}",
-        f"- runtime-oracle: {surfaces.get('runtime_oracle', 0)}",
-        f"- union: {surfaces.get('union', 0)}",
+        f"- LLM union: {surfaces.get('union', 0)}",
+        f"- runtime-oracle-only (별도): {surfaces.get('runtime_oracle', 0)}",
         "",
         "## 후보 등급",
         "",
@@ -1127,6 +1133,33 @@ def _archive_published_results(output: Path) -> None:
         source.replace(destination)
 
 
+def _has_published_results(output: Path) -> bool:
+    return any(
+        (output / name).exists()
+        for name in (
+            "campaign-manifest.json",
+            "exploration-report.json",
+            "exploration-report.ko.md",
+        )
+    )
+
+
+def _cleanup_published_results(output: Path) -> str | None:
+    """Archive public results or invalidate adjacent reports before failure publication."""
+
+    try:
+        _archive_published_results(output)
+        return None
+    except OSError as archive_error:
+        cleanup_error: OSError = archive_error
+        for name in ("exploration-report.json", "exploration-report.ko.md"):
+            try:
+                (output / name).unlink(missing_ok=True)
+            except OSError as unlink_error:
+                cleanup_error = unlink_error
+        return _sanitize_error_type(type(cleanup_error).__name__) or "OSError"
+
+
 def _write_incomplete_manifest(
     *,
     output: Path,
@@ -1178,7 +1211,22 @@ def record_exploration_initialization_failure(
     if output.exists() and any(output.iterdir()) and not config.resume:
         raise CampaignContractError("non-empty exploration output requires --resume")
     checkpoint = _prepare_campaign_output(output, campaign_hash)
-    _archive_published_results(output)
+    if _has_published_results(output):
+        _write_running_manifest(output, campaign_hash, build_hash, config)
+        try:
+            _archive_published_results(output)
+        except OSError:
+            cleanup_error = _cleanup_published_results(output) or "OSError"
+            _write_incomplete_manifest(
+                output=output,
+                campaign_hash=campaign_hash,
+                build_hash=build_hash,
+                config=config,
+                checkpoint=checkpoint,
+                failure_status="publication_cleanup_failure",
+                error_type=cleanup_error,
+            )
+            raise
     return _write_incomplete_manifest(
         output=output,
         campaign_hash=campaign_hash,
@@ -1212,9 +1260,13 @@ def run_exploration_campaign(
     )
     records: list[ExplorationTraceRecord] = []
     trace_manifest: list[dict[str, Any]] = []
+    publication_phase = "archive"
     try:
+        if _has_published_results(output):
+            _write_running_manifest(output, campaign_hash, build_hash, config)
         _archive_published_results(output)
         _write_running_manifest(output, campaign_hash, build_hash, config)
+        publication_phase = "campaign"
         for spec in build_track_a_schedule():
             result, episode_resumed = _run_episode(
                 spec=spec,
@@ -1285,9 +1337,10 @@ def run_exploration_campaign(
         )
         report_path = output / "exploration-report.json"
         markdown_path = output / "exploration-report.ko.md"
+        manifest_path = output / "campaign-manifest.json"
+        publication_phase = "report"
         report_path.write_text(exploration_report_json(report), encoding="utf-8")
         markdown_path.write_text(render_exploration_markdown(report), encoding="utf-8")
-        manifest_path = output / "campaign-manifest.json"
         _atomic_write_json(
             manifest_path,
             {
@@ -1343,6 +1396,7 @@ def run_exploration_campaign(
                 },
             },
         )
+        publication_phase = "complete"
         return ExplorationCampaignResult(
             manifest_path=manifest_path,
             report_path=report_path,
@@ -1350,18 +1404,27 @@ def run_exploration_campaign(
             resumed=resumed,
         )
     except Exception as error:
-        try:
-            _archive_published_results(output)
-        except OSError:
-            pass
+        cleanup_error = _cleanup_published_results(output)
+        publication_failure = cleanup_error is not None or publication_phase in {
+            "archive",
+            "report",
+        }
         _write_incomplete_manifest(
             output=output,
             campaign_hash=campaign_hash,
             build_hash=build_hash,
             config=config,
             checkpoint=checkpoint,
-            failure_status="execution_failure",
-            error_type=_sanitize_error_type(type(error).__name__) or "Exception",
+            failure_status=(
+                "publication_cleanup_failure"
+                if publication_failure
+                else "execution_failure"
+            ),
+            error_type=(
+                cleanup_error
+                or _sanitize_error_type(type(error).__name__)
+                or "Exception"
+            ),
         )
         raise
 

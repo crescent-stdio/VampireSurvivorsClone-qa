@@ -425,7 +425,7 @@ def _explore(args: argparse.Namespace) -> int:
         record_exploration_initialization_failure,
         run_exploration_campaign,
     )
-    from .detection_campaign import CampaignContractError, LLMInspectorAdapter
+    from .detection_campaign import LLMInspectorAdapter
     from .memory import sanitize_error_type
 
     config = ExplorationCampaignConfig(
@@ -443,7 +443,7 @@ def _explore(args: argparse.Namespace) -> int:
         safe_error_type = sanitize_error_type(type(error).__name__) or "Exception"
         try:
             record_exploration_initialization_failure(config, error)
-        except CampaignContractError as manifest_error:
+        except Exception as manifest_error:
             safe_error_type = (
                 sanitize_error_type(type(manifest_error).__name__) or "Exception"
             )
@@ -461,10 +461,11 @@ def _explore(args: argparse.Namespace) -> int:
             backend=BridgeExplorationBackend(config),
             inspector=inspector,
         )
-    except CampaignContractError as error:
+    except Exception as error:
+        safe_error_type = sanitize_error_type(type(error).__name__) or "Exception"
         print(
             json.dumps(
-                {"status": "incomplete", "error_type": type(error).__name__},
+                {"status": "incomplete", "error_type": safe_error_type},
                 ensure_ascii=False,
             ),
             file=sys.stderr,
