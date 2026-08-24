@@ -20,7 +20,7 @@ INSPECTION_CHUNK_OVERLAP = 2
 
 
 INSPECTOR_SYSTEM_PROMPT = """You are a QA engineer auditing a recorded gameplay trace for internal inconsistencies.
-You are given one chunk of sanitized observations in order. Judge only relationships you can compute from the fields present. Do not infer unavailable state, source code, scenario intent, evaluator output, or hidden causes.
+You are given one chunk of sanitized observations in order. An observation may include action_context describing only the upgrade selection or restart action the player actually performed immediately before that observation. Judge only relationships you can compute from the fields present. Do not infer unavailable state, source code, scenario intent, evaluator output, or hidden causes.
 For a numeric finding return kind=numeric, a real field path, an explicit comparison operator, expected_value, observed_value, a short statement, and evidence_refs from this chunk. For a behavior finding return kind=behavior, a generic rule, expected_value, observed_value, a short statement, and evidence_refs from this chunk.
 Return a finding only for an observed inconsistency. An empty findings list is correct for a clean chunk."""
 
@@ -66,6 +66,30 @@ class InspectionArtifactV2(StrictInspectionModel):
 FINDINGS_SCHEMA = InspectionArtifactV2.model_json_schema()
 
 
+def validate_inspection_artifact_v2(response: Any) -> dict[str, Any]:
+    """Validate the strict current inspection contract without legacy coercion."""
+
+    return InspectionArtifactV2.model_validate(response).model_dump()
+
+
+def _public_action_context(transition: dict[str, Any]) -> dict[str, Any] | None:
+    decision = transition.get("decision")
+    if not isinstance(decision, dict) or decision.get("tool", "game") != "game":
+        return None
+    action = decision.get("action")
+    if action == "restart":
+        return {"action": "restart"}
+    if action != "select_upgrade":
+        return None
+    arguments = decision.get("arguments")
+    if not isinstance(arguments, dict):
+        return None
+    index = arguments.get("index")
+    if isinstance(index, bool) or not isinstance(index, int):
+        return None
+    return {"action": "select_upgrade", "selection_index": index}
+
+
 def build_inspection_payload(transitions: list[dict[str, Any]]) -> dict[str, Any]:
     """Reduce a recorded trace to the sanitized observation channel for inspection."""
     observations: list[dict[str, Any]] = []
@@ -75,6 +99,9 @@ def build_inspection_payload(transitions: list[dict[str, Any]]) -> dict[str, Any
             continue
         compact = compact_observation(build_agent_observation(raw))
         compact["observation_id"] = str(raw.get("observation_id") or "")
+        action_context = _public_action_context(transition)
+        if action_context is not None:
+            compact["action_context"] = action_context
         observations.append(compact)
     return sanitize_agent_channel(
         {"schema_version": INSPECTION_SCHEMA_V2, "observations": observations}

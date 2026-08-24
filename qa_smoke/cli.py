@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -360,6 +361,7 @@ def _benchmark_detection(args: argparse.Namespace) -> int:
     from .detection_campaign import (
         BenchmarkCampaignConfig,
         BridgeCampaignBackend,
+        CampaignContractError,
         LLMInspectorAdapter,
         run_detection_campaign,
     )
@@ -372,11 +374,21 @@ def _benchmark_detection(args: argparse.Namespace) -> int:
         quiet=args.quiet,
         api_url=args.api_url,
     )
-    result = run_detection_campaign(
-        config,
-        backend=BridgeCampaignBackend(config),
-        inspector=LLMInspectorAdapter(api_url=args.api_url),
-    )
+    try:
+        result = run_detection_campaign(
+            config,
+            backend=BridgeCampaignBackend(config),
+            inspector=LLMInspectorAdapter(api_url=args.api_url),
+        )
+    except CampaignContractError as error:
+        print(
+            json.dumps(
+                {"status": "incomplete", "error_type": type(error).__name__},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     print(
         json.dumps(
             {

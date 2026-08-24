@@ -4,6 +4,7 @@ import inspect as python_inspect
 
 from . import inspector
 from . import detection
+from . import detection_benchmark as benchmark
 from .inspector import build_inspection_payload
 from . import run as run_module
 from .reporting import RunRecorder
@@ -59,6 +60,122 @@ def test_inspection_payload_keeps_only_public_player_view_telemetry() -> None:
         "expected_behavior",
     ):
         assert private_value not in serialized
+
+
+def test_inspection_payload_exposes_only_whitelisted_player_action_context() -> None:
+    payload = build_inspection_payload(
+        [
+            {
+                "decision": {
+                    "tool": "game",
+                    "action": "select_upgrade",
+                    "arguments": {
+                        "index": 1,
+                        "scenario_id": "private-scenario",
+                        "fault_id": "private-fault",
+                    },
+                    "qa_observation": "private agent text",
+                    "expected_effect": "private numeric relation",
+                    "goal": "private goal",
+                    "ground_truth": "private truth",
+                    "source_code": "private source",
+                },
+                "observation": {
+                    "observation_id": "obs-upgrade",
+                    "phase": "active_gameplay",
+                    "player": {},
+                },
+            },
+            {
+                "decision": {
+                    "tool": "game",
+                    "action": "restart",
+                    "arguments": {"fault_id": "private-fault"},
+                    "reflection": {"summary": "private agent reflection"},
+                },
+                "observation": {
+                    "observation_id": "obs-restart",
+                    "phase": "character_select",
+                    "player": {},
+                },
+            },
+            {
+                "decision": {
+                    "tool": "game",
+                    "action": "direct_steer",
+                    "arguments": {"x": 1.0, "y": 0.0},
+                },
+                "observation": {
+                    "observation_id": "obs-steer",
+                    "phase": "active_gameplay",
+                    "player": {},
+                },
+            },
+        ]
+    )
+
+    observations = payload["observations"]
+    assert observations[0]["action_context"] == {
+        "action": "select_upgrade",
+        "selection_index": 1,
+    }
+    assert observations[1]["action_context"] == {"action": "restart"}
+    assert "action_context" not in observations[2]
+    serialized = str(payload).lower()
+    for private_value in (
+        "private-scenario",
+        "private-fault",
+        "private agent text",
+        "private numeric relation",
+        "private goal",
+        "private truth",
+        "private source",
+        "private agent reflection",
+        "scenario_id",
+        "fault_id",
+        "ground_truth",
+        "source_code",
+    ):
+        assert private_value not in serialized
+
+
+def test_new_upgrade_without_post_action_numeric_level_remains_unobservable() -> None:
+    transitions = [
+        {
+            "observation": {
+                "observation_id": "obs-new-ability-menu",
+                "menu": {"choices": [{"index": 0, "name": "Nova", "level": 1}]},
+                "inventory": {"abilities": []},
+            }
+        },
+        {
+            "decision": {
+                "tool": "game",
+                "action": "select_upgrade",
+                "arguments": {"index": 0},
+            },
+            "observation": {
+                "observation_id": "obs-new-ability-selected",
+                "inventory": {"abilities": [{"name": "Nova", "owned": True}]},
+            },
+        },
+    ]
+
+    payload = build_inspection_payload(transitions)
+    score = benchmark.score_trace(
+        benchmark.TraceEvaluation.fault(
+            "new-ability-without-level",
+            "upgrade_ack_without_effect",
+            transitions,
+            [{"schema_version": "qa-inspection/v2", "findings": []}] * 3,
+        )
+    )
+
+    assert payload["observations"][1]["action_context"] == {
+        "action": "select_upgrade",
+        "selection_index": 0,
+    }
+    assert score.status == "UNOBSERVABLE"
 
 
 def test_v2_normalization_requires_explicit_numeric_comparison_and_reads_v1() -> None:

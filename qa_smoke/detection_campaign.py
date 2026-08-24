@@ -26,9 +26,12 @@ from .evaluation import evaluate_coverage, evaluate_oracle, evaluate_v4_oracle
 from .inspector import (
     FINDINGS_SCHEMA,
     INSPECTOR_SYSTEM_PROMPT,
+    INSPECTION_CHUNK_OVERLAP,
+    INSPECTION_CHUNK_SIZE,
     INSPECTION_SCHEMA_V2,
     build_inspection_chunks,
     normalize_inspection_artifact,
+    validate_inspection_artifact_v2,
 )
 from .planners import LLMPlanner, observation_phase
 from .run import execute_game_action, parse_args as parse_run_args, run_session
@@ -46,16 +49,22 @@ SEEDS = (9101, 9102, 9103)
 AUTONOMOUS_SEED = 9101
 INSPECTION_REPETITIONS = 3
 LOGICAL_INSPECTION_CALL_CAP = 700
-PLANNED_MAX_LOGICAL_INSPECTION_CALLS = 693
+EXPECTED_CROSS_TRACK_INSPECTION_CALLS = 693
 MAX_HTTP_ATTEMPTS = 3
+MAX_COMPLETION_REQUESTS = 2
 MAX_RETRY_SLEEP_SECONDS = 45.0
 NEUTRAL_REACHABILITY_GOAL = (
     "Reach ordinary gameplay state needed for generic QA observation, while surviving when possible."
 )
+TRACK_A_MAX_STEP_BUDGETS = (20, 40, 80, 80, 80, 80, 80, 80)
 
 
 class CampaignContractError(RuntimeError):
     """Raised when campaign artifacts or fixed evaluation contracts do not match."""
+
+
+class CampaignExecutionError(CampaignContractError):
+    """Raised when required campaign execution cannot produce a valid scored trace."""
 
 
 class InspectionCallError(RuntimeError):
@@ -127,6 +136,7 @@ class EpisodeResult:
     transitions: Sequence[dict[str, Any]]
     execution_status: str = "completed"
     replay_divergence_index: int | None = None
+    replay_divergence_stage: Literal["before_command", "after_command"] | None = None
     coverage_override: str | None = None
     oracle_override: str | None = None
     divergence_evidence: dict[str, Any] | None = None
@@ -137,6 +147,7 @@ class EpisodeResult:
             "transitions": list(self.transitions),
             "execution_status": self.execution_status,
             "replay_divergence_index": self.replay_divergence_index,
+            "replay_divergence_stage": self.replay_divergence_stage,
             "coverage_override": self.coverage_override,
             "oracle_override": self.oracle_override,
             "divergence_evidence": self.divergence_evidence,
@@ -149,10 +160,14 @@ class EpisodeResult:
         if not isinstance(transitions, list) or any(not isinstance(item, dict) for item in transitions):
             raise CampaignContractError("episode result transitions must be a list of objects")
         divergence = value.get("replay_divergence_index")
+        divergence_stage = value.get("replay_divergence_stage")
+        if divergence_stage not in (None, "before_command", "after_command"):
+            raise CampaignContractError("episode replay divergence stage is invalid")
         return cls(
             transitions=transitions,
             execution_status=str(value.get("execution_status") or "error"),
             replay_divergence_index=int(divergence) if isinstance(divergence, int) else None,
+            replay_divergence_stage=divergence_stage,
             coverage_override=(
                 str(value["coverage_override"]) if value.get("coverage_override") else None
             ),
@@ -373,7 +388,73 @@ def build_track_b_schedule(bindings: Sequence[FaultBinding]) -> TrackBSchedule:
     return TrackBSchedule(tuple(pilots), tuple(official), tuple(autonomous))
 
 
-def _semantic_selection(action: str, arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+def _max_chunks_for_steps(max_steps: int) -> int:
+    if max_steps <= 0:
+        return 0
+    stride = INSPECTION_CHUNK_SIZE - INSPECTION_CHUNK_OVERLAP
+    return 1 + max(
+        0,
+        (max_steps - INSPECTION_CHUNK_SIZE + stride - 1) // stride,
+    )
+
+
+def _planned_inspection_call_counts(schedule: TrackBSchedule) -> dict[str, int]:
+    track_a = sum(
+        _max_chunks_for_steps(max_steps) * INSPECTION_REPETITIONS * len(SEEDS)
+        for max_steps in TRACK_A_MAX_STEP_BUDGETS
+    )
+    track_b = sum(
+        _max_chunks_for_steps(spec.max_steps) * INSPECTION_REPETITIONS
+        for pair in (*schedule.official_pairs, *schedule.autonomous_pairs)
+        for spec in (pair.clean, pair.fault)
+    )
+    cross_track = track_a + track_b
+    if cross_track != EXPECTED_CROSS_TRACK_INSPECTION_CALLS:
+        raise CampaignContractError(
+            "fixed campaign schedule no longer matches the 693-call acceptance budget"
+        )
+    return {"track_a": track_a, "track_b": track_b, "cross_track": cross_track}
+
+
+_PUBLIC_SELECTION_FIELDS = (
+    "index",
+    "id",
+    "ability_id",
+    "name",
+    "type",
+    "level",
+    "owned",
+)
+
+
+def _public_upgrade_choices(observation: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(observation, Mapping):
+        return []
+    menu = observation.get("menu")
+    if not isinstance(menu, Mapping):
+        return []
+    choices = menu.get("choices")
+    if not isinstance(choices, list):
+        return []
+    public: list[dict[str, Any]] = []
+    for choice in choices:
+        if not isinstance(choice, Mapping):
+            continue
+        identity = {
+            key: choice[key]
+            for key in _PUBLIC_SELECTION_FIELDS
+            if key in choice and isinstance(choice[key], (str, int, float, bool))
+        }
+        if identity:
+            public.append(identity)
+    return public
+
+
+def _semantic_selection(
+    action: str,
+    arguments: Mapping[str, Any],
+    before_observation: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
     kind = {
         "start_game": "character",
         "select_upgrade": "upgrade",
@@ -385,7 +466,18 @@ def _semantic_selection(action: str, arguments: Mapping[str, Any]) -> dict[str, 
         index = int(arguments.get("index", 0))
     except (TypeError, ValueError):
         index = 0
-    return {"kind": kind, "index": index}
+    selection: dict[str, Any] = {"kind": kind, "index": index}
+    if kind == "upgrade":
+        choices = _public_upgrade_choices(before_observation)
+        if choices:
+            selection["expected_menu_digest"] = _sha256(choices)
+            selected = next(
+                (choice for choice in choices if choice.get("index") == index),
+                None,
+            )
+            if selected is not None:
+                selection["expected_menu_selection"] = selected
+    return selection
 
 
 def _command_digest(commands: Sequence[Mapping[str, Any]]) -> str:
@@ -409,6 +501,7 @@ def build_action_replay(
 
     commands: list[dict[str, Any]] = []
     previous_phase: str | None = None
+    previous_observation: Mapping[str, Any] | None = None
     for transition in transitions:
         decision = transition.get("decision") or {}
         if not isinstance(decision, dict) or decision.get("tool", "game") != "game":
@@ -432,12 +525,15 @@ def build_action_replay(
                 "action": action,
                 "arguments": dict(arguments),
                 "duration_seconds": duration_value,
-                "semantic_selection": _semantic_selection(action, arguments),
+                "semantic_selection": _semantic_selection(
+                    action, arguments, previous_observation
+                ),
                 "expected_phase_before": previous_phase,
                 "expected_phase_after": current_phase,
             }
         )
         previous_phase = current_phase
+        previous_observation = observation if isinstance(observation, dict) else None
     replay = {
         "schema_version": ACTION_REPLAY_SCHEMA,
         "replay_id": replay_id,
@@ -476,6 +572,22 @@ def validate_action_replay(
             raise CampaignContractError("replay command sequence is invalid")
         if not isinstance(command.get("arguments"), dict):
             raise CampaignContractError("replay command arguments must be an object")
+        semantic = command.get("semantic_selection")
+        if semantic is not None:
+            if not isinstance(semantic, dict):
+                raise CampaignContractError("replay semantic selection must be an object")
+            if semantic.get("kind") not in ("character", "upgrade", "item"):
+                raise CampaignContractError("replay semantic selection kind is invalid")
+            if not isinstance(semantic.get("index"), int):
+                raise CampaignContractError("replay semantic selection index is invalid")
+            menu_digest = semantic.get("expected_menu_digest")
+            menu_selection = semantic.get("expected_menu_selection")
+            if menu_digest is not None and (
+                not isinstance(menu_digest, str) or len(menu_digest) != 64
+            ):
+                raise CampaignContractError("replay expected menu digest is invalid")
+            if menu_selection is not None and not isinstance(menu_selection, dict):
+                raise CampaignContractError("replay expected menu selection is invalid")
     if replay.get("bootstrap_command") != {"action": "observe", "arguments": {}}:
         raise CampaignContractError("replay bootstrap command must be a plain observation")
     if replay.get("command_digest") != _command_digest(commands):
@@ -493,10 +605,16 @@ def apply_replay_divergence(
     if index is None:
         return result
     target = replay.get("target_command_index")
-    pre_target = target is None or index < int(target)
+    stage = result.replay_divergence_stage or "after_command"
+    pre_target = (
+        target is None
+        or index < int(target)
+        or (index == int(target) and stage == "before_command")
+    )
     evidence = {
         "classification": "pre_target" if pre_target else "post_target",
         "command_index": index,
+        "comparison_stage": stage,
         "target_command_index": target,
     }
     if pre_target:
@@ -554,7 +672,25 @@ class CheckpointStore:
             return False
         if unit.get("input_hash") != input_hash:
             raise CampaignContractError(f"checkpoint input hash mismatch for {unit_id}")
-        return unit.get("status") == "complete" and all(path.is_file() for path in artifacts)
+        if unit.get("status") != "complete":
+            return False
+        recorded = unit.get("artifacts")
+        if not isinstance(recorded, list) or len(recorded) != len(artifacts):
+            return False
+        for path, identity in zip(artifacts, recorded, strict=True):
+            if not isinstance(identity, dict):
+                return False
+            resolved = path.resolve()
+            if identity.get("path") != str(resolved) or not resolved.is_file():
+                return False
+            try:
+                size = resolved.stat().st_size
+                digest = hash_path(resolved)
+            except OSError:
+                return False
+            if identity.get("size") != size or identity.get("sha256") != digest:
+                return False
+        return True
 
     def mark_started(self, unit_id: str, input_hash: str) -> None:
         existing = self.units.get(unit_id)
@@ -564,10 +700,22 @@ class CheckpointStore:
         self._write()
 
     def mark_complete(self, unit_id: str, input_hash: str, artifacts: Sequence[Path]) -> None:
+        identities: list[dict[str, Any]] = []
+        for path in artifacts:
+            resolved = path.resolve()
+            if not resolved.is_file():
+                raise CampaignContractError(f"completed artifact is missing: {resolved}")
+            identities.append(
+                {
+                    "path": str(resolved),
+                    "size": resolved.stat().st_size,
+                    "sha256": hash_path(resolved),
+                }
+            )
         self.units[unit_id] = {
             "status": "complete",
             "input_hash": input_hash,
-            "artifacts": [str(path) for path in artifacts],
+            "artifacts": identities,
         }
         self._write()
 
@@ -611,11 +759,20 @@ class InspectionCallBudget:
         self.logical_calls += 1
         checkpoint.record_logical_call()
 
-    def finish_call(self, attempts: int, checkpoint: CheckpointStore) -> None:
+    def finish_call(
+        self,
+        attempts: int,
+        completion_requests: int,
+        checkpoint: CheckpointStore,
+    ) -> None:
         self.http_attempts += attempts
         checkpoint.record_http_attempts(attempts)
-        if attempts < 1 or attempts > MAX_HTTP_ATTEMPTS:
-            raise CampaignContractError("one logical inspection call accepts at most three HTTP attempts")
+        if completion_requests < 1 or completion_requests > MAX_COMPLETION_REQUESTS:
+            raise CampaignContractError("one logical inspection call accepts at most two completions")
+        if attempts < completion_requests or attempts > MAX_HTTP_ATTEMPTS * completion_requests:
+            raise CampaignContractError(
+                "each completion request accepts at most three HTTP attempts"
+            )
 
 
 def inspect_trace_pass(
@@ -636,6 +793,7 @@ def inspect_trace_pass(
     chunks = build_inspection_chunks(list(transitions))
     pass_dir = output_dir / f"pass-{pass_index}"
     pass_path = pass_dir / "inspection.json"
+    chunk_paths = [pass_dir / f"{chunk['chunk_id']}.audit.json" for chunk in chunks]
     pass_unit = f"inspection/{trace_id}/pass-{pass_index}"
     pass_hash = _sha256(
         {
@@ -647,22 +805,43 @@ def inspect_trace_pass(
             "chunks": [_sha256(chunk) for chunk in chunks],
         }
     )
-    if checkpoint.reusable(pass_unit, pass_hash, [pass_path]):
-        return _read_json_object(pass_path)
+    chunk_units = [
+        f"{pass_unit}/{chunk['chunk_id']}"
+        for chunk in chunks
+    ]
+    chunk_hashes = [
+        _sha256(
+            {
+                "pass_hash": pass_hash,
+                "chunk": chunk,
+                "source_tools_enabled": False,
+            }
+        )
+        for chunk in chunks
+    ]
+    if checkpoint.reusable(pass_unit, pass_hash, [pass_path, *chunk_paths]):
+        children_reusable = all(
+            checkpoint.reusable(chunk_unit, chunk_hash, [chunk_path])
+            for chunk_unit, chunk_hash, chunk_path in zip(
+                chunk_units,
+                chunk_hashes,
+                chunk_paths,
+                strict=True,
+            )
+        )
+        if children_reusable:
+            return _read_json_object(pass_path)
     checkpoint.mark_started(pass_unit, pass_hash)
     findings: list[dict[str, Any]] = []
     try:
-        for chunk in chunks:
+        for chunk, chunk_unit, chunk_hash in zip(
+            chunks,
+            chunk_units,
+            chunk_hashes,
+            strict=True,
+        ):
             chunk_id = str(chunk["chunk_id"])
             chunk_path = pass_dir / f"{chunk_id}.audit.json"
-            chunk_unit = f"{pass_unit}/{chunk_id}"
-            chunk_hash = _sha256(
-                {
-                    "pass_hash": pass_hash,
-                    "chunk": chunk,
-                    "source_tools_enabled": False,
-                }
-            )
             if checkpoint.reusable(chunk_unit, chunk_hash, [chunk_path]):
                 audit = _read_json_object(chunk_path)
                 normalized = audit.get("normalized") or {}
@@ -676,11 +855,51 @@ def inspect_trace_pass(
                 elapsed = max(response.elapsed_seconds, time.monotonic() - started)
                 usage = {str(key): int(value) for key, value in response.usage.items()}
                 attempts = int(usage.get("llm_http_attempts", 1) or 1)
-                budget.finish_call(attempts, checkpoint)
+                completion_requests = int(usage.get("llm_completion_requests", 1) or 1)
+                budget.finish_call(attempts, completion_requests, checkpoint)
                 retry_wait_ms = int(usage.get("llm_retry_wait_ms", 0) or 0)
-                if retry_wait_ms > int(MAX_RETRY_SLEEP_SECONDS * 1000):
+                if retry_wait_ms > int(
+                    MAX_RETRY_SLEEP_SECONDS * completion_requests * 1000
+                ):
                     raise CampaignContractError("inspection retry sleep budget exceeded")
-                normalized = normalize_inspection_artifact(response.raw_response)
+                try:
+                    strict_response = validate_inspection_artifact_v2(
+                        response.raw_response
+                    )
+                except Exception as validation_error:
+                    _atomic_write_json(
+                        chunk_path,
+                        {
+                            "schema_version": INSPECTION_AUDIT_SCHEMA,
+                            "status": "error",
+                            "opaque_trace_id": trace_id,
+                            "pass_index": pass_index,
+                            "chunk_id": chunk_id,
+                            "request": {
+                                "system_prompt": INSPECTOR_SYSTEM_PROMPT,
+                                "payload": chunk,
+                                "source_tools_enabled": False,
+                            },
+                            "raw_response": response.raw_response,
+                            "normalized": None,
+                            "usage": usage,
+                            "elapsed_seconds": elapsed,
+                            "error_type": type(validation_error).__name__,
+                            "hashes": {
+                                "input": input_hash,
+                                "chunk": _sha256(chunk),
+                                "model": _sha256(INSPECTOR_MODEL),
+                                "prompt": _sha256(INSPECTOR_SYSTEM_PROMPT),
+                            },
+                        },
+                    )
+                    checkpoint.mark_failed(
+                        chunk_unit,
+                        chunk_hash,
+                        type(validation_error).__name__,
+                    )
+                    raise
+                normalized = normalize_inspection_artifact(strict_response)
                 audit = {
                     "schema_version": INSPECTION_AUDIT_SCHEMA,
                     "opaque_trace_id": trace_id,
@@ -708,7 +927,8 @@ def inspect_trace_pass(
             except InspectionCallError as error:
                 usage = {str(key): int(value) for key, value in error.usage.items()}
                 attempts = int(usage.get("llm_http_attempts", 1) or 1)
-                budget.finish_call(attempts, checkpoint)
+                completion_requests = int(usage.get("llm_completion_requests", 1) or 1)
+                budget.finish_call(attempts, completion_requests, checkpoint)
                 _atomic_write_json(
                     chunk_path,
                     {
@@ -747,7 +967,7 @@ def inspect_trace_pass(
             {"schema_version": INSPECTION_SCHEMA_V2, "findings": findings}
         )
         _atomic_write_json(pass_path, artifact)
-        checkpoint.mark_complete(pass_unit, pass_hash, [pass_path])
+        checkpoint.mark_complete(pass_unit, pass_hash, [pass_path, *chunk_paths])
         return artifact
     except Exception as error:
         detail = (
@@ -845,10 +1065,7 @@ def _target_command_index(
     transitions: Sequence[dict[str, Any]],
 ) -> int | None:
     for index in range(len(transitions)):
-        try:
-            coverage, _ = _evaluate_binding(binding, project_root, transitions[: index + 1])
-        except (ValueError, TypeError, KeyError):
-            continue
+        coverage, _ = _evaluate_binding(binding, project_root, transitions[: index + 1])
         if coverage == "reached":
             return index
     return None
@@ -869,6 +1086,10 @@ def _unit_hash(
     )
 
 
+def _opaque_trace_id(campaign_hash: str, unit_id: str) -> str:
+    return _sha256({"campaign_hash": campaign_hash, "unit_id": unit_id})[:24]
+
+
 def _run_episode_unit(
     *,
     checkpoint: CheckpointStore,
@@ -885,13 +1106,15 @@ def _run_episode_unit(
         _atomic_write_json(path, result.to_dict())
         if result.execution_status == "completed":
             checkpoint.mark_complete(unit_id, input_hash, [path])
-        else:
-            checkpoint.mark_failed(
-                unit_id,
-                input_hash,
-                result.error or f"execution_status={result.execution_status}",
-            )
-        return result, False
+            return result, False
+        checkpoint.mark_failed(
+            unit_id,
+            input_hash,
+            result.error or f"execution_status={result.execution_status}",
+        )
+        raise CampaignExecutionError(
+            f"episode execution failed for {unit_id}: {result.execution_status}"
+        )
     except Exception as error:
         checkpoint.mark_failed(unit_id, input_hash, f"{type(error).__name__}: {error}")
         raise
@@ -919,6 +1142,21 @@ def _run_pilot_unit(
     checkpoint.mark_started(spec.unit_id, unit_hash)
     try:
         result = backend.run_pilot(spec, directory)
+        _atomic_write_json(episode_path, result.to_dict())
+        if result.execution_status != "completed":
+            checkpoint.mark_failed(
+                spec.unit_id,
+                unit_hash,
+                result.error or f"execution_status={result.execution_status}",
+            )
+            raise CampaignExecutionError(
+                f"pilot execution failed for {spec.unit_id}: {result.execution_status}"
+            )
+        if not result.transitions:
+            checkpoint.mark_failed(spec.unit_id, unit_hash, "pilot produced no transitions")
+            raise CampaignExecutionError(
+                f"pilot execution failed for {spec.unit_id}: empty trace"
+            )
         target_index = _target_command_index(
             binding, config.project_root, result.transitions
         )
@@ -930,16 +1168,8 @@ def _run_pilot_unit(
             transitions=result.transitions,
             target_command_index=target_index,
         )
-        _atomic_write_json(episode_path, result.to_dict())
         _atomic_write_json(replay_path, replay)
-        if result.execution_status == "completed":
-            checkpoint.mark_complete(spec.unit_id, unit_hash, [episode_path, replay_path])
-        else:
-            checkpoint.mark_failed(
-                spec.unit_id,
-                unit_hash,
-                result.error or f"execution_status={result.execution_status}",
-            )
+        checkpoint.mark_complete(spec.unit_id, unit_hash, [episode_path, replay_path])
         return replay, False
     except Exception as error:
         checkpoint.mark_failed(spec.unit_id, unit_hash, f"{type(error).__name__}: {error}")
@@ -999,7 +1229,12 @@ def _score_episode_pair(
 ) -> PairScore:
     evaluations: list[TraceEvaluation] = []
     for spec, result in ((pair.clean, clean_result), (pair.fault, fault_result)):
-        opaque_id = _sha256({"campaign_hash": campaign_hash, "unit_id": spec.unit_id})[:24]
+        opaque_id = _opaque_trace_id(campaign_hash, spec.unit_id)
+        coverage, oracle = _evaluate_binding(
+            binding, config.project_root, result.transitions
+        )
+        coverage = result.coverage_override or coverage
+        oracle = result.oracle_override or oracle
         inspections = _inspect_episode(
             opaque_trace_id=opaque_id,
             result=result,
@@ -1009,14 +1244,6 @@ def _score_episode_pair(
             budget=budget,
             campaign_hash=campaign_hash,
         )
-        try:
-            coverage, oracle = _evaluate_binding(
-                binding, config.project_root, result.transitions
-            )
-        except Exception:
-            coverage, oracle = "not_reached", "not_evaluated"
-        coverage = result.coverage_override or coverage
-        oracle = result.oracle_override or oracle
         evaluations.append(
             TraceEvaluation(
                 trace_id=opaque_id,
@@ -1063,7 +1290,152 @@ def _write_reports(
         markdown_path.write_text(render_benchmark_markdown(report), encoding="utf-8")
 
 
+def _prepare_campaign_output(
+    output: Path,
+    campaign_hash: str,
+) -> CheckpointStore:
+    if output.exists():
+        if not output.is_dir():
+            raise CampaignContractError("campaign output must be a directory")
+        entries = list(output.iterdir())
+        checkpoint_path = output / "checkpoint.json"
+        if entries and not checkpoint_path.is_file():
+            raise CampaignContractError(
+                "non-empty output requires a valid exact-hash checkpoint"
+            )
+    else:
+        output.mkdir(parents=True)
+    checkpoint = CheckpointStore(output / "checkpoint.json", campaign_hash)
+    manifest_path = output / "campaign-manifest.json"
+    if manifest_path.exists():
+        existing = _read_json_object(manifest_path)
+        if existing.get("campaign_hash") != campaign_hash:
+            raise CampaignContractError("campaign hash mismatch; refusing to reuse manifest")
+    return checkpoint
+
+
+def _write_incomplete_manifest(
+    *,
+    output: Path,
+    campaign_hash: str,
+    build_hash: str,
+    project_root: Path,
+    checkpoint: CheckpointStore,
+    error: Exception,
+) -> None:
+    _atomic_write_json(
+        output / "campaign-manifest.json",
+        {
+            "schema_version": CAMPAIGN_MANIFEST_SCHEMA,
+            "campaign_hash": campaign_hash,
+            "status": "incomplete",
+            "track": "B",
+            "hashes": {
+                "build": build_hash,
+                "config": campaign_hash,
+                "rubric": _file_hash(project_root / "config" / "qa-detection-rubric.json"),
+            },
+            "counts": {
+                "logical_inspection_calls": checkpoint.logical_calls,
+                "http_attempts": checkpoint.http_attempts,
+            },
+            "failure": {
+                "status": "failed",
+                "error_type": type(error).__name__,
+            },
+        },
+    )
+
+
+def _supersede_published_results(output: Path) -> None:
+    sources = (
+        output / "campaign-manifest.json",
+        output / "detection-benchmark.json",
+        output / "detection-benchmark.ko.md",
+        output / "metrics",
+    )
+    existing = [source for source in sources if source.exists()]
+    if not existing:
+        return
+    archive = output / ".superseded-results" / uuid.uuid4().hex
+    for source in existing:
+        destination = archive / source.relative_to(output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(destination)
+
+
+def _write_running_manifest(
+    *,
+    output: Path,
+    campaign_hash: str,
+    build_hash: str,
+    project_root: Path,
+) -> None:
+    _atomic_write_json(
+        output / "campaign-manifest.json",
+        {
+            "schema_version": CAMPAIGN_MANIFEST_SCHEMA,
+            "campaign_hash": campaign_hash,
+            "status": "running",
+            "track": "B",
+            "hashes": {
+                "build": build_hash,
+                "config": campaign_hash,
+                "rubric": _file_hash(project_root / "config" / "qa-detection-rubric.json"),
+            },
+        },
+    )
+
+
 def run_detection_campaign(
+    config: BenchmarkCampaignConfig,
+    *,
+    backend: CampaignBackend,
+    inspector: InspectorAdapter,
+) -> CampaignResult:
+    """Execute the campaign and persist an incomplete manifest on required-unit failure."""
+
+    build_hash = hash_path(config.build)
+    campaign_hash = _campaign_hash(config, build_hash)
+    output = config.output.resolve()
+    checkpoint = _prepare_campaign_output(output, campaign_hash)
+    resolved_config = replace(config, output=output)
+    try:
+        _supersede_published_results(output)
+        _write_running_manifest(
+            output=output,
+            campaign_hash=campaign_hash,
+            build_hash=build_hash,
+            project_root=config.project_root,
+        )
+        return _run_detection_campaign_impl(
+            resolved_config,
+            backend=backend,
+            inspector=inspector,
+        )
+    except Exception as error:
+        latest_checkpoint = checkpoint
+        try:
+            latest_checkpoint = CheckpointStore(output / "checkpoint.json", campaign_hash)
+        except CampaignContractError:
+            pass
+        try:
+            _write_incomplete_manifest(
+                output=output,
+                campaign_hash=campaign_hash,
+                build_hash=build_hash,
+                project_root=config.project_root,
+                checkpoint=latest_checkpoint,
+                error=error,
+            )
+        except OSError:
+            pass
+        if isinstance(error, CampaignContractError):
+            raise
+        raise CampaignExecutionError("campaign execution failed") from error
+
+
+def _run_detection_campaign_impl(
     config: BenchmarkCampaignConfig,
     *,
     backend: CampaignBackend,
@@ -1084,6 +1456,7 @@ def run_detection_campaign(
     bindings = load_fault_bindings(config.project_root)
     by_fault = _binding_by_fault(bindings)
     schedule = build_track_b_schedule(bindings)
+    planned_calls = _planned_inspection_call_counts(schedule)
     manifest_path = output / "campaign-manifest.json"
     resumed = bool(checkpoint.units)
     if manifest_path.exists():
@@ -1142,6 +1515,7 @@ def run_detection_campaign(
             trace_metadata.append(
                 {
                     "unit_id": spec.unit_id,
+                    "opaque_trace_id": _opaque_trace_id(campaign_hash, spec.unit_id),
                     "pair_id": spec.pair_id,
                     "variant": spec.variant,
                     "driver": spec.driver,
@@ -1186,6 +1560,7 @@ def run_detection_campaign(
             trace_metadata.append(
                 {
                     "unit_id": base_spec.unit_id,
+                    "opaque_trace_id": _opaque_trace_id(campaign_hash, base_spec.unit_id),
                     "pair_id": base_spec.pair_id,
                     "variant": base_spec.variant,
                     "driver": base_spec.driver,
@@ -1221,6 +1596,9 @@ def run_detection_campaign(
             "steering_model": _sha256(STEERING_MODEL),
             "inspector_model": _sha256(INSPECTOR_MODEL),
             "inspector_prompt": _sha256(INSPECTOR_SYSTEM_PROMPT),
+            "rubric": _file_hash(
+                config.project_root / "config" / "qa-detection-rubric.json"
+            ),
         },
         "models": {
             "steering": STEERING_MODEL,
@@ -1229,9 +1607,23 @@ def run_detection_campaign(
         },
         "limits": {
             "logical_inspection_call_cap": LOGICAL_INSPECTION_CALL_CAP,
-            "planned_cross_track_max": PLANNED_MAX_LOGICAL_INSPECTION_CALLS,
-            "http_attempts_per_logical_call": MAX_HTTP_ATTEMPTS,
-            "retry_sleep_budget_seconds": MAX_RETRY_SLEEP_SECONDS,
+            "planned_track_a": planned_calls["track_a"],
+            "planned_track_b": planned_calls["track_b"],
+            "planned_cross_track_max": planned_calls["cross_track"],
+            "completion_requests_per_logical_call": MAX_COMPLETION_REQUESTS,
+            "http_attempts_per_completion_request": MAX_HTTP_ATTEMPTS,
+            "max_http_attempts_per_logical_call": (
+                MAX_HTTP_ATTEMPTS * MAX_COMPLETION_REQUESTS
+            ),
+            "http_attempts_per_logical_call": (
+                MAX_HTTP_ATTEMPTS * MAX_COMPLETION_REQUESTS
+            ),
+            "retry_sleep_budget_seconds_per_completion_request": (
+                MAX_RETRY_SLEEP_SECONDS
+            ),
+            "retry_sleep_budget_seconds": (
+                MAX_RETRY_SLEEP_SECONDS * MAX_COMPLETION_REQUESTS
+            ),
         },
         "counts": {
             "pilots": len(schedule.pilots),
@@ -1384,6 +1776,7 @@ class BridgeCampaignBackend:
         )
         transitions: list[dict[str, Any]] = []
         divergence_index: int | None = None
+        divergence_stage: Literal["before_command", "after_command"] | None = None
         execution_status = "completed"
         error = ""
         try:
@@ -1399,6 +1792,7 @@ class BridgeCampaignBackend:
                 **bootstrap["arguments"],
             )
             previous_phase: str | None = observation_phase(bootstrap_observation)
+            previous_observation: Mapping[str, Any] | None = bootstrap_observation
             for index, command in enumerate(replay["commands"]):
                 expected_before = command.get("expected_phase_before")
                 if (
@@ -1408,6 +1802,21 @@ class BridgeCampaignBackend:
                     and previous_phase != expected_before
                 ):
                     divergence_index = index
+                    divergence_stage = "before_command"
+                expected_selection = command.get("semantic_selection")
+                if (
+                    divergence_index is None
+                    and isinstance(expected_selection, dict)
+                    and expected_selection.get("expected_menu_digest") is not None
+                    and _semantic_selection(
+                        str(command["action"]),
+                        command["arguments"],
+                        previous_observation,
+                    )
+                    != expected_selection
+                ):
+                    divergence_index = index
+                    divergence_stage = "before_command"
                 decision = {
                     "tool": "game",
                     "action": command["action"],
@@ -1423,6 +1832,7 @@ class BridgeCampaignBackend:
                     and current_phase != expected_after
                 ):
                     divergence_index = index
+                    divergence_stage = "after_command"
                 transitions.append(
                     {
                         "step": index,
@@ -1431,6 +1841,7 @@ class BridgeCampaignBackend:
                     }
                 )
                 previous_phase = current_phase
+                previous_observation = observed
         except Exception as caught:
             execution_status = "infrastructure_error"
             error = f"{type(caught).__name__}: {caught}"
@@ -1448,6 +1859,7 @@ class BridgeCampaignBackend:
             transitions=transitions,
             execution_status=execution_status,
             replay_divergence_index=divergence_index,
+            replay_divergence_stage=divergence_stage,
             error=error,
         )
 
@@ -1465,6 +1877,8 @@ class BridgeCampaignBackend:
             spec.scenario_id,
             "--seed",
             str(spec.seed),
+            "--inspector-model",
+            "",
         ]
         if self.config.api_url:
             arguments.extend(["--api-url", self.config.api_url])

@@ -3371,6 +3371,82 @@ class TruncationTests(unittest.TestCase):
         self.assertEqual(1400, usage["total_tokens"])
         self.assertEqual(1, usage["request_count"])
 
+    def test_retries_across_truncation_completions_are_aggregated(self) -> None:
+        calls = 0
+        sleeps: list[float] = []
+
+        def opener(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls in {1, 3}:
+                raise urllib.error.HTTPError(
+                    "https://example.invalid",
+                    429,
+                    "Too Many Requests",
+                    {},
+                    io.BytesIO(b"{}"),
+                )
+            payload = (
+                completion(finish_reason="length", tokens=700)
+                if calls == 2
+                else completion('{"a": 1}', tokens=10)
+            )
+            return fake_opener(payload)()
+
+        planner = LLMPlanner(
+            "qa",
+            "test-model",
+            TestCharter(),
+            5.0,
+            api_key="test-key",
+            urlopen=opener,
+            sleep=sleeps.append,
+        )
+
+        result = planner._request("sys", "user")
+
+        usage = planner.take_last_usage()
+        self.assertEqual({"a": 1}, result)
+        self.assertEqual(1, usage["request_count"])
+        self.assertEqual(2, usage["llm_completion_requests"])
+        self.assertEqual(4, usage["llm_http_attempts"])
+        self.assertEqual(2, usage["llm_retries"])
+        self.assertEqual(2000, usage["llm_retry_wait_ms"])
+        self.assertEqual([1.0, 1.0], sleeps)
+
+    def test_transport_only_failure_still_reports_all_http_attempts(self) -> None:
+        sleeps: list[float] = []
+
+        def opener(*_args, **_kwargs):
+            raise urllib.error.HTTPError(
+                "https://example.invalid",
+                429,
+                "Too Many Requests",
+                {},
+                io.BytesIO(b"{}"),
+            )
+
+        planner = LLMPlanner(
+            "qa",
+            "test-model",
+            TestCharter(),
+            5.0,
+            api_key="test-key",
+            urlopen=opener,
+            sleep=sleeps.append,
+        )
+
+        with self.assertRaises(planners_module.LLMTransportError):
+            planner._request("sys", "user")
+
+        usage = planner.take_last_usage()
+        self.assertEqual(1, usage["request_count"])
+        self.assertEqual(1, usage["llm_completion_requests"])
+        self.assertEqual(3, usage["llm_http_attempts"])
+        self.assertEqual(2, usage["llm_retries"])
+        self.assertEqual(3000, usage["llm_retry_wait_ms"])
+        self.assertEqual([1.0, 2.0], sleeps)
+
     def test_the_repair_path_uses_the_same_cap(self) -> None:
         bodies: list[dict[str, object]] = []
         planner = self.planner_capturing(bodies, [completion('{"a": 1}')])

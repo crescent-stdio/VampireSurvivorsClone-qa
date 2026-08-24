@@ -913,6 +913,7 @@ class LLMPlanner:
         self._retry_count = 0
         self._retry_wait_seconds = 0.0
         self._http_attempts = 0
+        self._completion_requests = 0
         self._planning_history = PlanningHistory()
         self._pending_user_content: str | None = None
         self._pending_tool_context: list[dict[str, Any]] | None = None
@@ -1190,9 +1191,9 @@ If the computed value and the reported value disagree, or a fraction falls outsi
         cache_boundary: bool,
     ) -> dict[str, int]:
         usage = dict(billed)
-        if not usage:
+        if not usage and self._http_attempts == 0:
             # Nothing was billed (e.g. the request never reached the provider);
-            # an empty dict keeps this out of the report entirely.
+            # no attempted transport means there is no call to audit.
             return usage
         usage["latency_ms"] = max(0, round((self.monotonic() - request_started) * 1000))
         # request_count stays 1: one logical planning call, however many HTTP
@@ -1202,6 +1203,7 @@ If the computed value and the reported value disagree, or a fraction falls outsi
         usage["llm_retries"] = self._retry_count
         usage["llm_retry_wait_ms"] = round(self._retry_wait_seconds * 1000)
         usage["llm_http_attempts"] = self._http_attempts
+        usage["llm_completion_requests"] = self._completion_requests
         return usage
 
     def _complete(
@@ -1228,23 +1230,39 @@ If the computed value and the reported value disagree, or a fraction falls outsi
         if retry_cap > caps[0]:
             caps.append(retry_cap)
         completions: list[int] = []
-        for cap in caps:
-            body.pop("max_tokens", None)
-            body.pop("max_completion_tokens", None)
-            body[budget_key] = cap
-            request.data = json.dumps(body).encode("utf-8")
-            response_body = self._send_with_retries(request)
-            usage = self._normalize_usage(response_body.get("usage") or {})
-            for key, value in usage.items():
-                billed[key] = billed.get(key, 0) + value
-            choice = response_body["choices"][0]
-            if choice.get("finish_reason") != "length":
-                return response_body, choice
-            completions.append(int(usage.get("completion_tokens", 0) or 0))
-        raise LLMTruncationError(
-            "LLM response was truncated at the output token limit "
-            f"(attempted max_tokens {caps}; completion_tokens {completions})"
-        )
+        total_retries = 0
+        total_retry_wait_seconds = 0.0
+        total_http_attempts = 0
+        completion_requests = 0
+        try:
+            for cap in caps:
+                body.pop("max_tokens", None)
+                body.pop("max_completion_tokens", None)
+                body[budget_key] = cap
+                request.data = json.dumps(body).encode("utf-8")
+                try:
+                    response_body = self._send_with_retries(request)
+                finally:
+                    completion_requests += 1
+                    total_retries += self._retry_count
+                    total_retry_wait_seconds += self._retry_wait_seconds
+                    total_http_attempts += self._http_attempts
+                usage = self._normalize_usage(response_body.get("usage") or {})
+                for key, value in usage.items():
+                    billed[key] = billed.get(key, 0) + value
+                choice = response_body["choices"][0]
+                if choice.get("finish_reason") != "length":
+                    return response_body, choice
+                completions.append(int(usage.get("completion_tokens", 0) or 0))
+            raise LLMTruncationError(
+                "LLM response was truncated at the output token limit "
+                f"(attempted max_tokens {caps}; completion_tokens {completions})"
+            )
+        finally:
+            self._completion_requests = completion_requests
+            self._retry_count = total_retries
+            self._retry_wait_seconds = total_retry_wait_seconds
+            self._http_attempts = total_http_attempts
 
     def _send_with_retries(self, request: urllib.request.Request) -> dict[str, Any]:
         """Retry a transient failure, honoring the provider's own delay hint.

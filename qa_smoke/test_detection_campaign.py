@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 
 from . import detection_campaign as campaign
+from . import detection_benchmark as benchmark
+from . import cli as cli_module
 from .cli import parse_cli
 
 
@@ -87,8 +89,19 @@ class FakeBackend:
         output_dir: Path,
     ) -> campaign.EpisodeResult:
         self.replays.append((spec, replay["command_digest"]))
+        selected = transition(1, action="select_upgrade")
+        selected["decision"].update(
+            {
+                "scenario_id": "campaign-private-scenario",
+                "goal": "campaign-private-goal",
+                "fault_id": spec.fault_id,
+                "ground_truth": "campaign-private-truth",
+                "source_code": "campaign-private-source",
+                "qa_observation": "campaign-private-agent-text",
+            }
+        )
         return campaign.EpisodeResult(
-            transitions=[transition(0), transition(1)],
+            transitions=[transition(0), selected],
             replay_divergence_index=self.divergence.get((spec.unit_id, spec.variant)),
         )
 
@@ -102,9 +115,10 @@ class FakeBackend:
 
 
 class FakeInspector:
-    def __init__(self, *, http_attempts: int = 1) -> None:
+    def __init__(self, *, http_attempts: int = 1, completion_requests: int = 1) -> None:
         self.requests: list[dict[str, Any]] = []
         self.http_attempts = http_attempts
+        self.completion_requests = completion_requests
 
     def inspect(self, system_prompt: str, payload: dict[str, Any]) -> campaign.InspectionResponse:
         self.requests.append(
@@ -118,6 +132,7 @@ class FakeInspector:
             usage={
                 "request_count": 1,
                 "llm_http_attempts": self.http_attempts,
+                "llm_completion_requests": self.completion_requests,
                 "llm_retries": max(0, self.http_attempts - 1),
                 "llm_retry_wait_ms": 0,
             },
@@ -126,6 +141,7 @@ class FakeInspector:
 
 
 def config(tmp_path: Path) -> campaign.BenchmarkCampaignConfig:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     build = tmp_path / "game-build"
     build.write_bytes(b"stable-build")
     return campaign.BenchmarkCampaignConfig(
@@ -203,6 +219,11 @@ def test_fixed_track_b_schedule_has_symmetric_official_and_autonomous_pairs(tmp_
         assert pair.clean.seed == pair.fault.seed
         assert pair.clean.variant == "clean"
         assert pair.fault.variant == "fault"
+    assert campaign._planned_inspection_call_counts(schedule) == {
+        "track_a": 189,
+        "track_b": 504,
+        "cross_track": 693,
+    }
 
 
 def test_campaign_runs_full_schedule_blindly_and_excludes_pilots_from_scores(
@@ -237,6 +258,11 @@ def test_campaign_runs_full_schedule_blindly_and_excludes_pilots_from_scores(
         "logical_inspection_calls": 264,
         "http_attempts": 264,
     }
+    assert len(manifest["hashes"]["rubric"]) == 64
+    assert manifest["limits"]["planned_track_a"] == 189
+    assert manifest["limits"]["planned_track_b"] == 504
+    assert manifest["limits"]["planned_cross_track_max"] == 693
+    assert all(len(trace["opaque_trace_id"]) == 24 for trace in manifest["traces"])
     assert len(result.pairs) == 44
     assert all("pilot" not in pair.pair_id for pair in result.pairs)
     assert (config(tmp_path).output / "detection-benchmark.json").exists()
@@ -260,6 +286,9 @@ def test_campaign_runs_full_schedule_blindly_and_excludes_pilots_from_scores(
     ).lower()
     for marker in forbidden:
         assert marker not in serialized_requests
+    assert "action_context" in serialized_requests
+    assert "select_upgrade" in serialized_requests
+    assert "campaign-private" not in serialized_requests
 
 
 def test_divergence_before_target_is_not_reached_but_post_target_is_preserved() -> None:
@@ -272,10 +301,19 @@ def test_divergence_before_target_is_not_reached_but_post_target_is_preserved() 
         target_command_index=1,
     )
     before = campaign.apply_replay_divergence(
-        campaign.EpisodeResult(transitions=[transition(0)], replay_divergence_index=0), replay
+        campaign.EpisodeResult(
+            transitions=[transition(0)],
+            replay_divergence_index=1,
+            replay_divergence_stage="before_command",
+        ),
+        replay,
     )
     after = campaign.apply_replay_divergence(
-        campaign.EpisodeResult(transitions=[transition(0), transition(1)], replay_divergence_index=1),
+        campaign.EpisodeResult(
+            transitions=[transition(0), transition(1)],
+            replay_divergence_index=1,
+            replay_divergence_stage="after_command",
+        ),
         replay,
     )
 
@@ -283,7 +321,8 @@ def test_divergence_before_target_is_not_reached_but_post_target_is_preserved() 
     assert before.oracle_override == "not_evaluated"
     assert before.divergence_evidence == {
         "classification": "pre_target",
-        "command_index": 0,
+        "command_index": 1,
+        "comparison_stage": "before_command",
         "target_command_index": 1,
     }
     assert after.coverage_override is None
@@ -291,6 +330,7 @@ def test_divergence_before_target_is_not_reached_but_post_target_is_preserved() 
     assert after.divergence_evidence == {
         "classification": "post_target",
         "command_index": 1,
+        "comparison_stage": "after_command",
         "target_command_index": 1,
     }
 
@@ -316,6 +356,20 @@ def test_inspection_logical_call_budget_counts_retries_as_http_attempts(tmp_path
     assert budget.http_attempts == 3
     assert len(inspector.requests) == 1
 
+    truncated = FakeInspector(http_attempts=4, completion_requests=2)
+    campaign.inspect_trace_pass(
+        trace_id="opaque-truncation",
+        pass_index=1,
+        transitions=[transition(0)],
+        output_dir=tmp_path / "inspection-truncation",
+        inspector=truncated,
+        checkpoint=checkpoint,
+        budget=budget,
+        input_hash="truncation-input",
+    )
+    assert budget.logical_calls == 2
+    assert budget.http_attempts == 7
+
     over_retrying = FakeInspector(http_attempts=4)
     with pytest.raises(campaign.CampaignContractError, match="three HTTP attempts"):
         campaign.inspect_trace_pass(
@@ -328,7 +382,7 @@ def test_inspection_logical_call_budget_counts_retries_as_http_attempts(tmp_path
             budget=budget,
             input_hash="different-input",
         )
-    assert budget.logical_calls == 2
+    assert budget.logical_calls == 3
 
 
 def test_campaign_contract_errors_are_not_downgraded_to_inspection_errors(tmp_path: Path) -> None:
@@ -344,6 +398,83 @@ def test_campaign_contract_errors_are_not_downgraded_to_inspection_errors(tmp_pa
             budget=campaign.InspectionCallBudget(cap=0),
             campaign_hash="campaign-hash",
         )
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        [],
+        {"schema_version": "qa-inspection/v2"},
+        {
+            "schema_version": "qa-inspection/v2",
+            "findings": [{"kind": "numeric", "field": "player.health"}],
+        },
+    ],
+)
+def test_malformed_campaign_inspections_are_failed_not_empty_negative_votes(
+    tmp_path: Path,
+    malformed: Any,
+) -> None:
+    class MalformedInspector:
+        def inspect(self, system_prompt: str, payload: dict[str, Any]):
+            return campaign.InspectionResponse(
+                raw_response=malformed,
+                usage={"llm_http_attempts": 1, "llm_completion_requests": 1},
+            )
+
+    checkpoint = campaign.CheckpointStore(tmp_path / "checkpoint.json", "campaign-hash")
+    passes = campaign._inspect_episode(
+        opaque_trace_id="opaque-malformed",
+        result=campaign.EpisodeResult(transitions=[transition(0)]),
+        output=tmp_path,
+        inspector=MalformedInspector(),
+        checkpoint=checkpoint,
+        budget=campaign.InspectionCallBudget(),
+        campaign_hash="campaign-hash",
+    )
+
+    assert passes == [None, None, None]
+    chunk_units = [
+        value
+        for key, value in checkpoint.units.items()
+        if key.endswith("inspection-chunk-000000-000000")
+    ]
+    assert len(chunk_units) == 3
+    assert {unit["status"] for unit in chunk_units} == {"failed"}
+    for pass_index in (1, 2, 3):
+        audit = json.loads(
+            (
+                tmp_path
+                / "inspections"
+                / "opaque-malformed"
+                / f"pass-{pass_index}"
+                / "inspection-chunk-000000-000000.audit.json"
+            ).read_text()
+        )
+        assert audit["status"] == "error"
+        assert audit["raw_response"] == malformed
+        assert audit["usage"]["llm_http_attempts"] == 1
+    scored = benchmark.score_trace(
+        benchmark.TraceEvaluation.fault(
+            "opaque-malformed",
+            "health_ratio_out_of_range",
+            [
+                {
+                    "observation": {
+                        "observation_id": "obs-malformed",
+                        "player": {
+                            "present": True,
+                            "health": 96.0,
+                            "max_health": 100.0,
+                            "health_ratio": 1.25,
+                        },
+                    }
+                }
+            ],
+            passes,
+        )
+    )
+    assert scored.status == "INSPECTION_ERROR"
 
 
 def test_failed_inspection_chunks_audit_attempts_without_credentials(tmp_path: Path) -> None:
@@ -404,6 +535,98 @@ def test_complete_checkpoints_resume_without_repeating_external_work(tmp_path: P
     assert resumed_inspector.requests == []
 
 
+def test_checkpoint_hashes_prevent_stale_episode_pass_and_chunk_reuse(tmp_path: Path) -> None:
+    checkpoint = campaign.CheckpointStore(tmp_path / "checkpoint.json", "campaign-hash")
+    episode_path = tmp_path / "episode.json"
+    episode_calls = 0
+
+    def execute_episode() -> campaign.EpisodeResult:
+        nonlocal episode_calls
+        episode_calls += 1
+        return campaign.EpisodeResult(transitions=[transition(episode_calls)])
+
+    campaign._run_episode_unit(
+        checkpoint=checkpoint,
+        unit_id="episode/example",
+        input_hash="episode-input",
+        path=episode_path,
+        execute=execute_episode,
+    )
+    episode_path.write_text('{"transitions": []}\n', encoding="utf-8")
+    restored, resumed = campaign._run_episode_unit(
+        checkpoint=checkpoint,
+        unit_id="episode/example",
+        input_hash="episode-input",
+        path=episode_path,
+        execute=execute_episode,
+    )
+    assert resumed is False
+    assert episode_calls == 2
+    assert restored.transitions[0]["step"] == 2
+
+    inspector = FakeInspector()
+    budget = campaign.InspectionCallBudget()
+    pass_dir = tmp_path / "inspection"
+    campaign.inspect_trace_pass(
+        trace_id="opaque-integrity",
+        pass_index=1,
+        transitions=[transition(0)],
+        output_dir=pass_dir,
+        inspector=inspector,
+        checkpoint=checkpoint,
+        budget=budget,
+        input_hash="inspection-input",
+    )
+    pass_path = pass_dir / "pass-1" / "inspection.json"
+    chunk_path = pass_dir / "pass-1" / "inspection-chunk-000000-000000.audit.json"
+
+    pass_path.write_text("{not-json}\n", encoding="utf-8")
+    restored_pass = campaign.inspect_trace_pass(
+        trace_id="opaque-integrity",
+        pass_index=1,
+        transitions=[transition(0)],
+        output_dir=pass_dir,
+        inspector=inspector,
+        checkpoint=checkpoint,
+        budget=budget,
+        input_hash="inspection-input",
+    )
+    assert restored_pass == {"schema_version": "qa-inspection/v2", "findings": []}
+    assert len(inspector.requests) == 1
+
+    chunk_path.write_text("{}\n", encoding="utf-8")
+    campaign.inspect_trace_pass(
+        trace_id="opaque-integrity",
+        pass_index=1,
+        transitions=[transition(0)],
+        output_dir=pass_dir,
+        inspector=inspector,
+        checkpoint=checkpoint,
+        budget=budget,
+        input_hash="inspection-input",
+    )
+    assert len(inspector.requests) == 2
+
+    checkpoint_payload = json.loads(checkpoint.path.read_text())
+    chunk_unit = (
+        "inspection/opaque-integrity/pass-1/inspection-chunk-000000-000000"
+    )
+    checkpoint_payload["units"][chunk_unit]["status"] = "failed"
+    checkpoint.path.write_text(json.dumps(checkpoint_payload), encoding="utf-8")
+    reloaded = campaign.CheckpointStore(checkpoint.path, "campaign-hash")
+    campaign.inspect_trace_pass(
+        trace_id="opaque-integrity",
+        pass_index=1,
+        transitions=[transition(0)],
+        output_dir=pass_dir,
+        inspector=inspector,
+        checkpoint=reloaded,
+        budget=budget,
+        input_hash="inspection-input",
+    )
+    assert len(inspector.requests) == 3
+
+
 def test_failed_or_incomplete_checkpoint_units_are_rerun(tmp_path: Path) -> None:
     store = campaign.CheckpointStore(tmp_path / "checkpoint.json", "campaign-hash")
     store.mark_failed("pilot/example", "unit-hash", "boom")
@@ -412,18 +635,170 @@ def test_failed_or_incomplete_checkpoint_units_are_rerun(tmp_path: Path) -> None
     assert store.reusable("pilot/example", "unit-hash", [tmp_path / "pilot.json"]) is False
 
     result_path = tmp_path / "failed-episode.json"
-    result, resumed = campaign._run_episode_unit(
-        checkpoint=store,
-        unit_id="replay/failed",
-        input_hash="replay-hash",
-        path=result_path,
-        execute=lambda: campaign.EpisodeResult(
-            transitions=[], execution_status="infrastructure_error", error="bridge stopped"
-        ),
-    )
-    assert result.execution_status == "infrastructure_error"
-    assert resumed is False
+    with pytest.raises(campaign.CampaignExecutionError, match="episode execution failed"):
+        campaign._run_episode_unit(
+            checkpoint=store,
+            unit_id="replay/failed",
+            input_hash="replay-hash",
+            path=result_path,
+            execute=lambda: campaign.EpisodeResult(
+                transitions=[], execution_status="infrastructure_error", error="bridge stopped"
+            ),
+        )
     assert store.reusable("replay/failed", "replay-hash", [result_path]) is False
+
+
+def test_failed_pilot_stops_campaign_without_building_or_scoring_replay(tmp_path: Path) -> None:
+    class FailedPilotBackend(FakeBackend):
+        def run_pilot(
+            self, spec: campaign.EpisodeSpec, output_dir: Path
+        ) -> campaign.EpisodeResult:
+            self.pilots.append(spec)
+            return campaign.EpisodeResult(
+                transitions=[],
+                execution_status="infrastructure_error",
+                error="pilot bridge stopped",
+            )
+
+    settings = config(tmp_path)
+    backend = FailedPilotBackend()
+    with pytest.raises(campaign.CampaignExecutionError, match="pilot execution failed"):
+        campaign.run_detection_campaign(
+            settings,
+            backend=backend,
+            inspector=FakeInspector(),
+        )
+
+    assert len(backend.pilots) == 1
+    assert backend.replays == []
+    assert not list(settings.output.rglob("action-replay.json"))
+    assert not (settings.output / "detection-benchmark.json").exists()
+    manifest = json.loads((settings.output / "campaign-manifest.json").read_text())
+    assert manifest["status"] == "incomplete"
+    assert manifest["failure"]["status"] == "failed"
+
+
+def test_episode_and_evaluator_exceptions_fail_campaign_without_score_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EpisodeExceptionBackend(FakeBackend):
+        def run_replay(self, spec, replay, output_dir):
+            raise RuntimeError("episode adapter exploded")
+
+    episode_settings = config(tmp_path / "episode")
+    with pytest.raises(campaign.CampaignExecutionError, match="campaign execution failed"):
+        campaign.run_detection_campaign(
+            episode_settings,
+            backend=EpisodeExceptionBackend(),
+            inspector=FakeInspector(),
+        )
+    episode_manifest = json.loads(
+        (episode_settings.output / "campaign-manifest.json").read_text()
+    )
+    assert episode_manifest["status"] == "incomplete"
+    assert not (episode_settings.output / "detection-benchmark.json").exists()
+
+    evaluator_settings = config(tmp_path / "evaluator")
+    evaluator_backend = FakeBackend()
+    original_evaluate = campaign._evaluate_binding
+
+    def fail_after_replay(binding, project_root, transitions):
+        if evaluator_backend.replays:
+            raise RuntimeError("oracle evaluator exploded")
+        return original_evaluate(binding, project_root, transitions)
+
+    monkeypatch.setattr(campaign, "_evaluate_binding", fail_after_replay)
+    evaluator_inspector = FakeInspector()
+    with pytest.raises(campaign.CampaignExecutionError, match="campaign execution failed"):
+        campaign.run_detection_campaign(
+            evaluator_settings,
+            backend=evaluator_backend,
+            inspector=evaluator_inspector,
+        )
+    evaluator_manifest = json.loads(
+        (evaluator_settings.output / "campaign-manifest.json").read_text()
+    )
+    assert evaluator_manifest["status"] == "incomplete"
+    assert not (evaluator_settings.output / "detection-benchmark.json").exists()
+    assert evaluator_inspector.requests == []
+
+
+def test_pilot_target_evaluator_contract_error_stops_before_official_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = config(tmp_path)
+    backend = FakeBackend()
+
+    def fail_target_evaluation(binding, project_root, transitions):
+        raise ValueError("invalid evaluator contract")
+
+    monkeypatch.setattr(campaign, "_evaluate_binding", fail_target_evaluation)
+    with pytest.raises(campaign.CampaignExecutionError, match="campaign execution failed"):
+        campaign.run_detection_campaign(
+            settings,
+            backend=backend,
+            inspector=FakeInspector(),
+        )
+
+    assert backend.replays == []
+    manifest = json.loads((settings.output / "campaign-manifest.json").read_text())
+    assert manifest["status"] == "incomplete"
+
+
+def test_nonempty_output_without_exact_checkpoint_is_rejected_before_writing(
+    tmp_path: Path,
+) -> None:
+    settings = config(tmp_path)
+    settings.output.mkdir(parents=True)
+    stale = settings.output / "stale-audit.json"
+    stale.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(campaign.CampaignContractError, match="non-empty output"):
+        campaign.run_detection_campaign(
+            settings,
+            backend=FakeBackend(),
+            inspector=FakeInspector(),
+        )
+
+    assert stale.read_text(encoding="utf-8") == "{}\n"
+    assert not (settings.output / "checkpoint.json").exists()
+    assert not (settings.output / "campaign-manifest.json").exists()
+
+
+def test_failed_resume_invalidates_previously_published_scores(tmp_path: Path) -> None:
+    settings = config(tmp_path)
+    campaign.run_detection_campaign(
+        settings,
+        backend=FakeBackend(),
+        inspector=FakeInspector(),
+    )
+    stale_reports = (
+        settings.output / "detection-benchmark.json",
+        settings.output / "detection-benchmark.ko.md",
+        settings.output / "metrics" / "official.json",
+    )
+    assert all(path.is_file() for path in stale_reports)
+    mutated_episode = next((settings.output / "traces" / "official").rglob("episode-result.json"))
+    mutated_episode.write_text('{"transitions": []}\n', encoding="utf-8")
+
+    class FailedResumeBackend(FakeBackend):
+        def run_replay(self, spec, replay, output_dir):
+            raise RuntimeError("replay rerun failed")
+
+    with pytest.raises(campaign.CampaignExecutionError, match="campaign execution failed"):
+        campaign.run_detection_campaign(
+            settings,
+            backend=FailedResumeBackend(),
+            inspector=FakeInspector(),
+        )
+
+    manifest = json.loads((settings.output / "campaign-manifest.json").read_text())
+    assert manifest["status"] == "incomplete"
+    assert all(not path.exists() for path in stale_reports)
+    archived = list((settings.output / ".superseded-results").rglob("detection-benchmark.json"))
+    assert len(archived) == 1
 
 
 def test_resume_rejects_exact_hash_and_replay_artifact_mismatches(tmp_path: Path) -> None:
@@ -468,9 +843,37 @@ def test_cli_parses_and_dispatches_benchmark_detection_options(tmp_path: Path) -
     assert not hasattr(parsed, "model")
 
 
+def test_benchmark_detection_cli_returns_nonzero_for_incomplete_campaign(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("QA_API_KEY", "test-key")
+    settings = config(tmp_path)
+    parsed = parse_cli(
+        [
+            "benchmark-detection",
+            "--build",
+            str(settings.build),
+            "--project-root",
+            str(settings.project_root),
+            "--output",
+            str(settings.output),
+        ]
+    )
+
+    def fail_campaign(*args, **kwargs):
+        raise campaign.CampaignExecutionError("pilot execution failed")
+
+    monkeypatch.setattr(campaign, "run_detection_campaign", fail_campaign)
+
+    assert cli_module._benchmark_detection(parsed) == 2
+
+
 def test_bridge_backend_reuses_run_session_for_pilot_and_blind_llm_autonomous(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("QA_INSPECTOR_MODEL", "environment-inspector-must-not-run")
     settings = config(tmp_path)
     parsed_arguments: list[list[str]] = []
 
@@ -514,7 +917,8 @@ def test_bridge_backend_reuses_run_session_for_pilot_and_blind_llm_autonomous(
     assert autonomous_args[autonomous_args.index("--objective") + 1] == campaign.NEUTRAL_REACHABILITY_GOAL
     assert autonomous_args[autonomous_args.index("--max-source-steps") + 1] == "0"
     assert autonomous_args[autonomous_args.index("--fault") + 1] == autonomous.fault_id
-    assert "--inspector-model" not in autonomous_args
+    assert pilot_args[pilot_args.index("--inspector-model") + 1] == ""
+    assert autonomous_args[autonomous_args.index("--inspector-model") + 1] == ""
 
 
 def test_bridge_backend_replay_executes_the_same_commands_without_forcing_phase_sync(
@@ -566,3 +970,83 @@ def test_bridge_backend_replay_executes_the_same_commands_without_forcing_phase_
     assert result.replay_divergence_index == 1
     assert len(result.transitions) == 2
     assert result.transitions[1]["observation"]["phase"] == "main_menu"
+
+
+def test_replay_detects_changed_upgrade_menu_before_target_without_forcing_sync(
+    tmp_path: Path,
+) -> None:
+    expected_menu = observation("pilot-menu", phase="upgrade_selection")
+    expected_menu["menu"] = {
+        "upgrade_open": True,
+        "choices": [
+            {"index": 0, "name": "Grenade"},
+            {"index": 1, "name": "Armor+", "level": 1, "owned": True},
+        ],
+    }
+    pilot_before = transition(0, action="wait", phase="upgrade_selection")
+    pilot_before["observation"] = expected_menu
+    pilot_selection = transition(1, action="select_upgrade", phase="active_gameplay")
+
+    class ChangedMenuAdapter:
+        def __init__(self, **kwargs) -> None:
+            self.commands: list[str] = []
+
+        def start(self, *, seed: int, preset: str, faults: list[str]):
+            return {"ready": True}
+
+        def command(self, action: str, **arguments: Any):
+            self.commands.append(action)
+            if len(self.commands) == 1:
+                return observation("bootstrap", phase="active_gameplay")
+            if len(self.commands) == 2:
+                changed = observation("changed-menu", phase="upgrade_selection")
+                changed["menu"] = {
+                    "upgrade_open": True,
+                    "choices": [
+                        {"index": 0, "name": "Grenade"},
+                        {"index": 1, "name": "Armor+", "level": 2, "owned": True},
+                    ],
+                }
+                return changed
+            return observation("selected", phase="active_gameplay")
+
+        def stop(self):
+            return SimpleNamespace(kind="normal", detail="")
+
+    created: list[ChangedMenuAdapter] = []
+
+    def adapter_factory(**kwargs):
+        adapter = ChangedMenuAdapter(**kwargs)
+        created.append(adapter)
+        return adapter
+
+    settings = config(tmp_path)
+    backend = campaign.BridgeCampaignBackend(settings, adapter_factory=adapter_factory)
+    spec = campaign.build_track_b_schedule(
+        campaign.load_fault_bindings(settings.project_root)
+    ).official_pairs[0].clean
+    replay = campaign.build_action_replay(
+        replay_id="pilot-menu",
+        scenario_id=spec.scenario_id,
+        seed=spec.seed,
+        build_hash=campaign.hash_path(settings.build),
+        transitions=[pilot_before, pilot_selection],
+        target_command_index=1,
+    )
+
+    result = backend.run_replay(spec, replay, tmp_path / "changed-menu-replay")
+    classified = campaign.apply_replay_divergence(result, replay)
+
+    selection = replay["commands"][1]["semantic_selection"]
+    assert selection["expected_menu_selection"] == {
+        "index": 1,
+        "name": "Armor+",
+        "level": 1,
+        "owned": True,
+    }
+    assert selection["expected_menu_digest"]
+    assert created[0].commands == ["observe", "wait", "select_upgrade"]
+    assert result.replay_divergence_index == 1
+    assert result.replay_divergence_stage == "before_command"
+    assert classified.coverage_override == "not_reached"
+    assert classified.divergence_evidence["classification"] == "pre_target"
