@@ -32,8 +32,11 @@ _PRIVATE_KEY_MARKERS = EVALUATOR_PRIVATE_KEYS | frozenset(
         "context_refs",
         "injection_log",
         "injection_logs",
+        "source_code",
         "source_path",
         "source_paths",
+        "source_tool",
+        "source_tools",
     }
 )
 _PRIVATE_TEXT_MARKERS = (
@@ -54,6 +57,12 @@ _SOURCE_PATH_PATTERN = re.compile(
 _DROP = object()
 
 
+def _normalize_private_key(key: object) -> str:
+    """Make camelCase, PascalCase, and separator variants comparable."""
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key))
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
 def _is_private_key(key: str) -> bool:
     return key in _PRIVATE_KEY_MARKERS or any(
         marker in key
@@ -66,7 +75,9 @@ def _is_private_key(key: str) -> bool:
             "evaluator",
             "context_ref",
             "injection",
+            "source_code",
             "source_path",
+            "source_tool",
         )
     )
 
@@ -103,7 +114,7 @@ def _sanitize_agent_value(value: Any) -> Any:
     if isinstance(value, dict):
         sanitized: dict[str, Any] = {}
         for key, item in value.items():
-            normalized_key = str(key).lower()
+            normalized_key = _normalize_private_key(key)
             if _is_private_key(normalized_key):
                 continue
             clean = _sanitize_agent_value(item)

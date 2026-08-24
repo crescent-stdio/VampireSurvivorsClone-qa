@@ -1066,10 +1066,13 @@ def run_session(args: argparse.Namespace) -> int:
                 {"kind": "inspection_request", "payload": build_inspection_payload(recorder.steps)},
                 name="inspector-request.jsonl",
             )
-            try:
-                inspection = inspect_trace(inspector, recorder.steps)
-            finally:
-                drain_planner_usage(recorder, inspector, "inspection_request")
+            inspection = inspect_trace(
+                inspector,
+                recorder.steps,
+                on_request_complete=lambda: drain_planner_usage(
+                    recorder, inspector, "inspection_request"
+                ),
+            )
             record_contract_event(
                 output_dir,
                 {"kind": "inspection", "findings": inspection.get("findings") or []},

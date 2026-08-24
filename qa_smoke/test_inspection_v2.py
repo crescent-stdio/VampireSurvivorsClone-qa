@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import inspect as python_inspect
+
 from . import inspector
 from . import detection
 from .inspector import build_inspection_payload
 from . import run as run_module
+from .reporting import RunRecorder
 
 
 def test_inspection_payload_keeps_only_public_player_view_telemetry() -> None:
@@ -188,6 +191,35 @@ def test_inspection_payload_removes_private_key_variants_and_unknown_injection_t
         assert private_value not in serialized
 
 
+def test_inspection_payload_removes_nested_camel_case_private_keys() -> None:
+    """Key spelling cannot allow evaluator data through the public observation shape."""
+    payload = build_inspection_payload(
+        [
+            {
+                "observation": {
+                    "observation_id": "obs-0004",
+                    "player": {
+                        "health": 10.0,
+                        "groundTruth": {"detail": "private"},
+                        "expectedBehavior": "private expectation",
+                        "contextRefs": ["opaque-context-token"],
+                        "sourceCode": "private implementation detail",
+                    },
+                }
+            }
+        ]
+    )
+
+    serialized = str(payload)
+    for private_value in (
+        "groundTruth",
+        "private expectation",
+        "opaque-context-token",
+        "private implementation detail",
+    ):
+        assert private_value not in serialized
+
+
 def test_v2_numeric_finding_is_scored_with_its_explicit_comparison() -> None:
     """The scorer consumes the v2 fields produced by the inspector, not v1 aliases."""
     result = detection.score_agent_detection(
@@ -216,3 +248,93 @@ def test_v2_numeric_finding_is_scored_with_its_explicit_comparison() -> None:
 
     assert result.status == "match"
     assert result.matched_surfaces == ["inspection"]
+
+
+def test_empty_evidence_refs_are_rejected_for_v1_and_v2_without_control_alarm() -> None:
+    """A finding without a real reference cannot become a control false positive."""
+    malformed_artifacts = (
+        {
+            "schema_version": inspector.INSPECTION_SCHEMA_V2,
+            "findings": [
+                {
+                    "kind": "numeric",
+                    "field": "player.health_ratio",
+                    "comparison": "!=",
+                    "expected_value": 0.96,
+                    "observed_value": 1.25,
+                    "statement": "The values differ.",
+                    "evidence_refs": ["", "   "],
+                }
+            ],
+        },
+        {
+            "findings": [
+                {
+                    "field": "player.health_ratio",
+                    "computed_value": 0.96,
+                    "reported_value": 1.25,
+                    "statement": "The values differ.",
+                    "evidence_refs": ["   "],
+                }
+            ]
+        },
+    )
+
+    for artifact in malformed_artifacts:
+        normalized = inspector.normalize_inspection_artifact(artifact)
+        result = detection.score_agent_detection(
+            fault_id=None,
+            policy="heuristic",
+            has_agent_text_channel=True,
+            trace_completeness="complete",
+            oracle_verdict="pass",
+            transitions=[],
+            fault_refs=[],
+            inspection=artifact,
+        )
+
+        assert normalized["findings"] == []
+        assert result.status == "not_evaluated"
+
+
+def test_inspection_usage_callback_records_every_chunk_request(tmp_path) -> None:
+    """Chunked inspection drains usage immediately instead of retaining only the last call."""
+    assert "on_request_complete" in python_inspect.signature(inspector.inspect_trace).parameters
+
+    class UsagePlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_usage: dict[str, int] = {}
+
+        def _request(self, *_args, **_kwargs):
+            self.calls += 1
+            self.last_usage = {
+                "prompt_tokens": self.calls * 10,
+                "completion_tokens": self.calls,
+                "total_tokens": self.calls * 11,
+                "request_count": 1,
+            }
+            return {"schema_version": inspector.INSPECTION_SCHEMA_V2, "findings": []}
+
+        def take_last_usage(self):
+            usage, self.last_usage = self.last_usage, {}
+            return usage
+
+    planner = UsagePlanner()
+    recorder = RunRecorder(tmp_path, "qa", "llm", 9101)
+    transitions = [
+        {"observation": {"observation_id": f"obs-{index:02d}", "player": {}}}
+        for index in range(33)
+    ]
+
+    inspector.inspect_trace(
+        planner,
+        transitions,
+        on_request_complete=lambda: run_module.drain_planner_usage(
+            recorder, planner, "inspection_request"
+        ),
+    )
+
+    assert planner.calls == 2
+    assert len(recorder.api_usage_events) == 2
+    assert recorder.api_usage_totals()["total_tokens"] == 33

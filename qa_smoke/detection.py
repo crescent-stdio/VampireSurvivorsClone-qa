@@ -15,6 +15,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from .inspector import normalize_findings
+
 
 DEFAULT_RUBRIC_PATH = Path(__file__).resolve().parents[1] / "config" / "qa-detection-rubric.json"
 RUBRIC_SCHEMA = "qa-detection-rubric/v1"
@@ -255,7 +257,7 @@ def has_strong_claim(
     """
     if any(str(state.get("status") or "") == "confirmed" for state in hypotheses or []):
         return True
-    if scored_inspection_findings(inspection, []) or (inspection or {}).get("findings"):
+    if normalize_findings(inspection):
         return True
     candidates = (llm_assessment or {}).get("bug_candidates")
     return bool(isinstance(candidates, list) and candidates)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any, Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -28,6 +29,9 @@ class StrictInspectionModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
 
 
+EvidenceRef = Annotated[str, Field(min_length=1)]
+
+
 class NumericFinding(StrictInspectionModel):
     kind: Literal["numeric"]
     field: str = Field(min_length=1)
@@ -35,7 +39,7 @@ class NumericFinding(StrictInspectionModel):
     expected_value: float = Field(allow_inf_nan=False)
     observed_value: float = Field(allow_inf_nan=False)
     statement: str = Field(min_length=1)
-    evidence_refs: list[str] = Field(min_length=1)
+    evidence_refs: list[EvidenceRef] = Field(min_length=1)
 
 
 class BehaviorFinding(StrictInspectionModel):
@@ -44,7 +48,7 @@ class BehaviorFinding(StrictInspectionModel):
     expected_value: str = Field(min_length=1)
     observed_value: str = Field(min_length=1)
     statement: str = Field(min_length=1)
-    evidence_refs: list[str] = Field(min_length=1)
+    evidence_refs: list[EvidenceRef] = Field(min_length=1)
 
 
 InspectionFinding = Annotated[
@@ -172,7 +176,9 @@ def normalize_findings(response: Any) -> list[dict[str, Any]]:
 
 
 def inspect_trace(
-    planner: LLMPlanner, transitions: list[dict[str, Any]]
+    planner: LLMPlanner,
+    transitions: list[dict[str, Any]],
+    on_request_complete: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Inspect every generic trace chunk and return one deduplicated v2 artifact."""
     chunks = build_inspection_chunks(transitions)
@@ -180,12 +186,16 @@ def inspect_trace(
         return {"schema_version": INSPECTION_SCHEMA_V2, "findings": []}
     findings: list[dict[str, Any]] = []
     for chunk in chunks:
-        response = planner._request(
-            INSPECTOR_SYSTEM_PROMPT,
-            json.dumps(chunk, ensure_ascii=False),
-            response_schema=FINDINGS_SCHEMA,
-            include_planning_history=False,
-        )
+        try:
+            response = planner._request(
+                INSPECTOR_SYSTEM_PROMPT,
+                json.dumps(chunk, ensure_ascii=False),
+                response_schema=FINDINGS_SCHEMA,
+                include_planning_history=False,
+            )
+        finally:
+            if on_request_complete is not None:
+                on_request_complete()
         findings.extend(normalize_findings(response))
     return normalize_inspection_artifact(
         {"schema_version": INSPECTION_SCHEMA_V2, "findings": findings}
