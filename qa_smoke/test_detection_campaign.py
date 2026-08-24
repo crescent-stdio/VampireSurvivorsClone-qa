@@ -514,25 +514,33 @@ def test_failed_inspection_chunks_audit_attempts_without_credentials(tmp_path: P
     assert budget.http_attempts == 3
 
 
-@pytest.mark.parametrize("model_content", ["not JSON", '["not", "an", "object"]'])
-def test_preparse_model_failures_preserve_only_raw_content_in_failed_audit(
+def test_preparse_model_failures_audit_distinct_cause_types_without_stale_state(
     tmp_path: Path,
-    model_content: str,
 ) -> None:
-    envelope = json.dumps(
-        {
-            "id": "provider-metadata-must-not-be-audited",
-            "choices": [
-                {
-                    "message": {"content": model_content},
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {"prompt_tokens": 4, "completion_tokens": 3},
-        }
-    ).encode()
+    model_failures = (
+        ("not JSON", "JSONDecodeError"),
+        ('["not", "an", "object"]', "ValueError"),
+    )
+    envelopes = iter(
+        json.dumps(
+            {
+                "id": "provider-metadata-must-not-be-audited",
+                "choices": [
+                    {
+                        "message": {"content": model_content},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 3},
+            }
+        ).encode()
+        for model_content, _cause_type in model_failures
+    )
 
     class ProviderResponse:
+        def __init__(self, envelope: bytes) -> None:
+            self.envelope = envelope
+
         def __enter__(self):
             return self
 
@@ -540,7 +548,7 @@ def test_preparse_model_failures_preserve_only_raw_content_in_failed_audit(
             return None
 
         def read(self):
-            return envelope
+            return self.envelope
 
     adapter = campaign.LLMInspectorAdapter.__new__(campaign.LLMInspectorAdapter)
     adapter.planner = campaign.LLMPlanner(
@@ -550,37 +558,42 @@ def test_preparse_model_failures_preserve_only_raw_content_in_failed_audit(
         5.0,
         "https://example.invalid/v1/chat/completions",
         api_key="request-credential-must-not-be-audited",
-        urlopen=lambda *_args, **_kwargs: ProviderResponse(),
+        urlopen=lambda *_args, **_kwargs: ProviderResponse(next(envelopes)),
         max_attempts=1,
     )
     checkpoint = campaign.CheckpointStore(tmp_path / "checkpoint.json", "campaign-hash")
+    budget = campaign.InspectionCallBudget()
 
-    with pytest.raises(campaign.InspectionCallError):
-        campaign.inspect_trace_pass(
-            trace_id="opaque-preparse",
-            pass_index=1,
-            transitions=[transition(0)],
-            output_dir=tmp_path / "inspection",
-            inspector=adapter,
-            checkpoint=checkpoint,
-            budget=campaign.InspectionCallBudget(),
-            input_hash="input-hash",
+    for index, (model_content, expected_cause_type) in enumerate(model_failures):
+        output_dir = tmp_path / f"inspection-{index}"
+        with pytest.raises(campaign.InspectionCallError) as raised:
+            campaign.inspect_trace_pass(
+                trace_id=f"opaque-preparse-{index}",
+                pass_index=1,
+                transitions=[transition(0)],
+                output_dir=output_dir,
+                inspector=adapter,
+                checkpoint=checkpoint,
+                budget=budget,
+                input_hash=f"input-hash-{index}",
+            )
+
+        assert raised.value.cause_type == expected_cause_type
+        audit = json.loads(
+            (
+                output_dir
+                / "pass-1"
+                / "inspection-chunk-000000-000000.audit.json"
+            ).read_text()
         )
-
-    audit = json.loads(
-        (
-            tmp_path
-            / "inspection"
-            / "pass-1"
-            / "inspection-chunk-000000-000000.audit.json"
-        ).read_text()
-    )
-    assert audit["status"] == "error"
-    assert audit["raw_response"] == model_content
-    assert audit["usage"]["prompt_tokens"] == 4
-    serialized = json.dumps(audit)
-    assert "provider-metadata-must-not-be-audited" not in serialized
-    assert "request-credential-must-not-be-audited" not in serialized
+        assert audit["status"] == "error"
+        assert audit["error_type"] == "InspectionCallError"
+        assert audit["cause_type"] == expected_cause_type
+        assert audit["raw_response"] == model_content
+        assert audit["usage"]["prompt_tokens"] == 4
+        serialized = json.dumps(audit)
+        assert "provider-metadata-must-not-be-audited" not in serialized
+        assert "request-credential-must-not-be-audited" not in serialized
 
 
 def test_complete_checkpoints_resume_without_repeating_external_work(tmp_path: Path) -> None:

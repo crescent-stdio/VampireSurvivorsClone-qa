@@ -60,6 +60,19 @@ NEUTRAL_REACHABILITY_GOAL = (
 TRACK_A_MAX_STEP_BUDGETS = (20, 40, 80, 80, 80, 80, 80, 80)
 
 
+def _sanitize_error_type(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if (
+        0 < len(value) <= 128
+        and value.isascii()
+        and (value[0].isalpha() or value[0] == "_")
+        and all(character.isalnum() or character == "_" for character in value)
+    ):
+        return value
+    return "Exception"
+
+
 class CampaignContractError(RuntimeError):
     """Raised when campaign artifacts or fixed evaluation contracts do not match."""
 
@@ -78,11 +91,13 @@ class InspectionCallError(RuntimeError):
         usage: Mapping[str, int],
         elapsed_seconds: float,
         raw_response: str | None = None,
+        cause_type: str | None = None,
     ) -> None:
         super().__init__(message)
         self.usage = dict(usage)
         self.elapsed_seconds = elapsed_seconds
         self.raw_response = raw_response
+        self.cause_type = _sanitize_error_type(cause_type)
 
 
 @dataclass(frozen=True)
@@ -978,6 +993,7 @@ def inspect_trace_pass(
                         "usage": usage,
                         "elapsed_seconds": error.elapsed_seconds,
                         "error_type": type(error).__name__,
+                        "cause_type": error.cause_type,
                         "hashes": {
                             "input": input_hash,
                             "chunk": _sha256(chunk),
@@ -1751,6 +1767,7 @@ class LLMInspectorAdapter:
                 usage=usage,
                 elapsed_seconds=max(0.0, time.monotonic() - started),
                 raw_response=raw_response,
+                cause_type=type(error).__name__,
             ) from error
         usage = self.planner.take_last_usage()
         self.planner.take_last_model_content()
