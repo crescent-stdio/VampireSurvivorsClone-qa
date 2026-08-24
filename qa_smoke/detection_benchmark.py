@@ -146,6 +146,7 @@ class PairScore:
     status: str
     clean: TraceScore
     fault: TraceScore
+    invalid_traces: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,6 +155,7 @@ class PairScore:
             "status": self.status,
             "clean": self.clean.to_dict(),
             "fault": self.fault.to_dict(),
+            "invalid_traces": dict(self.invalid_traces),
         }
 
 
@@ -211,10 +213,9 @@ def _relative_position_targets(transitions: Sequence[dict[str, Any]]) -> list[Nu
         observation = _observation(transition)
         position = (observation.get("player") or {}).get("position") or {}
         player_x = _number(position.get("x"))
-        player_y = _number(position.get("y"))
         entities = (observation.get("world") or {}).get("qa_entities") or []
         refs = _refs(transition)
-        if player_x is None or player_y is None or not isinstance(entities, list) or not refs:
+        if player_x is None or not isinstance(entities, list) or not refs:
             continue
         public_entities = sorted(
             (item for item in entities if isinstance(item, dict)),
@@ -222,26 +223,21 @@ def _relative_position_targets(transitions: Sequence[dict[str, Any]]) -> list[Nu
         )[:8]
         for index, entity in enumerate(public_entities):
             x = _number(entity.get("x"))
-            y = _number(entity.get("y"))
             relative_x = _number(entity.get("relative_x"))
-            relative_y = _number(entity.get("relative_y"))
             if x is not None and relative_x is not None:
+                expected_x = x - player_x
+                offset = relative_x - expected_x
+                if not (
+                    math.isclose(offset, 0.0, rel_tol=0.0, abs_tol=FLOAT_TOLERANCE)
+                    or math.isclose(offset, 7.0, rel_tol=0.0, abs_tol=FLOAT_TOLERANCE)
+                ):
+                    continue
                 targets.append(
                     NumericTarget(
                         f"world.threat_entities[{index}].relative_x",
                         "!=",
-                        x - player_x,
+                        expected_x,
                         relative_x,
-                        refs,
-                    )
-                )
-            if y is not None and relative_y is not None:
-                targets.append(
-                    NumericTarget(
-                        f"world.threat_entities[{index}].relative_y",
-                        "!=",
-                        y - player_y,
-                        relative_y,
                         refs,
                     )
                 )
@@ -263,32 +259,48 @@ def _upgrade_targets(transitions: Sequence[dict[str, Any]]) -> list[NumericTarge
         if _decision(transition).get("action") != "select_upgrade" or index == 0:
             continue
         before_transition = transitions[index - 1]
-        before = _owned_abilities(_observation(before_transition))
+        before_observation = _observation(before_transition)
         after = _owned_abilities(_observation(transition))
-        before_levels = {
-            str(item.get("name") or item.get("type") or ""): _integer(item.get("level"))
-            for item in before
-        }
+        arguments = _decision(transition).get("arguments") or {}
+        selected_index = _integer(arguments.get("index")) if isinstance(arguments, dict) else None
+        choices = (before_observation.get("menu") or {}).get("choices") or []
         refs = _refs(before_transition, transition)
-        if not refs:
+        if (
+            selected_index is None
+            or selected_index < 0
+            or not isinstance(choices, list)
+            or selected_index >= len(choices)
+            or not isinstance(choices[selected_index], dict)
+            or not refs
+        ):
             continue
-        for ability_index, item in enumerate(after):
-            level = _integer(item.get("level"))
-            name = str(item.get("name") or item.get("type") or "")
-            previous = before_levels.get(name)
-            if level is None or not name:
-                continue
-            expected = 1 if previous is None else previous + 1
-            targets.append(
-                NumericTarget(
-                    f"inventory.abilities[{ability_index}].level",
-                    "!=",
-                    expected,
-                    level,
-                    refs,
-                    integer_values=True,
-                )
+        choice = choices[selected_index]
+        selected_name = str(choice.get("name") or choice.get("type") or "")
+        selected_level = _integer(choice.get("level"))
+        selected_ability = next(
+            (
+                (ability_index, ability)
+                for ability_index, ability in enumerate(after)
+                if str(ability.get("name") or ability.get("type") or "") == selected_name
+            ),
+            None,
+        )
+        if selected_level is None or not selected_name or selected_ability is None:
+            continue
+        ability_index, ability = selected_ability
+        observed_level = _integer(ability.get("level"))
+        if observed_level not in {selected_level, selected_level + 1}:
+            continue
+        targets.append(
+            NumericTarget(
+                f"inventory.abilities[{ability_index}].level",
+                "!=",
+                selected_level + 1,
+                observed_level,
+                refs,
+                integer_values=True,
             )
+        )
     return targets
 
 
@@ -372,11 +384,31 @@ def _view_health_targets(transitions: Sequence[dict[str, Any]]) -> list[NumericT
     targets: list[NumericTarget] = []
     for transition in transitions:
         observation = _observation(transition)
-        raw = _number((observation.get("player") or {}).get("health"))
-        displayed = _number((observation.get("player_view") or {}).get("health"))
+        player = observation.get("player") or {}
+        view = observation.get("player_view") or {}
+        raw = _number(player.get("health"))
+        maximum = _number(player.get("max_health"))
+        displayed = _number(view.get("health"))
+        displayed_ratio = _number(view.get("health_ratio"))
         refs = _refs(transition)
         if raw is not None and displayed is not None and refs:
             targets.append(NumericTarget("player_view.health", "!=", raw, displayed, refs))
+        if (
+            raw is not None
+            and maximum is not None
+            and maximum > 0
+            and displayed_ratio is not None
+            and refs
+        ):
+            targets.append(
+                NumericTarget(
+                    "player_view.health_ratio",
+                    "!=",
+                    raw / maximum,
+                    displayed_ratio,
+                    refs,
+                )
+            )
     return targets
 
 
@@ -479,7 +511,22 @@ def _numeric_equal(value: Any, target: int | float, integer_values: bool) -> boo
     return math.isclose(float(numeric), float(target), rel_tol=0.0, abs_tol=FLOAT_TOLERANCE)
 
 
-def _matches_target(finding: Mapping[str, Any], target: NumericTarget) -> bool:
+def _available_evidence_refs(transitions: Sequence[dict[str, Any]]) -> set[str]:
+    references: set[str] = set()
+    for transition in transitions:
+        observation = _observation(transition)
+        observation_ref = str(observation.get("observation_id") or "")
+        event_ref = str((observation.get("event_state") or {}).get("event_id") or "")
+        if observation_ref:
+            references.add(observation_ref)
+        if event_ref:
+            references.add(event_ref)
+    return references
+
+
+def _matches_target(
+    finding: Mapping[str, Any], target: NumericTarget, available_refs: set[str]
+) -> bool:
     if finding.get("kind") != "numeric":
         return False
     if finding.get("field") != target.field or finding.get("comparison") != target.comparison:
@@ -489,7 +536,11 @@ def _matches_target(finding: Mapping[str, Any], target: NumericTarget) -> bool:
     if not _numeric_equal(finding.get("observed_value"), target.observed_value, target.integer_values):
         return False
     finding_refs = {str(ref) for ref in finding.get("evidence_refs") or []}
-    return bool(target.evidence_refs) and set(target.evidence_refs).issubset(finding_refs)
+    return (
+        bool(target.evidence_refs)
+        and set(target.evidence_refs).issubset(finding_refs)
+        and finding_refs.issubset(available_refs)
+    )
 
 
 def _initial_status(trace: TraceEvaluation) -> TraceStatus | None:
@@ -509,20 +560,15 @@ def score_trace(trace: TraceEvaluation) -> TraceScore:
 
     if trace.variant not in {"clean", "fault"}:
         raise ValueError(f"unsupported trace variant: {trace.variant}")
-    if trace.fault_id not in _TARGET_BUILDERS:
-        return TraceScore(trace.trace_id, trace.fault_id, trace.variant, "UNOBSERVABLE")
-    initial_status = _initial_status(trace)
-    if initial_status is not None:
-        return TraceScore(trace.trace_id, trace.fault_id, trace.variant, initial_status)
-    targets = private_numeric_targets(trace.fault_id, trace.transitions)
-    if not targets:
-        return TraceScore(trace.trace_id, trace.fault_id, trace.variant, "UNOBSERVABLE")
     if len(trace.inspection_passes) > 3:
         raise ValueError("a trace accepts exactly three inspection passes")
 
+    initial_status = _initial_status(trace)
+    targets = private_numeric_targets(trace.fault_id, trace.transitions)
     target_findings: list[dict[str, Any]] = []
     incidental: list[dict[str, Any]] = []
     pass_votes: list[bool] = []
+    available_refs = _available_evidence_refs(trace.transitions)
     passes = [*trace.inspection_passes, *([None] * (3 - len(trace.inspection_passes)))]
     for pass_index, pass_value in enumerate(passes, start=1):
         artifact = _artifact_from_pass(pass_value)
@@ -532,7 +578,7 @@ def score_trace(trace: TraceEvaluation) -> TraceScore:
         matches: list[dict[str, Any]] = []
         for finding in normalized["findings"]:
             recorded = {**finding, "inspection_pass": pass_index}
-            if any(_matches_target(finding, target) for target in targets):
+            if any(_matches_target(finding, target, available_refs) for target in targets):
                 matches.append(recorded)
             else:
                 incidental.append(recorded)
@@ -541,7 +587,13 @@ def score_trace(trace: TraceEvaluation) -> TraceScore:
 
     detected_passes = sum(pass_votes)
     missed_passes = len(pass_votes) - detected_passes
-    if detected_passes >= 2:
+    if initial_status is not None:
+        status = initial_status
+        agreeing = max(detected_passes, missed_passes)
+    elif not targets:
+        status = "UNOBSERVABLE"
+        agreeing = max(detected_passes, missed_passes)
+    elif detected_passes >= 2:
         status: TraceStatus = "TP" if trace.variant == "fault" else "FP"
         agreeing = detected_passes
     elif missed_passes >= 2:
@@ -573,17 +625,18 @@ def score_pair(pair_id: str, clean: TraceEvaluation, fault: TraceEvaluation) -> 
         raise ValueError("paired traces must target the same fault")
     clean_score = score_trace(clean)
     fault_score = score_trace(fault)
-    invalid = [
-        status
-        for status in INVALID_STATUSES
-        if clean_score.status == status or fault_score.status == status
-    ]
+    invalid_traces = {
+        variant: score.status
+        for variant, score in (("clean", clean_score), ("fault", fault_score))
+        if score.status in INVALID_STATUSES
+    }
     return PairScore(
         pair_id=pair_id,
         fault_id=clean.fault_id,
-        status=invalid[0] if invalid else "VALID",
+        status="INVALID" if invalid_traces else "VALID",
         clean=clean_score,
         fault=fault_score,
+        invalid_traces=invalid_traces,
     )
 
 
@@ -629,38 +682,29 @@ def _macro_detection(per_fault: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
         return {
             "faults_included": 0,
             "value": None,
-            "wilson_95": {"low": None, "high": None},
         }
     return {
         "faults_included": len(rates),
         "value": sum(item["value"] for item in rates) / len(rates),
-        "wilson_95": {
-            "low": sum(item["wilson_95"]["low"] for item in rates) / len(rates),
-            "high": sum(item["wilson_95"]["high"] for item in rates) / len(rates),
-        },
     }
 
 
 def aggregate_benchmark(pairs: Sequence[PairScore]) -> dict[str, Any]:
     """Aggregate only valid pairs into trace-level conditional detection metrics."""
 
-    counts = {
-        "pairs_total": len(pairs),
-        "pairs_valid": 0,
-        "TP": 0,
-        "FN": 0,
-        "FP": 0,
-        "TN": 0,
-        **{status: 0 for status in INVALID_STATUSES},
-    }
+    pair_counts = {"total": len(pairs), "valid": 0, "invalid": 0}
+    confusion_counts = {status: 0 for status in ("TP", "FN", "FP", "TN")}
+    invalid_counts = {status: 0 for status in INVALID_STATUSES}
     by_fault: dict[str, list[PairScore]] = defaultdict(list)
     for pair in pairs:
         if pair.status != "VALID":
-            counts[pair.status] += 1
+            pair_counts["invalid"] += 1
+            for status in pair.invalid_traces.values():
+                invalid_counts[status] += 1
             continue
-        counts["pairs_valid"] += 1
-        counts[pair.clean.status] += 1
-        counts[pair.fault.status] += 1
+        pair_counts["valid"] += 1
+        confusion_counts[pair.clean.status] += 1
+        confusion_counts[pair.fault.status] += 1
         by_fault[pair.fault_id].append(pair)
 
     per_fault: dict[str, dict[str, Any]] = {}
@@ -684,20 +728,36 @@ def aggregate_benchmark(pairs: Sequence[PairScore]) -> dict[str, Any]:
     paired_successes = sum(
         pair.clean.status == "TN" and pair.fault.status == "TP" for pair in valid_pairs
     )
-    valid_traces = [trace for pair in valid_pairs for trace in (pair.clean, pair.fault)]
-    agreement_numerator = sum(trace.agreeing_passes for trace in valid_traces)
-    agreement_denominator = sum(trace.valid_passes for trace in valid_traces)
+    all_traces = [trace for pair in pairs for trace in (pair.clean, pair.fault)]
+    agreement_numerator = sum(trace.agreeing_passes for trace in all_traces)
+    agreement_denominator = len(all_traces) * 3
     metrics = {
         "macro_detection_rate": _macro_detection(per_fault),
-        "micro_detection_rate": proportion(counts["TP"], counts["TP"] + counts["FN"]),
-        "coverage": proportion(counts["pairs_valid"], counts["pairs_total"]),
-        "precision": proportion(counts["TP"], counts["TP"] + counts["FP"]),
-        "specificity": proportion(counts["TN"], counts["TN"] + counts["FP"]),
-        "clean_false_positive_rate": proportion(counts["FP"], counts["FP"] + counts["TN"]),
-        "paired_success_rate": proportion(paired_successes, counts["pairs_valid"]),
+        "micro_detection_rate": proportion(
+            confusion_counts["TP"], confusion_counts["TP"] + confusion_counts["FN"]
+        ),
+        "coverage": proportion(pair_counts["valid"], pair_counts["total"]),
+        "precision": proportion(
+            confusion_counts["TP"], confusion_counts["TP"] + confusion_counts["FP"]
+        ),
+        "specificity": proportion(
+            confusion_counts["TN"], confusion_counts["TN"] + confusion_counts["FP"]
+        ),
+        "clean_false_positive_rate": proportion(
+            confusion_counts["FP"], confusion_counts["FP"] + confusion_counts["TN"]
+        ),
+        "paired_success_rate": proportion(paired_successes, pair_counts["valid"]),
         "inspection_agreement": proportion(agreement_numerator, agreement_denominator),
     }
-    return {"counts": counts, "metrics": metrics, "per_fault": per_fault}
+    return {
+        "counts": {
+            "pairs": pair_counts,
+            "confusion_traces": confusion_counts,
+            "invalid_traces": invalid_counts,
+        },
+        "metrics": metrics,
+        "per_fault": per_fault,
+    }
 
 
 def build_benchmark_report(
@@ -738,12 +798,18 @@ def _interval(rate: Mapping[str, Any]) -> str:
     return f"{float(low):.2%}–{float(high):.2%}"
 
 
+def _rate_summary(rate: Mapping[str, Any]) -> str:
+    return f"{_percentage(rate)} ({_raw_rate(rate)}; {_interval(rate)})"
+
+
 def render_benchmark_markdown(report: Mapping[str, Any]) -> str:
     """Render a Korean operator report while preserving standard English metric names."""
 
     if report.get("schema_version") != BENCHMARK_SCHEMA:
         raise ValueError(f"report schema must be {BENCHMARK_SCHEMA}")
     counts = report["counts"]
+    confusion = counts["confusion_traces"]
+    invalid = counts["invalid_traces"]
     metrics = report["metrics"]
     metadata = report.get("metadata") or {}
     lines = [
@@ -760,12 +826,10 @@ def render_benchmark_markdown(report: Mapping[str, Any]) -> str:
             "",
             "세 번의 inspection pass를 하나의 trace verdict로 합산했습니다.",
             "",
-            "| 구분 | 개수 |",
-            "| --- | ---: |",
-            f"| TP | {counts['TP']} |",
-            f"| FN | {counts['FN']} |",
-            f"| FP | {counts['FP']} |",
-            f"| TN | {counts['TN']} |",
+            "| Actual trace | Target alert | No target alert |",
+            "| --- | ---: | ---: |",
+            f"| Fault trace | TP ({confusion['TP']}) | FN ({confusion['FN']}) |",
+            f"| Clean trace | FP ({confusion['FP']}) | TN ({confusion['TN']}) |",
             "",
             "## 지표",
             "",
@@ -788,17 +852,18 @@ def render_benchmark_markdown(report: Mapping[str, Any]) -> str:
             "",
             "## Fault별 결과",
             "",
-            "| Fault | TP | FN | FP | TN | Detection rate | Raw | Wilson 95% CI |",
+            "| Fault | TP | FN | FP | TN | Detection rate | Clean FPR | Paired success rate |",
             "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             *(
                 f"| {fault_id} | {item['counts']['TP']} | {item['counts']['FN']} | "
                 f"{item['counts']['FP']} | {item['counts']['TN']} | "
-                f"{_percentage(item['detection_rate'])} | {_raw_rate(item['detection_rate'])} | "
-                f"{_interval(item['detection_rate'])} |"
+                f"{_rate_summary(item['detection_rate'])} | "
+                f"{_rate_summary(item['clean_false_positive_rate'])} | "
+                f"{_rate_summary(item['paired_success_rate'])} |"
                 for fault_id, item in report["per_fault"].items()
             ),
             "",
-            "## 유효하지 않은 쌍",
+            "## 유효하지 않은 trace",
             "",
             "이 상태들은 conditional detection denominator에 포함되지 않습니다.",
             "",
@@ -806,5 +871,5 @@ def render_benchmark_markdown(report: Mapping[str, Any]) -> str:
             "| --- | ---: |",
         ]
     )
-    lines.extend(f"| {status} | {counts[status]} |" for status in INVALID_STATUSES)
+    lines.extend(f"| {status} | {invalid[status]} |" for status in INVALID_STATUSES)
     return "\n".join(lines) + "\n"
