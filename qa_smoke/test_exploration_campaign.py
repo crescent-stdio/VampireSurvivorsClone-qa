@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from . import cli as cli_module
+from . import detection_campaign as detection_campaign
 from . import exploration_campaign as exploration
 from . import run as run_module
 from .adapters import VampireSurvivorsAdapter
@@ -238,6 +239,72 @@ def test_aggregation_retains_one_of_three_and_tracks_planner_inspector_surfaces(
     assert candidate["phase"] == "active_gameplay"
     assert candidate["event"] == "combat"
     assert "unknown-observation" not in json.dumps(report)
+
+
+def test_numeric_planner_and_inspector_findings_share_only_an_exact_structured_key() -> None:
+    shared_record = make_record(
+        "core-combat-survival",
+        9101,
+        transitions=[
+            transition(
+                0,
+                candidate_id="numeric:ne:player.health_ratio",
+                statement="player.health_ratio expected 1.0 but observed 1.25.",
+                event="combat",
+            )
+        ],
+        passes=[
+            artifact(numeric_finding("player.health_ratio")),
+            artifact(),
+            artifact(),
+        ],
+    )
+
+    shared_report = exploration.build_exploration_report([shared_record], metadata={})
+
+    assert shared_report["surface_counts"] == {
+        "planner_only": 0,
+        "inspector_only": 0,
+        "shared": 1,
+        "runtime_oracle": 0,
+        "union": 1,
+    }
+    assert shared_report["candidates"][0]["category"] == "numeric"
+    assert shared_report["candidates"][0]["rule"] == "numeric-not-equal"
+    assert shared_report["candidates"][0]["field"] == "player.health_ratio"
+
+    near_miss_record = make_record(
+        "core-combat-survival",
+        9101,
+        transitions=[
+            transition(
+                0,
+                candidate_id="numeric:ne:player.health_ratio",
+                statement="player.health_ratio expected 1.0 but observed 1.25.",
+                event="combat",
+            )
+        ],
+        passes=[
+            artifact(
+                numeric_finding("player.exp_ratio"),
+                numeric_finding("player.health_ratio", comparison=">"),
+            ),
+            artifact(),
+            artifact(),
+        ],
+    )
+
+    near_miss_report = exploration.build_exploration_report(
+        [near_miss_record], metadata={}
+    )
+
+    assert near_miss_report["surface_counts"] == {
+        "planner_only": 1,
+        "inspector_only": 2,
+        "shared": 0,
+        "runtime_oracle": 0,
+        "union": 3,
+    }
 
 
 def test_candidate_tiers_reproduction_and_priorities_are_deterministic() -> None:
@@ -838,6 +905,11 @@ def test_campaign_runs_blind_clean_schedule_and_exactly_resumes_with_tamper_repa
     assert manifest["track"] == "A"
     assert manifest["counts"]["scheduled_traces"] == 24
     assert manifest["limits"]["planned_inspection_calls"] == 189
+    assert len(manifest["hashes"]["inspection_request_contract"]) == 64
+    assert (
+        manifest["inspection_request_contract_version"]
+        == exploration.INSPECTION_REQUEST_CONTRACT_VERSION
+    )
     assert all(trace["launch"]["faults"] == [] for trace in manifest["traces"])
     launch_manifests = list(settings.output.glob("traces/**/launch-manifest.json"))
     assert len(launch_manifests) == 24
@@ -1009,6 +1081,34 @@ def test_campaign_identity_includes_inspection_normalizer_version(
     )
 
     assert exploration._campaign_hash(settings, build_hash) != before
+
+
+def test_track_a_exact_identity_binds_inspection_schema_and_request_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = campaign_config(tmp_path)
+    build_hash = exploration.hash_path(settings.build)
+    baseline_hash = exploration._campaign_hash(settings, build_hash)
+
+    with monkeypatch.context() as schema_patch:
+        schema_patch.setattr(
+            detection_campaign,
+            "FINDINGS_SCHEMA",
+            {
+                **detection_campaign.FINDINGS_SCHEMA,
+                "title": "changed-track-a-inspection-schema",
+            },
+        )
+        assert exploration._campaign_hash(settings, build_hash) != baseline_hash
+
+    checkpoint_path = settings.output / "identity-checkpoint.json"
+    exploration.CheckpointStore(checkpoint_path, baseline_hash)
+    monkeypatch.setattr(detection_campaign, "MAX_HTTP_ATTEMPTS", 4)
+    changed_hash = exploration._campaign_hash(settings, build_hash)
+    assert changed_hash != baseline_hash
+    with pytest.raises(CampaignContractError, match="campaign hash mismatch"):
+        exploration.CheckpointStore(checkpoint_path, changed_hash)
 
 
 def test_run_arguments_never_persist_the_private_api_endpoint() -> None:

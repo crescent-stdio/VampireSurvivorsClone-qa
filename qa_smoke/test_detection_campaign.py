@@ -259,6 +259,13 @@ def test_campaign_runs_full_schedule_blindly_and_excludes_pilots_from_scores(
         "http_attempts": 264,
     }
     assert len(manifest["hashes"]["rubric"]) == 64
+    assert len(manifest["hashes"]["inspection_request_contract"]) == 64
+    assert len(manifest["hashes"]["scoring_contract"]) == 64
+    assert (
+        manifest["inspection_request_contract_version"]
+        == campaign.INSPECTION_REQUEST_CONTRACT_VERSION
+    )
+    assert manifest["scoring_contract_version"] == campaign.SCORING_CONTRACT_VERSION
     assert manifest["limits"]["planned_track_a"] == 189
     assert manifest["limits"]["planned_track_b"] == 504
     assert manifest["limits"]["planned_cross_track_max"] == 693
@@ -266,6 +273,17 @@ def test_campaign_runs_full_schedule_blindly_and_excludes_pilots_from_scores(
     assert len(result.pairs) == 44
     assert all("pilot" not in pair.pair_id for pair in result.pairs)
     assert (config(tmp_path).output / "detection-benchmark.json").exists()
+    public_report = json.loads(
+        (config(tmp_path).output / "detection-benchmark.json").read_text()
+    )
+    assert (
+        public_report["metadata"]["scoring_contract_hash"]
+        == manifest["hashes"]["scoring_contract"]
+    )
+    assert (
+        public_report["metadata"]["scoring_contract_version"]
+        == campaign.SCORING_CONTRACT_VERSION
+    )
     assert (config(tmp_path).output / "detection-benchmark.ko.md").read_text().startswith(
         "# 주입 결함 탐지 벤치마크"
     )
@@ -289,6 +307,123 @@ def test_campaign_runs_full_schedule_blindly_and_excludes_pilots_from_scores(
     assert "action_context" in serialized_requests
     assert "select_upgrade" in serialized_requests
     assert "campaign-private" not in serialized_requests
+
+
+def test_official_bridge_ids_remain_blind_and_support_a_numeric_true_positive(
+    tmp_path: Path,
+) -> None:
+    settings = config(tmp_path)
+    build_hash = campaign.hash_path(settings.build)
+    bindings = campaign.load_fault_bindings(settings.project_root)
+    binding = next(
+        item for item in bindings if item.fault_id == "health_ratio_out_of_range"
+    )
+    pair = next(
+        item
+        for item in campaign.build_track_b_schedule(bindings).official_pairs
+        if item.clean.fault_id == binding.fault_id
+    )
+    clean_run_id = campaign.official_bridge_run_id(build_hash, pair.clean)
+    fault_run_id = campaign.official_bridge_run_id(build_hash, pair.fault)
+
+    forbidden = {
+        pair.clean.fault_id,
+        pair.clean.scenario_id,
+        pair.clean.variant,
+        pair.fault.variant,
+        "goal",
+    }
+    assert clean_run_id != fault_run_id
+    assert all(token not in clean_run_id for token in forbidden)
+    assert all(token not in fault_run_id for token in forbidden)
+
+    def ratio_transition(run_id: str, ratio: float) -> dict[str, Any]:
+        observation_id = f"observation:{run_id}:00000001"
+        event_id = f"event:{run_id}:00000001"
+        return {
+            "step": 0,
+            "decision": {"tool": "game", "action": "observe", "arguments": {}},
+            "observation": {
+                **observation(observation_id),
+                "player": {
+                    "present": True,
+                    "health": 96.0,
+                    "max_health": 100.0,
+                    "health_ratio": ratio,
+                    "exp": 0.0,
+                    "next_level_exp": 10.0,
+                    "exp_ratio": 0.0,
+                    "level": 1,
+                },
+                "event_state": {"event_id": event_id, "type": "tick"},
+            },
+        }
+
+    clean_result = campaign.EpisodeResult(
+        transitions=[ratio_transition(clean_run_id, 0.96)]
+    )
+    fault_result = campaign.EpisodeResult(
+        transitions=[ratio_transition(fault_run_id, 1.25)]
+    )
+
+    class NumericInspector(FakeInspector):
+        def inspect(self, system_prompt: str, payload: dict[str, Any]):
+            self.requests.append(
+                {"system_prompt": system_prompt, "payload": json.loads(json.dumps(payload))}
+            )
+            row = payload["observations"][0]
+            player = row["player"]
+            expected = player["health"] / player["max_health"]
+            findings = []
+            if player["health_ratio"] != expected:
+                findings.append(
+                    {
+                        "kind": "numeric",
+                        "field": "player.health_ratio",
+                        "comparison": "!=",
+                        "expected_value": expected,
+                        "observed_value": player["health_ratio"],
+                        "statement": "The reported health ratio differs from health / max_health.",
+                        "evidence_refs": [row["observation_id"]],
+                    }
+                )
+            return campaign.InspectionResponse(
+                raw_response={
+                    "schema_version": "qa-inspection/v2",
+                    "findings": findings,
+                },
+                usage={"llm_http_attempts": 1, "llm_completion_requests": 1},
+            )
+
+    inspector = NumericInspector()
+    campaign_hash = campaign._campaign_hash(settings, build_hash)
+    checkpoint = campaign.CheckpointStore(
+        settings.output / "checkpoint.json", campaign_hash
+    )
+    score = campaign._score_episode_pair(
+        pair=pair,
+        clean_result=clean_result,
+        fault_result=fault_result,
+        binding=binding,
+        config=settings,
+        inspector=inspector,
+        checkpoint=checkpoint,
+        budget=campaign.InspectionCallBudget(),
+        campaign_hash=campaign_hash,
+    )
+
+    assert score.clean.status == "TN"
+    assert score.fault.status == "TP"
+    assert score.fault.target_findings[0]["evidence_refs"] == [
+        f"observation:{fault_run_id}:00000001"
+    ]
+    serialized_requests = json.dumps(
+        [request["payload"] for request in inspector.requests],
+        ensure_ascii=False,
+    )
+    assert f"observation:{clean_run_id}:00000001" in serialized_requests
+    assert f"event:{fault_run_id}:00000001" in serialized_requests
+    assert all(token not in serialized_requests for token in forbidden)
 
 
 def test_divergence_before_target_is_not_reached_but_post_target_is_preserved() -> None:
@@ -333,6 +468,60 @@ def test_divergence_before_target_is_not_reached_but_post_target_is_preserved() 
         "comparison_stage": "after_command",
         "target_command_index": 1,
     }
+
+
+def test_v4_replay_target_indexes_begin_only_at_the_declared_goal_boundary() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    bindings = campaign.load_fault_bindings(project_root)
+    view_binding = next(item for item in bindings if item.fault_id == "health_bar_desync")
+    exp_binding = next(
+        item for item in bindings if item.fault_id == "experience_display_drift"
+    )
+
+    player_only = transition(0)
+    player_only["observation"].pop("player_view")
+    player_and_view = transition(1)
+    assert campaign._target_command_index(
+        view_binding, project_root, [player_only]
+    ) is None
+    assert campaign._target_command_index(
+        view_binding, project_root, [player_only, player_and_view]
+    ) == 1
+
+    exp_rows = [transition(index) for index in range(3)]
+    for level, row in enumerate(exp_rows, start=1):
+        row["observation"]["player"]["level"] = level
+    assert campaign._target_command_index(
+        exp_binding, project_root, exp_rows[:2]
+    ) is None
+    assert campaign._target_command_index(exp_binding, project_root, exp_rows) == 2
+
+    replay = campaign.build_action_replay(
+        replay_id="opaque-pilot",
+        scenario_id=exp_binding.scenario_id,
+        seed=9101,
+        build_hash="c" * 64,
+        transitions=exp_rows,
+        target_command_index=2,
+    )
+    before = campaign.apply_replay_divergence(
+        campaign.EpisodeResult(
+            transitions=exp_rows[:2],
+            replay_divergence_index=2,
+            replay_divergence_stage="before_command",
+        ),
+        replay,
+    )
+    after = campaign.apply_replay_divergence(
+        campaign.EpisodeResult(
+            transitions=exp_rows,
+            replay_divergence_index=2,
+            replay_divergence_stage="after_command",
+        ),
+        replay,
+    )
+    assert before.coverage_override == "not_reached"
+    assert after.coverage_override is None
 
 
 def test_inspection_logical_call_budget_counts_retries_as_http_attempts(tmp_path: Path) -> None:
@@ -398,6 +587,44 @@ def test_campaign_contract_errors_are_not_downgraded_to_inspection_errors(tmp_pa
             budget=campaign.InspectionCallBudget(cap=0),
             campaign_hash="campaign-hash",
         )
+
+
+@pytest.mark.parametrize("failure_surface", ["audit", "checkpoint"])
+def test_filesystem_write_failures_abort_track_b_with_an_incomplete_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_surface: str,
+) -> None:
+    settings = config(tmp_path / failure_surface)
+    if failure_surface == "audit":
+        original_write = campaign._atomic_write_json
+
+        def fail_audit(path: Path, value: dict[str, Any]) -> None:
+            if path.name.endswith(".audit.json"):
+                raise OSError("audit write failed at /private/path token=fake-secret")
+            original_write(path, value)
+
+        monkeypatch.setattr(campaign, "_atomic_write_json", fail_audit)
+    else:
+        def fail_checkpoint(self: campaign.CheckpointStore) -> None:
+            raise OSError("checkpoint write failed at /private/path token=fake-secret")
+
+        monkeypatch.setattr(campaign.CheckpointStore, "record_logical_call", fail_checkpoint)
+
+    with pytest.raises(campaign.CampaignExecutionError):
+        campaign.run_detection_campaign(
+            settings,
+            backend=FakeBackend(),
+            inspector=FakeInspector(),
+        )
+
+    manifest_text = (settings.output / "campaign-manifest.json").read_text()
+    manifest = json.loads(manifest_text)
+    assert manifest["status"] == "incomplete"
+    assert manifest["failure"]["error_type"] == "OSError"
+    assert not (settings.output / "detection-benchmark.json").exists()
+    assert "/private/path" not in manifest_text
+    assert "fake-secret" not in manifest_text
 
 
 @pytest.mark.parametrize(
@@ -1072,6 +1299,169 @@ def test_failed_resume_invalidates_previously_published_scores(tmp_path: Path) -
     assert len(archived) == 1
 
 
+def test_mid_publication_failure_removes_every_partial_score_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = config(tmp_path)
+    original_write_text = Path.write_text
+
+    def fail_after_first_score(self: Path, data: str, *args: Any, **kwargs: Any):
+        if "official.ko.md" in self.name:
+            raise OSError("publication failed at /private/path token=fake-secret")
+        return original_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_after_first_score)
+
+    with pytest.raises(campaign.CampaignExecutionError):
+        campaign.run_detection_campaign(
+            settings,
+            backend=FakeBackend(),
+            inspector=FakeInspector(),
+        )
+
+    manifest_text = (settings.output / "campaign-manifest.json").read_text()
+    manifest = json.loads(manifest_text)
+    assert manifest["status"] == "incomplete"
+    assert manifest["failure"]["status"] == "publication_cleanup_failure"
+    assert not (settings.output / "detection-benchmark.json").exists()
+    assert not (settings.output / "detection-benchmark.ko.md").exists()
+    assert not (settings.output / "metrics").exists()
+    assert "/private/path" not in manifest_text
+    assert "fake-secret" not in manifest_text
+
+
+def test_archive_failure_invalidates_stale_scores_and_sanitizes_public_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = config(tmp_path)
+    campaign.run_detection_campaign(
+        settings,
+        backend=FakeBackend(),
+        inspector=FakeInspector(),
+    )
+
+    def fail_archive(output: Path) -> None:
+        raise OSError("archive failed at /private/path token=fake-secret")
+
+    monkeypatch.setattr(campaign, "_supersede_published_results", fail_archive)
+
+    with pytest.raises(campaign.CampaignExecutionError):
+        campaign.run_detection_campaign(
+            settings,
+            backend=FakeBackend(),
+            inspector=FakeInspector(),
+        )
+
+    manifest_text = (settings.output / "campaign-manifest.json").read_text()
+    manifest = json.loads(manifest_text)
+    assert manifest["status"] == "incomplete"
+    assert manifest["failure"] == {
+        "status": "publication_cleanup_failure",
+        "error_type": "OSError",
+    }
+    assert not (settings.output / "detection-benchmark.json").exists()
+    assert not (settings.output / "detection-benchmark.ko.md").exists()
+    assert not (settings.output / "metrics").exists()
+    assert "/private/path" not in manifest_text
+    assert "fake-secret" not in manifest_text
+
+
+def test_exact_identity_binds_schema_request_policy_scoring_and_pass_contracts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = config(tmp_path)
+    build_hash = campaign.hash_path(settings.build)
+    baseline_hash = campaign._campaign_hash(settings, build_hash)
+
+    inspected_sources: list[str] = []
+    with monkeypatch.context() as source_patch:
+        source_patch.setattr(
+            campaign,
+            "_file_hash",
+            lambda path: inspected_sources.append(path.name) or "d" * 64,
+        )
+        campaign._inspection_request_contract_digest()
+    assert set(inspected_sources) == {
+        "detection_campaign.py",
+        "inspector.py",
+        "memory.py",
+        "planners.py",
+        "state_channels.py",
+    }
+
+    scoring_sources: list[str] = []
+    with monkeypatch.context() as source_patch:
+        source_patch.setattr(
+            campaign,
+            "_file_hash",
+            lambda path: scoring_sources.append(path.name) or "e" * 64,
+        )
+        campaign._scoring_contract_digest()
+    assert set(scoring_sources) == {
+        "detection_benchmark.py",
+        "evaluation.py",
+        "scenarios.py",
+    }
+
+    with monkeypatch.context() as schema_patch:
+        schema_patch.setattr(
+            campaign,
+            "FINDINGS_SCHEMA",
+            {**campaign.FINDINGS_SCHEMA, "title": "changed-inspection-schema"},
+        )
+        assert campaign._campaign_hash(settings, build_hash) != baseline_hash
+
+    with monkeypatch.context() as policy_patch:
+        policy_patch.setattr(campaign, "MAX_COMPLETION_REQUESTS", 3)
+        assert campaign._campaign_hash(settings, build_hash) != baseline_hash
+
+    checkpoint_path = settings.output / "identity-checkpoint.json"
+    campaign.CheckpointStore(checkpoint_path, baseline_hash)
+    monkeypatch.setattr(
+        campaign,
+        "_scoring_contract_digest",
+        lambda: "changed-scoring-contract-digest",
+    )
+    changed_hash = campaign._campaign_hash(settings, build_hash)
+    assert changed_hash != baseline_hash
+    with pytest.raises(campaign.CampaignContractError, match="campaign hash mismatch"):
+        campaign.CheckpointStore(checkpoint_path, changed_hash)
+
+    pass_checkpoint = campaign.CheckpointStore(
+        settings.output / "pass-checkpoint.json", "fixed-campaign"
+    )
+    inspector = FakeInspector()
+    campaign.inspect_trace_pass(
+        trace_id="opaque-contract",
+        pass_index=1,
+        transitions=[transition(0)],
+        output_dir=settings.output / "pass-contract",
+        inspector=inspector,
+        checkpoint=pass_checkpoint,
+        budget=campaign.InspectionCallBudget(),
+        input_hash="fixed-input",
+    )
+    monkeypatch.setattr(
+        campaign,
+        "FINDINGS_SCHEMA",
+        {**campaign.FINDINGS_SCHEMA, "title": "changed-pass-schema"},
+    )
+    with pytest.raises(campaign.CampaignContractError, match="input hash mismatch"):
+        campaign.inspect_trace_pass(
+            trace_id="opaque-contract",
+            pass_index=1,
+            transitions=[transition(0)],
+            output_dir=settings.output / "pass-contract",
+            inspector=inspector,
+            checkpoint=pass_checkpoint,
+            budget=campaign.InspectionCallBudget(),
+            input_hash="fixed-input",
+        )
+
+
 def test_resume_rejects_exact_hash_and_replay_artifact_mismatches(tmp_path: Path) -> None:
     settings = config(tmp_path)
     campaign.run_detection_campaign(settings, backend=FakeBackend(), inspector=FakeInspector())
@@ -1280,8 +1670,16 @@ def test_bridge_backend_replay_executes_the_same_commands_without_forcing_phase_
 
     result = backend.run_replay(spec, replay, tmp_path / "replay")
 
+    public_run_id = campaign.official_bridge_run_id(
+        campaign.hash_path(settings.build), spec
+    )
+    assert created[0].kwargs["run_id"] == public_run_id
     assert created[0].started == (spec.seed, spec.preset, [spec.fault_id])
     assert [action for action, _ in created[0].commands] == ["observe", "wait", "wait"]
+    assert created[0].commands[0][1]["decision_id"] == f"{public_run_id}-bootstrap"
+    assert created[0].commands[1][1]["decision_id"] == f"{public_run_id}-00000000"
+    assert created[0].commands[2][1]["decision_id"] == f"{public_run_id}-00000001"
+    assert spec.fault_id not in json.dumps(created[0].commands)
     assert result.replay_divergence_index == 1
     assert len(result.transitions) == 2
     assert result.transitions[1]["observation"]["phase"] == "main_menu"

@@ -392,38 +392,85 @@ def evaluate_v4_oracle(oracle_id: str, transitions: list[Transition]) -> OracleR
         )
 
     if oracle_id == "view_state_match":
+        comparable: list[Transition] = []
         for transition in transitions:
             observation = transition.get("observation") or {}
             player = observation.get("player") or {}
             view = observation.get("player_view") or {}
-            if not player.get("present") or not view:
+            if (
+                not player.get("present")
+                or "health" not in player
+                or "max_health" not in player
+                or float(player["max_health"] or 0.0) <= 0
+                or not view
+                or not ("health" in view or "health_ratio" in view)
+            ):
                 continue
+            comparable.append(transition)
             maximum = float(player.get("max_health", 0.0) or 0.0)
             raw_health = float(player.get("health", 0.0) or 0.0)
             if maximum > 0 and "health" in view:
                 if not math.isclose(float(view["health"]), raw_health, abs_tol=1e-5):
                     return OracleResult(
-                        verdict="fail", evidence_refs=refs, detail="displayed health differs from raw health"
+                        verdict="fail",
+                        evidence_refs=_refs_for(transition),
+                        detail="displayed health differs from raw health",
                     )
             if maximum > 0 and "health_ratio" in view:
                 expected = raw_health / maximum
                 if not math.isclose(float(view["health_ratio"]), expected, abs_tol=1e-5):
                     return OracleResult(
-                        verdict="fail", evidence_refs=refs, detail="displayed health ratio differs from raw health"
+                        verdict="fail",
+                        evidence_refs=_refs_for(transition),
+                        detail="displayed health ratio differs from raw health",
                     )
-        return OracleResult(verdict="pass", evidence_refs=refs, detail="raw and displayed health match")
+        if not comparable:
+            return OracleResult(
+                verdict="not_evaluated",
+                evidence_refs=refs,
+                detail="player and comparable player_view health were not observed together",
+            )
+        return OracleResult(
+            verdict="pass",
+            evidence_refs=_refs_for(comparable[-1]),
+            detail="raw and displayed health match",
+        )
 
     if oracle_id == "exp_conservation":
+        comparable = []
         for transition in transitions:
             observation = transition.get("observation") or {}
             player = observation.get("player") or {}
             view = observation.get("player_view") or {}
-            if player.get("present") and view and "exp" in view:
-                if not math.isclose(float(view["exp"]), float(player.get("exp", 0.0) or 0.0), abs_tol=1e-5):
-                    return OracleResult(
-                        verdict="fail", evidence_refs=refs, detail="displayed experience differs from raw experience"
-                    )
-        return OracleResult(verdict="pass", evidence_refs=refs, detail="raw and displayed experience match")
+            if (
+                not player.get("present")
+                or int(player.get("level", 0) or 0) < 3
+                or "exp" not in player
+                or "exp" not in view
+            ):
+                continue
+            comparable.append(transition)
+            if not math.isclose(
+                float(view["exp"]),
+                float(player["exp"]),
+                abs_tol=1e-5,
+            ):
+                return OracleResult(
+                    verdict="fail",
+                    evidence_refs=_refs_for(transition),
+                    detail="displayed experience differs from raw experience",
+                )
+        if not comparable:
+            return OracleResult(
+                verdict="not_evaluated",
+                evidence_refs=refs,
+                detail="level 3 raw and displayed experience were not observed together",
+            )
+        return OracleResult(
+            verdict="pass",
+            evidence_refs=_refs_for(comparable[-1]),
+            detail="raw and displayed experience match",
+        )
 
     if oracle_id in {"hp_decreases_on_hit", "item_effect_applied", "item_hit_range"}:
         for index, transition in enumerate(transitions):

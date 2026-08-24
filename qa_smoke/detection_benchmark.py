@@ -693,6 +693,16 @@ def proportion(numerator: int, denominator: int) -> dict[str, Any]:
     }
 
 
+def descriptive_rate(numerator: int, denominator: int) -> dict[str, Any]:
+    """Return a descriptive dependent-observation rate without an independence CI."""
+
+    return {
+        "numerator": numerator,
+        "denominator": denominator,
+        "value": numerator / denominator if denominator else None,
+    }
+
+
 def _macro_detection(per_fault: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
     rates = [
         item["detection_rate"]
@@ -768,7 +778,9 @@ def aggregate_benchmark(pairs: Sequence[PairScore]) -> dict[str, Any]:
             confusion_counts["FP"], confusion_counts["FP"] + confusion_counts["TN"]
         ),
         "paired_success_rate": proportion(paired_successes, pair_counts["valid"]),
-        "inspection_agreement": proportion(agreement_numerator, agreement_denominator),
+        "inspection_agreement": descriptive_rate(
+            agreement_numerator, agreement_denominator
+        ),
     }
     return {
         "counts": {
@@ -867,9 +879,12 @@ def render_benchmark_markdown(report: Mapping[str, Any]) -> str:
                     ("Specificity", "specificity"),
                     ("Clean false-positive rate", "clean_false_positive_rate"),
                     ("Paired success rate", "paired_success_rate"),
-                    ("Inspection agreement", "inspection_agreement"),
                 )
             ),
+            "",
+            "Inspection agreement (descriptive, no CI): "
+            f"{_percentage(metrics['inspection_agreement'])} "
+            f"({_raw_rate(metrics['inspection_agreement'])})",
             "",
             "## Fault별 결과",
             "",

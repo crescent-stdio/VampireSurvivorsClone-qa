@@ -13,6 +13,7 @@ from typing import Any, Literal, Mapping, Protocol, Sequence
 from .detection_campaign import (
     CAMPAIGN_MANIFEST_SCHEMA,
     INSPECTION_REPETITIONS,
+    INSPECTION_REQUEST_CONTRACT_VERSION,
     INSPECTOR_EFFORT,
     INSPECTOR_MODEL,
     LOGICAL_INSPECTION_CALL_CAP,
@@ -22,10 +23,12 @@ from .detection_campaign import (
     CampaignExecutionError,
     CheckpointStore,
     InspectionCallBudget,
+    InspectionPassFailure,
     InspectorAdapter,
     _atomic_write_json,
     _file_hash,
     _invalidate_trace_inspections,
+    _inspection_request_contract_digest,
     _max_chunks_for_steps,
     _opaque_trace_id,
     _prepare_campaign_output,
@@ -306,6 +309,28 @@ def _numeric_rule(comparison: Any) -> str:
     return names.get(str(comparison), "numeric-relation")
 
 
+_PLANNER_NUMERIC_OPERATORS = {
+    "eq": "==",
+    "ne": "!=",
+    "lt": "<",
+    "le": "<=",
+    "gt": ">",
+    "ge": ">=",
+}
+_PLANNER_NUMERIC_CANDIDATE_PATTERN = re.compile(
+    r"numeric:(eq|ne|lt|le|gt|ge):([a-zA-Z0-9_.]+)"
+)
+
+
+def _planner_numeric_relation(candidate_id: str) -> tuple[str, str] | None:
+    """Parse only the explicit planner numeric contract, never free-form prose."""
+
+    match = _PLANNER_NUMERIC_CANDIDATE_PATTERN.fullmatch(candidate_id.strip())
+    if match is None:
+        return None
+    return _PLANNER_NUMERIC_OPERATORS[match.group(1)], match.group(2)
+
+
 def _observation_context(
     transitions: Sequence[dict[str, Any]],
     trace_evidence_refs: Sequence[str] = (),
@@ -385,7 +410,18 @@ def _planner_occurrences(record: ExplorationTraceRecord) -> list[dict[str, Any]]
         if not statement or not rule or evidence is None:
             continue
         refs, phase, event = evidence
-        key = _candidate_key("behavior", rule, "", phase, event)
+        numeric_relation = _planner_numeric_relation(rule)
+        if numeric_relation is None:
+            key = _candidate_key("behavior", rule, "", phase, event)
+        else:
+            comparison, field_name = numeric_relation
+            key = _candidate_key(
+                "numeric",
+                _numeric_rule(comparison),
+                field_name,
+                phase,
+                event,
+            )
         occurrences.append(
             {
                 "key": key,
@@ -947,6 +983,8 @@ def _campaign_hash(config: ExplorationCampaignConfig, build_hash: str) -> str:
             "inspector_effort": INSPECTOR_EFFORT,
             "inspector_prompt": _sha256(INSPECTOR_SYSTEM_PROMPT),
             "inspection_normalizer": INSPECTION_NORMALIZER_VERSION,
+            "inspection_request_contract_version": INSPECTION_REQUEST_CONTRACT_VERSION,
+            "inspection_request_contract": _inspection_request_contract_digest(),
             "rubric": _file_hash(
                 config.project_root.resolve() / "config" / "qa-detection-rubric.json"
             ),
@@ -1085,9 +1123,7 @@ def _inspect_record(
                     input_hash=input_hash,
                 )
             )
-        except CampaignContractError:
-            raise
-        except Exception:
+        except InspectionPassFailure:
             passes.append(None)
     return passes
 
@@ -1111,8 +1147,12 @@ def _write_running_manifest(
                 "api_endpoint": _public_api_endpoint_hash(config.api_url),
                 "steering_prompt": _steering_prompt_digest(),
                 "inspection_normalizer": _sha256(INSPECTION_NORMALIZER_VERSION),
+                "inspection_request_contract": _inspection_request_contract_digest(),
             },
             "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
+            "inspection_request_contract_version": (
+                INSPECTION_REQUEST_CONTRACT_VERSION
+            ),
         },
     )
 
@@ -1184,8 +1224,12 @@ def _write_incomplete_manifest(
                 "api_endpoint": _public_api_endpoint_hash(config.api_url),
                 "steering_prompt": _steering_prompt_digest(),
                 "inspection_normalizer": _sha256(INSPECTION_NORMALIZER_VERSION),
+                "inspection_request_contract": _inspection_request_contract_digest(),
             },
             "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
+            "inspection_request_contract_version": (
+                INSPECTION_REQUEST_CONTRACT_VERSION
+            ),
             "counts": {
                 "logical_inspection_calls": checkpoint.logical_calls,
                 "http_attempts": checkpoint.http_attempts,
@@ -1358,12 +1402,16 @@ def run_exploration_campaign(
                     "inspection_normalizer": _sha256(
                         INSPECTION_NORMALIZER_VERSION
                     ),
+                    "inspection_request_contract": _inspection_request_contract_digest(),
                     "rubric": _file_hash(
                         config.project_root / "config" / "qa-detection-rubric.json"
                     ),
                     "api_endpoint": _public_api_endpoint_hash(config.api_url),
                 },
                 "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
+                "inspection_request_contract_version": (
+                    INSPECTION_REQUEST_CONTRACT_VERSION
+                ),
                 "models": {
                     "steering": STEERING_MODEL,
                     "inspection": INSPECTOR_MODEL,

@@ -315,6 +315,73 @@ def _write_diff_report(path: Path, diffs: dict[str, Any]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _paired_clean_baseline(
+    baseline: dict[str, ScenarioResult],
+    current: dict[str, ScenarioResult],
+) -> dict[str, ScenarioResult]:
+    """Align an approved clean-run baseline only with paired clean identities."""
+
+    aligned: dict[str, ScenarioResult] = {}
+    for scenario_id, result in baseline.items():
+        if scenario_id in current and "/clean/" in scenario_id:
+            aligned[scenario_id] = result
+            continue
+        candidates = [
+            current_id
+            for current_id in current
+            if "/clean/" in current_id and current_id.rsplit("/clean/", 1)[1] == scenario_id
+        ]
+        if len(candidates) == 1:
+            aligned[candidates[0]] = result
+        else:
+            aligned[scenario_id] = result
+    return aligned
+
+
+def _write_paired_diff_report(
+    path: Path,
+    clean_diffs: dict[str, Any],
+    injected: dict[str, ScenarioResult],
+) -> None:
+    counts = Counter(diff.kind.value for diff in clean_diffs.values())
+    lines = [
+        "# QA Paired Regression Diff",
+        "",
+        "Baseline scope: paired clean variants only.",
+        "Injected variants are excluded from the clean baseline diff and shown as current oracle results.",
+        "",
+        "## Clean baseline diff",
+        "",
+    ]
+    for kind in DiffKind:
+        if counts.get(kind.value):
+            lines.append(f"- {kind.value}: {counts[kind.value]}")
+    lines.extend(
+        [
+            "",
+            "| Scenario | Diff | Baseline | Current |",
+            "|---|---|---|---|",
+        ]
+    )
+    for scenario_id, diff in sorted(clean_diffs.items()):
+        before = diff.baseline.verdict if diff.baseline else "-"
+        lines.append(
+            f"| `{scenario_id}` | **{diff.kind.value}** | {before} | {diff.current.verdict} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Injected current oracle results",
+            "",
+            "| Scenario | Verdict | Stability |",
+            "|---|---|---|",
+        ]
+    )
+    for scenario_id, result in sorted(injected.items()):
+        lines.append(f"| `{scenario_id}` | **{result.verdict}** | {result.stability} |")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _write_suite_report(path: Path, results: dict[str, ScenarioResult]) -> None:
     lines = ["# QA Suite Run", "", "| Scenario | Verdict | Stability |", "|---|---|---|"]
     for scenario_id, result in sorted(results.items()):
@@ -351,6 +418,61 @@ def _run_command(args: argparse.Namespace) -> int:
         print(json.dumps({"suite_root": str(suite_root), "results": {key: value.verdict for key, value in current.items()}}, ensure_ascii=False))
         return 0 if all(result.verdict == "PASS" for result in current.values()) else 1
     baseline = load_baseline(args.baseline)
+    if args.command == "validate-faults":
+        clean_current = {
+            scenario_id: result
+            for scenario_id, result in current.items()
+            if "/clean/" in scenario_id
+        }
+        injected_current = {
+            scenario_id: result
+            for scenario_id, result in current.items()
+            if "/injected/" in scenario_id
+        }
+        aligned_baseline = _paired_clean_baseline(baseline, clean_current)
+        clean_diffs = diff_scenario_results(aligned_baseline, clean_current)
+        diff_payload = {
+            "schema_version": "qa-regression-diff/v2",
+            "baseline_scope": "paired-clean-only",
+            "clean_baseline_diffs": {
+                scenario_id: diff.as_dict()
+                for scenario_id, diff in clean_diffs.items()
+            },
+            "injected_current_results": {
+                scenario_id: {
+                    "verdict": result.verdict,
+                    "stability": result.stability,
+                }
+                for scenario_id, result in injected_current.items()
+            },
+        }
+        (suite_root / "regression-diff.json").write_text(
+            json.dumps(diff_payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _write_paired_diff_report(
+            suite_root / "report.md", clean_diffs, injected_current
+        )
+        print(
+            json.dumps(
+                {
+                    "suite_root": str(suite_root),
+                    "report": str(suite_root / "report.md"),
+                    "baseline_scope": "paired-clean-only",
+                },
+                ensure_ascii=False,
+            )
+        )
+        if any(result.verdict == "ERROR" for result in current.values()) or any(
+            diff.kind == DiffKind.ERROR for diff in clean_diffs.values()
+        ):
+            return 2
+        if any(
+            diff.kind in {DiffKind.NEW_FAIL, DiffKind.STILL_FAIL}
+            for diff in clean_diffs.values()
+        ) or any(result.verdict != "PASS" for result in injected_current.values()):
+            return 1
+        return 0
     diffs = diff_scenario_results(baseline, current)
     diff_payload = {scenario_id: diff.as_dict() for scenario_id, diff in diffs.items()}
     (suite_root / "regression-diff.json").write_text(

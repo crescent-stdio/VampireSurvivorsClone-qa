@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
@@ -36,7 +37,15 @@ from .inspector import (
     validate_inspection_artifact_v2,
 )
 from .memory import sanitize_error_type as _sanitize_error_type
-from .planners import LLMPlanner, observation_phase, resolve_llm_api_url
+from .planners import (
+    MAX_RETRY_WAIT_SECONDS,
+    PLANNING_MAX_TOKENS,
+    REASONING_OUTPUT_FLOOR,
+    TRUNCATION_RETRY_MAX_TOKENS,
+    LLMPlanner,
+    observation_phase,
+    resolve_llm_api_url,
+)
 from .reporting import RunRecorder
 from .run import execute_game_action, parse_args as parse_run_args, run_session
 from .scenarios import load_scenarios, load_v4_ground_truth, load_v4_scenarios
@@ -61,6 +70,17 @@ EXPECTED_CROSS_TRACK_INSPECTION_CALLS = 693
 MAX_HTTP_ATTEMPTS = 3
 MAX_COMPLETION_REQUESTS = 2
 MAX_RETRY_SLEEP_SECONDS = 45.0
+INSPECTION_REQUEST_CONTRACT_VERSION = "qa-inspection-request/v1"
+SCORING_CONTRACT_VERSION = "qa-detection-scoring/v1"
+OFFICIAL_BRIDGE_RUN_ID_VERSION = "qa-official-bridge-run-id/v1"
+SCORE_REPORT_PATHS = (
+    "detection-benchmark.json",
+    "detection-benchmark.ko.md",
+    "metrics/official.json",
+    "metrics/official.ko.md",
+    "metrics/autonomous.json",
+    "metrics/autonomous.ko.md",
+)
 NEUTRAL_REACHABILITY_GOAL = (
     "Reach ordinary gameplay state needed for generic QA observation, while surviving when possible."
 )
@@ -75,7 +95,19 @@ class CampaignExecutionError(CampaignContractError):
     """Raised when required campaign execution cannot produce a valid scored trace."""
 
 
-class InspectionCallError(RuntimeError):
+class ReportPublicationError(CampaignExecutionError):
+    """Preserve the classified filesystem cause of score-report publication failure."""
+
+    def __init__(self, cause: OSError) -> None:
+        super().__init__("score report publication failed")
+        self.error_type = _sanitize_error_type(type(cause).__name__) or "OSError"
+
+
+class InspectionPassFailure(RuntimeError):
+    """Base class for genuine model-call or model-response pass failures."""
+
+
+class InspectionCallError(InspectionPassFailure):
     """Carry failed-call audit counters and model content without provider metadata."""
 
     def __init__(
@@ -92,6 +124,10 @@ class InspectionCallError(RuntimeError):
         self.elapsed_seconds = elapsed_seconds
         self.raw_response = raw_response
         self.cause_type = _sanitize_error_type(cause_type)
+
+
+class InspectionResponseError(InspectionPassFailure):
+    """Raised after a malformed model response has been safely audited."""
 
 
 @dataclass(frozen=True)
@@ -277,6 +313,61 @@ def hash_path(path: Path) -> str:
 
 def _file_hash(path: Path) -> str:
     return hash_path(path) if path.exists() else _sha256("missing")
+
+
+def _inspection_request_contract_digest() -> str:
+    """Bind resume to the exact sanitized inspection request and retry contract."""
+
+    source_names = (
+        "detection_campaign.py",
+        "inspector.py",
+        "memory.py",
+        "planners.py",
+        "state_channels.py",
+    )
+    return _sha256(
+        {
+            "version": INSPECTION_REQUEST_CONTRACT_VERSION,
+            "sources": {
+                name: _file_hash(Path(__file__).with_name(name))
+                for name in source_names
+            },
+            "schema": _sha256(FINDINGS_SCHEMA),
+            "schema_version": INSPECTION_SCHEMA_V2,
+            "normalizer_version": INSPECTION_NORMALIZER_VERSION,
+            "chunk_size": INSPECTION_CHUNK_SIZE,
+            "chunk_overlap": INSPECTION_CHUNK_OVERLAP,
+            "model": INSPECTOR_MODEL,
+            "effort": INSPECTOR_EFFORT,
+            "prompt": _sha256(INSPECTOR_SYSTEM_PROMPT),
+            "max_output_tokens": PLANNING_MAX_TOKENS,
+            "reasoning_output_floor": REASONING_OUTPUT_FLOOR,
+            "truncation_retry_max_tokens": TRUNCATION_RETRY_MAX_TOKENS,
+            "completion_requests": MAX_COMPLETION_REQUESTS,
+            "http_attempts_per_completion": MAX_HTTP_ATTEMPTS,
+            "retry_sleep_budget_seconds": MAX_RETRY_SLEEP_SECONDS,
+            "max_retry_wait_seconds": MAX_RETRY_WAIT_SECONDS,
+        }
+    )
+
+
+def _scoring_contract_digest() -> str:
+    """Bind Track B reports to the private target, comparison, and aggregation code."""
+
+    source_names = (
+        "detection_benchmark.py",
+        "evaluation.py",
+        "scenarios.py",
+    )
+    return _sha256(
+        {
+            "version": SCORING_CONTRACT_VERSION,
+            "sources": {
+                name: _file_hash(Path(__file__).with_name(name))
+                for name in source_names
+            },
+        }
+    )
 
 
 def _steering_prompt_digest() -> str:
@@ -848,6 +939,8 @@ def inspect_trace_pass(
             "effort": INSPECTOR_EFFORT,
             "prompt": _sha256(INSPECTOR_SYSTEM_PROMPT),
             "normalizer": INSPECTION_NORMALIZER_VERSION,
+            "request_contract_version": INSPECTION_REQUEST_CONTRACT_VERSION,
+            "request_contract": _inspection_request_contract_digest(),
             "chunks": [_sha256(chunk) for chunk in chunks],
         }
     )
@@ -944,7 +1037,9 @@ def inspect_trace_pass(
                         chunk_hash,
                         type(validation_error).__name__,
                     )
-                    raise
+                    raise InspectionResponseError(
+                        type(validation_error).__name__
+                    ) from validation_error
                 normalized = normalize_inspection_artifact(strict_response)
                 audit = {
                     "schema_version": INSPECTION_AUDIT_SCHEMA,
@@ -1007,6 +1102,8 @@ def inspect_trace_pass(
                 )
                 checkpoint.mark_failed(chunk_unit, chunk_hash, type(error).__name__)
                 raise
+            except InspectionResponseError:
+                raise
             except Exception as error:
                 checkpoint.mark_failed(chunk_unit, chunk_hash, f"{type(error).__name__}: {error}")
                 raise
@@ -1019,7 +1116,7 @@ def inspect_trace_pass(
     except Exception as error:
         detail = (
             type(error).__name__
-            if isinstance(error, InspectionCallError)
+            if isinstance(error, InspectionPassFailure)
             else f"{type(error).__name__}: {error}"
         )
         checkpoint.mark_failed(pass_unit, pass_hash, detail)
@@ -1050,6 +1147,17 @@ def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
             temporary.unlink()
 
 
+def _atomic_write_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(value, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def _campaign_hash(config: BenchmarkCampaignConfig, build_hash: str) -> str:
     root = config.project_root.resolve()
     effective_api_url = resolve_llm_api_url(config.api_url)
@@ -1068,6 +1176,10 @@ def _campaign_hash(config: BenchmarkCampaignConfig, build_hash: str) -> str:
             "inspector_model": INSPECTOR_MODEL,
             "inspector_effort": INSPECTOR_EFFORT,
             "inspector_prompt_hash": _sha256(INSPECTOR_SYSTEM_PROMPT),
+            "inspection_request_contract_version": INSPECTION_REQUEST_CONTRACT_VERSION,
+            "inspection_request_contract": _inspection_request_contract_digest(),
+            "scoring_contract_version": SCORING_CONTRACT_VERSION,
+            "scoring_contract": _scoring_contract_digest(),
             "rubric_hash": _file_hash(root / "config" / "qa-detection-rubric.json"),
             "legacy_scenarios_hash": _file_hash(root / "config" / "qa-scenarios.json"),
             "v4_scenarios_hash": _file_hash(root / "config" / "qa-scenarios-v4.json"),
@@ -1148,6 +1260,20 @@ def _unit_hash(
 
 def _opaque_trace_id(campaign_hash: str, unit_id: str) -> str:
     return _sha256({"campaign_hash": campaign_hash, "unit_id": unit_id})[:24]
+
+
+def official_bridge_run_id(build_hash: str, spec: EpisodeSpec) -> str:
+    """Return a deterministic opaque replay ID without private schedule tokens."""
+
+    if spec.variant not in {"clean", "fault"} or spec.driver != "replay":
+        raise CampaignContractError("official Bridge run IDs are only valid for replay traces")
+    return "qa-" + _sha256(
+        {
+            "version": OFFICIAL_BRIDGE_RUN_ID_VERSION,
+            "build_hash": build_hash,
+            "spec": asdict(spec),
+        }
+    )[:32]
 
 
 def _invalidate_trace_inspections(
@@ -1285,9 +1411,7 @@ def _inspect_episode(
                     input_hash=input_hash,
                 )
             )
-        except CampaignContractError:
-            raise
-        except Exception:
+        except InspectionPassFailure:
             passes.append(None)
     return passes
 
@@ -1347,6 +1471,8 @@ def _write_reports(
         "autonomous": autonomous,
         "combined": [*official, *autonomous],
     }
+    rendered: dict[str, str] = {}
+    scoring_digest = _scoring_contract_digest()
     for name, pairs in groups.items():
         report = build_benchmark_report(
             pairs,
@@ -1354,17 +1480,35 @@ def _write_reports(
                 "campaign_id": campaign_hash[:16],
                 "track": "B",
                 "score_surface": name,
+                "scoring_contract_version": SCORING_CONTRACT_VERSION,
+                "scoring_contract_hash": scoring_digest,
             },
         )
         if name == "combined":
-            json_path = output / "detection-benchmark.json"
-            markdown_path = output / "detection-benchmark.ko.md"
+            json_name = "detection-benchmark.json"
+            markdown_name = "detection-benchmark.ko.md"
         else:
-            json_path = output / "metrics" / f"{name}.json"
-            markdown_path = output / "metrics" / f"{name}.ko.md"
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-        json_path.write_text(benchmark_report_json(report), encoding="utf-8")
-        markdown_path.write_text(render_benchmark_markdown(report), encoding="utf-8")
+            json_name = f"metrics/{name}.json"
+            markdown_name = f"metrics/{name}.ko.md"
+        rendered[json_name] = benchmark_report_json(report)
+        rendered[markdown_name] = render_benchmark_markdown(report)
+
+    staging_root = output / ".publishing" / uuid.uuid4().hex
+    try:
+        for relative_path in SCORE_REPORT_PATHS:
+            _atomic_write_text(staging_root / relative_path, rendered[relative_path])
+        for relative_path in SCORE_REPORT_PATHS:
+            destination = output / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staging_root / relative_path, destination)
+    except OSError as error:
+        raise ReportPublicationError(error) from error
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        try:
+            staging_root.parent.rmdir()
+        except OSError:
+            pass
 
 
 def _prepare_campaign_output(
@@ -1415,8 +1559,12 @@ def _write_incomplete_manifest(
                 "rubric": _file_hash(project_root / "config" / "qa-detection-rubric.json"),
                 "api_endpoint": _public_api_endpoint_hash(api_url),
                 "steering_prompt": _steering_prompt_digest(),
+                "inspection_request_contract": _inspection_request_contract_digest(),
+                "scoring_contract": _scoring_contract_digest(),
             },
             "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
+            "inspection_request_contract_version": INSPECTION_REQUEST_CONTRACT_VERSION,
+            "scoring_contract_version": SCORING_CONTRACT_VERSION,
             "counts": {
                 "logical_inspection_calls": checkpoint.logical_calls,
                 "http_attempts": checkpoint.http_attempts,
@@ -1446,6 +1594,35 @@ def _supersede_published_results(output: Path) -> None:
         source.replace(destination)
 
 
+def _has_published_results(output: Path) -> bool:
+    return (output / "campaign-manifest.json").exists() or any(
+        (output / relative_path).exists() for relative_path in SCORE_REPORT_PATHS
+    )
+
+
+def _cleanup_published_results(output: Path) -> str | None:
+    """Archive public scores, or remove each known score file if archival fails."""
+
+    try:
+        _supersede_published_results(output)
+        return None
+    except OSError as archive_error:
+        cleanup_error: OSError = archive_error
+        for relative_path in SCORE_REPORT_PATHS:
+            try:
+                (output / relative_path).unlink(missing_ok=True)
+            except OSError as unlink_error:
+                cleanup_error = unlink_error
+        try:
+            (output / "metrics").rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError as directory_error:
+            if any((output / "metrics").glob("*")):
+                cleanup_error = directory_error
+        return _sanitize_error_type(type(cleanup_error).__name__) or "OSError"
+
+
 def _write_running_manifest(
     *,
     output: Path,
@@ -1467,8 +1644,12 @@ def _write_running_manifest(
                 "rubric": _file_hash(project_root / "config" / "qa-detection-rubric.json"),
                 "api_endpoint": _public_api_endpoint_hash(api_url),
                 "steering_prompt": _steering_prompt_digest(),
+                "inspection_request_contract": _inspection_request_contract_digest(),
+                "scoring_contract": _scoring_contract_digest(),
             },
             "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
+            "inspection_request_contract_version": INSPECTION_REQUEST_CONTRACT_VERSION,
+            "scoring_contract_version": SCORING_CONTRACT_VERSION,
         },
     )
 
@@ -1483,7 +1664,31 @@ def record_detection_initialization_failure(
     campaign_hash = _campaign_hash(config, build_hash)
     output = config.output.resolve()
     checkpoint = _prepare_campaign_output(output, campaign_hash)
-    _supersede_published_results(output)
+    if _has_published_results(output):
+        _write_running_manifest(
+            output=output,
+            campaign_hash=campaign_hash,
+            build_hash=build_hash,
+            project_root=config.project_root,
+            api_url=config.api_url,
+        )
+    try:
+        _supersede_published_results(output)
+    except OSError as archive_error:
+        cleanup_error = _cleanup_published_results(output) or "OSError"
+        _write_incomplete_manifest(
+            output=output,
+            campaign_hash=campaign_hash,
+            build_hash=build_hash,
+            project_root=config.project_root,
+            checkpoint=checkpoint,
+            error=archive_error,
+            api_url=config.api_url,
+            failure_status="publication_cleanup_failure",
+        )
+        raise CampaignExecutionError(
+            f"score publication cleanup failed ({cleanup_error})"
+        ) from archive_error
     _write_incomplete_manifest(
         output=output,
         campaign_hash=campaign_hash,
@@ -1510,7 +1715,16 @@ def run_detection_campaign(
     output = config.output.resolve()
     checkpoint = _prepare_campaign_output(output, campaign_hash)
     resolved_config = replace(config, output=output)
+    publication_phase = "archive"
     try:
+        if _has_published_results(output):
+            _write_running_manifest(
+                output=output,
+                campaign_hash=campaign_hash,
+                build_hash=build_hash,
+                project_root=config.project_root,
+                api_url=config.api_url,
+            )
         _supersede_published_results(output)
         _write_running_manifest(
             output=output,
@@ -1519,6 +1733,7 @@ def run_detection_campaign(
             project_root=config.project_root,
             api_url=config.api_url,
         )
+        publication_phase = "campaign"
         return _run_detection_campaign_impl(
             resolved_config,
             backend=backend,
@@ -1530,18 +1745,27 @@ def run_detection_campaign(
             latest_checkpoint = CheckpointStore(output / "checkpoint.json", campaign_hash)
         except CampaignContractError:
             pass
-        try:
-            _write_incomplete_manifest(
-                output=output,
-                campaign_hash=campaign_hash,
-                build_hash=build_hash,
-                project_root=config.project_root,
-                checkpoint=latest_checkpoint,
-                error=error,
-                api_url=config.api_url,
-            )
-        except OSError:
-            pass
+        cleanup_error = _cleanup_published_results(output)
+        publication_failure = (
+            cleanup_error is not None
+            or publication_phase == "archive"
+            or isinstance(error, ReportPublicationError)
+        )
+        manifest_error = error
+        if isinstance(error, ReportPublicationError):
+            manifest_error = OSError(error.error_type)
+        _write_incomplete_manifest(
+            output=output,
+            campaign_hash=campaign_hash,
+            build_hash=build_hash,
+            project_root=config.project_root,
+            checkpoint=latest_checkpoint,
+            error=(OSError(cleanup_error) if cleanup_error else manifest_error),
+            api_url=config.api_url,
+            failure_status=(
+                "publication_cleanup_failure" if publication_failure else "failed"
+            ),
+        )
         if isinstance(error, CampaignContractError):
             raise
         raise CampaignExecutionError("campaign execution failed") from error
@@ -1638,6 +1862,7 @@ def _run_detection_campaign_impl(
                     "pair_id": spec.pair_id,
                     "variant": spec.variant,
                     "driver": spec.driver,
+                    "bridge_run_id": official_bridge_run_id(build_hash, spec),
                     "resumed": was_resumed,
                     "replay_digest": replay["replay_digest"],
                     "divergence": result.divergence_evidence,
@@ -1723,12 +1948,16 @@ def _run_detection_campaign_impl(
             "inspector_model": _sha256(INSPECTOR_MODEL),
             "inspector_prompt": _sha256(INSPECTOR_SYSTEM_PROMPT),
             "steering_prompt": _steering_prompt_digest(),
+            "inspection_request_contract": _inspection_request_contract_digest(),
+            "scoring_contract": _scoring_contract_digest(),
             "rubric": _file_hash(
                 config.project_root / "config" / "qa-detection-rubric.json"
             ),
             "api_endpoint": _public_api_endpoint_hash(config.api_url),
         },
         "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
+        "inspection_request_contract_version": INSPECTION_REQUEST_CONTRACT_VERSION,
+        "scoring_contract_version": SCORING_CONTRACT_VERSION,
         "models": {
             "steering": STEERING_MODEL,
             "inspection": INSPECTOR_MODEL,
@@ -1774,7 +2003,10 @@ def _run_detection_campaign_impl(
             "autonomous_markdown": "metrics/autonomous.ko.md",
         },
     }
-    _atomic_write_json(manifest_path, manifest)
+    try:
+        _atomic_write_json(manifest_path, manifest)
+    except OSError as error:
+        raise ReportPublicationError(error) from error
     return CampaignResult(
         manifest_path=manifest_path,
         pairs=tuple([*official_scores, *autonomous_scores]),
@@ -1805,6 +2037,7 @@ class LLMInspectorAdapter:
                 json.dumps(payload, ensure_ascii=False),
                 response_schema=FINDINGS_SCHEMA,
                 include_planning_history=False,
+                max_tokens=PLANNING_MAX_TOKENS,
             )
         except Exception as error:
             usage = self.planner.take_last_usage()
@@ -1907,7 +2140,7 @@ class BridgeCampaignBackend:
             session_dir=output_dir,
             mode="qa",
             headless=self.config.headless,
-            run_id=spec.unit_id.replace("/", "-"),
+            run_id=official_bridge_run_id(self.build_hash, spec),
             scenario_id=spec.scenario_id,
         )
         transitions: list[dict[str, Any]] = []
@@ -1922,9 +2155,10 @@ class BridgeCampaignBackend:
                 faults=[spec.fault_id] if spec.variant == "fault" else [],
             )
             bootstrap = replay["bootstrap_command"]
+            public_run_id = official_bridge_run_id(self.build_hash, spec)
             bootstrap_observation = adapter.command(
                 bootstrap["action"],
-                decision_id=f"{spec.unit_id.replace('/', '-')}-bootstrap",
+                decision_id=f"{public_run_id}-bootstrap",
                 **bootstrap["arguments"],
             )
             previous_phase: str | None = observation_phase(bootstrap_observation)
@@ -1957,7 +2191,7 @@ class BridgeCampaignBackend:
                     "tool": "game",
                     "action": command["action"],
                     "arguments": dict(command["arguments"]),
-                    "decision_id": f"{spec.unit_id.replace('/', '-')}-{index:08d}",
+                    "decision_id": f"{public_run_id}-{index:08d}",
                 }
                 observed = execute_game_action(adapter, decision)
                 current_phase = observation_phase(observed)

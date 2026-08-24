@@ -184,6 +184,73 @@ class V4ScenarioTests(unittest.TestCase):
         result = evaluate_v4_oracle("view_state_match", transitions)
         self.assertEqual("fail", result.verdict)
 
+    def test_v4_view_oracle_waits_for_raw_and_display_goal_evidence(self) -> None:
+        player_only = [
+            {
+                "observation": {
+                    "observation_id": "obs-player-only",
+                    "player": {"present": True, "health": 5.0, "max_health": 10.0},
+                }
+            }
+        ]
+        reached = [
+            *player_only,
+            {
+                "observation": {
+                    "observation_id": "obs-player-and-view",
+                    "player": {"present": True, "health": 5.0, "max_health": 10.0},
+                    "player_view": {"health": 5.0, "health_ratio": 0.5},
+                }
+            },
+        ]
+        view_without_raw_health = [
+            {
+                "observation": {
+                    "observation_id": "obs-view-without-raw-health",
+                    "player": {"present": True},
+                    "player_view": {"health": 5.0, "health_ratio": 0.5},
+                }
+            }
+        ]
+
+        self.assertEqual(
+            "not_evaluated",
+            evaluate_v4_oracle("view_state_match", player_only).verdict,
+        )
+        self.assertEqual(
+            "not_evaluated",
+            evaluate_v4_oracle(
+                "view_state_match", view_without_raw_health
+            ).verdict,
+        )
+        self.assertEqual("pass", evaluate_v4_oracle("view_state_match", reached).verdict)
+
+    def test_v4_exp_oracle_waits_for_level_three_before_evaluating(self) -> None:
+        level_two = [
+            {
+                "observation": {
+                    "observation_id": "obs-level-two",
+                    "player": {"present": True, "level": 2, "exp": 4.0},
+                    "player_view": {"exp": 99.0},
+                }
+            }
+        ]
+        level_three = [
+            {
+                "observation": {
+                    "observation_id": "obs-level-three",
+                    "player": {"present": True, "level": 3, "exp": 4.0},
+                    "player_view": {"exp": 99.0},
+                }
+            }
+        ]
+
+        self.assertEqual(
+            "not_evaluated",
+            evaluate_v4_oracle("exp_conservation", level_two).verdict,
+        )
+        self.assertEqual("fail", evaluate_v4_oracle("exp_conservation", level_three).verdict)
+
     def test_v4_item_range_oracle_compares_affected_targets(self) -> None:
         transitions = [
             {
@@ -705,13 +772,16 @@ class CliSuiteTests(unittest.TestCase):
         self.assertIn("v4-core/clean/probe", report)
         self.assertIn("v4-core/injected/probe", report)
 
-    def test_validate_faults_baseline_diff_keeps_clean_and_injected_results(self) -> None:
+    def test_approved_clean_run_baseline_is_consumed_by_validate_faults(self) -> None:
         def run_v4(_args, root, *, injected, variant=None):
-            suite_root = root / "v4-core" / str(variant)
+            if variant is None:
+                suite_root = root / "v4-core"
+            else:
+                suite_root = root / "v4-core" / str(variant)
             artifact_dir = suite_root / "probe"
-            artifact_dir.mkdir(parents=True)
+            artifact_dir.mkdir(parents=True, exist_ok=True)
             (artifact_dir / "verdict.json").write_text(
-                json.dumps({"final_verdict": "PASS" if injected else "ERROR"}),
+                json.dumps({"final_verdict": "PASS"}),
                 encoding="utf-8",
             )
             (suite_root / "suite-manifest.json").write_text(
@@ -728,39 +798,64 @@ class CliSuiteTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            approved_run = root / "approved-run"
             baseline = root / "baseline.json"
-            baseline.write_text(
-                json.dumps(
-                    {
-                        "scenarios": {
-                            "v4-core/clean/probe": {"verdict": "PASS", "stability": "stable"},
-                            "v4-core/injected/probe": {"verdict": "PASS", "stability": "stable"},
-                        }
-                    }
-                ),
-                encoding="utf-8",
+            validate_output = root / "validate-output"
+            run_args = parse_cli(
+                [
+                    "run",
+                    "--build",
+                    "player.app",
+                    "--output",
+                    str(approved_run),
+                ]
             )
-            args = parse_cli(
+            baseline_args = parse_cli(
+                [
+                    "baseline",
+                    "set",
+                    str(approved_run),
+                    "--path",
+                    str(baseline),
+                ]
+            )
+            validate_args = parse_cli(
                 [
                     "validate-faults",
                     "--build",
                     "player.app",
                     "--output",
-                    directory,
+                    str(validate_output),
                     "--baseline",
                     str(baseline),
                 ]
             )
             with patch.object(cli_module, "_run_v4_suite", side_effect=run_v4):
-                exit_code = cli_module._run_command(args)
+                with redirect_stdout(StringIO()):
+                    self.assertEqual(0, cli_module._run_command(run_args))
+                    self.assertEqual(0, cli_module._baseline_set(baseline_args))
+                    exit_code = cli_module._run_command(validate_args)
 
-            diff = json.loads((root / "regression-diff.json").read_text(encoding="utf-8"))
+            baseline_payload = json.loads(baseline.read_text(encoding="utf-8"))
+            diff = json.loads(
+                (validate_output / "regression-diff.json").read_text(encoding="utf-8")
+            )
+            report = (validate_output / "report.md").read_text(encoding="utf-8")
 
-        self.assertEqual(2, exit_code)
+        self.assertEqual({"probe"}, set(baseline_payload["scenarios"]))
+        self.assertEqual(0, exit_code)
+        self.assertEqual("qa-regression-diff/v2", diff["schema_version"])
+        self.assertEqual("paired-clean-only", diff["baseline_scope"])
         self.assertEqual(
-            {"v4-core/clean/probe", "v4-core/injected/probe"},
-            set(diff),
+            {"v4-core/clean/probe"},
+            set(diff["clean_baseline_diffs"]),
         )
+        self.assertEqual(
+            {"v4-core/injected/probe": {"verdict": "PASS", "stability": "stable"}},
+            diff["injected_current_results"],
+        )
+        self.assertIn("paired clean variants only", report)
+        self.assertIn("Injected current oracle results", report)
 
 
 if __name__ == "__main__":

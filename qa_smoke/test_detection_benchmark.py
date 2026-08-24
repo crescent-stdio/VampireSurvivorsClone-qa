@@ -630,10 +630,6 @@ def test_inspection_agreement_uses_all_three_slots_and_includes_split_error_trac
         "numerator": 9,
         "denominator": 12,
         "value": 0.75,
-        "wilson_95": {
-            "low": pytest.approx(0.4676946651),
-            "high": pytest.approx(0.9110583316),
-        },
     }
 
 
@@ -672,6 +668,8 @@ def test_json_and_korean_markdown_present_the_same_trace_level_metrics() -> None
     assert "| Clean trace | FP (1) | TN (2) |" in markdown
     assert "| Macro detection rate | 75.00% | 2 faults |" in markdown
     assert "| Micro detection rate | 66.67% | 2/3 | 20.77%–93.85% |" in markdown
+    assert "Inspection agreement (descriptive, no CI): 100.00% (18/18)" in markdown
+    assert "| Inspection agreement |" not in markdown
     assert "| health_ratio_out_of_range | 1 | 1 | 1 | 1 | 50.00% (1/2; 9.45%–90.55%) | 50.00% (1/2; 9.45%–90.55%) | 50.00% (1/2; 9.45%–90.55%) |" in markdown
     assert "| relative_position_mismatch | 1 | 0 | 0 | 1 | 100.00% (1/1; 20.65%–100.00%) | 0.00% (0/1; 0.00%–79.35%) | 100.00% (1/1; 20.65%–100.00%) |" in markdown
     assert "campaign-1" in markdown
