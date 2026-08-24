@@ -88,7 +88,7 @@ Create the scoring layer without launching Unity or calling an external model.
 - Classify `BASELINE_CONFLICT`, `FAULT_NOT_ACTIVATED`, `NOT_REACHED`, `UNOBSERVABLE`, `INSPECTION_ERROR`, and execution `ERROR` separately.
 - Treat off-target alerts from clean or fault traces as incidental candidates.
 - Aggregate three inspection passes into a trace-level majority verdict.
-- Compute target TP/FN/FP/TN at trace level, per-fault counts and rates, Wilson 95% intervals, equal-weight macro detection rate, micro detection rate, coverage, precision, specificity, clean false-positive rate, paired success rate, and inspection agreement.
+- Compute target TP/FN/FP/TN at trace level, per-fault counts and rates, Wilson 95% intervals for independent trace/pair rates, equal-weight macro detection rate, micro detection rate, coverage, precision, specificity, clean false-positive rate, paired success rate, and descriptive inspection agreement without a confidence interval.
 - Generate `qa-detection-benchmark/v1` JSON and a Korean Markdown report with a trace-level confusion matrix.
 - Add table-driven tests for every fault and for malformed values, wrong evidence, text-only alerts, partial inspection errors, invalid pairs, confidence intervals, macro/micro aggregation, and JSON/Markdown consistency.
 

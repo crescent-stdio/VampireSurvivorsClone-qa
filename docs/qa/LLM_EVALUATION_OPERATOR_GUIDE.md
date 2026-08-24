@@ -130,13 +130,13 @@ The hard cap of 700 logical calls is enforced independently by each campaign com
 
 ## Resume, integrity, and failure behavior
 
-Campaign identity binds the build content and path, project root, effective endpoint, fixed models, prompts, rubric, scenario or mission configuration, seeds, inspection normalizer, and relevant execution options. Both tracks bind autonomous steering prompt construction, its relevant code dependencies, prompt version, and planning horizon; Track B official replay unit identity remains independent of that autonomous-only unit digest. Resume behavior is fail-closed:
+Campaign identity binds the build content and path, project root, effective endpoint, fixed models, prompts, rubric, scenario or mission configuration, seeds, inspection normalizer, and relevant execution options. Both tracks also bind a versioned hash of the actual inspection request schema, sanitizer/normalizer and chunking code, output-token and truncation limits, completion policy, and retry policy. Track B separately binds a versioned source hash for private target construction, comparison, majority aggregation, and report generation. Manifests and report metadata expose only the version labels and hashes, never schema, prompt, or private target contents. Both tracks bind autonomous steering prompt construction, its relevant code dependencies, prompt version, and planning horizon; Track B official replay unit identity remains independent of that autonomous-only unit digest. Resume behavior is fail-closed:
 
 - A non-empty output without a valid `qa-campaign-checkpoint/v1` checkpoint is rejected.
 - A campaign or unit input hash mismatch is rejected; results from different builds or configurations are never mixed.
 - A completed unit is reused only when every recorded artifact still exists at the recorded path with the same size and SHA-256 digest.
 - Missing or modified unit artifacts are not trusted. The unit is rerun, and dependent inspections are invalidated and moved under `.superseded-inspections/`.
-- Failed or started-but-incomplete units are rerun. Published reports from an earlier complete pass are moved under `.superseded-results/` before new publication.
+- Failed or started-but-incomplete units are rerun. A prior complete manifest is invalidated before resume publication begins. Published reports are moved under `.superseded-results/`; Track B stages its complete six-file report set and publishes the complete manifest last. Publication or archival failure removes active score files and leaves only an `incomplete` manifest as authoritative public state.
 - Action replays validate the build hash, command sequence, command digest, and replay digest before use. A malformed or modified replay fails the command.
 
 Use a different output directory when intentionally changing any fixed input. Do not copy a checkpoint between output directories because recorded artifact paths are part of its identity.
@@ -388,7 +388,7 @@ Track A never reports a true-positive rate because clean exploration has no comp
 
 Read the two score surfaces separately:
 
-- `metrics/official.*` is the inspector-isolated result. A deterministic pilot supplies an action replay, and the same replay is run independently on clean and fault launches. Pilot traces are excluded.
+- `metrics/official.*` is the inspector-isolated result. A deterministic pilot supplies an action replay, and the same replay is run independently on clean and fault launches. Pilot traces are excluded. Official Bridge `run_id`, observation IDs, event IDs, and decision IDs use deterministic opaque hashes; fault, scenario, variant, and goal tokens remain only in the private campaign mapping and never enter the inspector payload.
 - `metrics/autonomous.*` is the end-to-end result, including pure-LLM reachability and steering as well as inspection.
 - `detection-benchmark.*` combines both for audit convenience; it must not replace the separate official and autonomous interpretation.
 
@@ -409,7 +409,7 @@ Invalid statuses are:
 | `INSPECTION_ERROR` | The three-pass verdict lacked a valid majority. |
 | `ERROR` | Gameplay or artifact execution did not complete. |
 
-Review TP/FN/FP/TN, per-case results, macro and micro detection rates, coverage, precision, specificity, clean false-positive rate, paired success rate, inspection agreement, and Wilson 95% intervals. Post-target replay divergence is retained as evidence; pre-target divergence is `NOT_REACHED`. The first result set is a baseline only and defines no detection-rate pass threshold.
+Review TP/FN/FP/TN, per-case results, macro and micro detection rates, coverage, precision, specificity, clean false-positive rate, paired success rate, and inspection agreement. Wilson 95% intervals apply only to the independent trace/pair rate metrics shown in the interval table. Inspection passes within one trace are dependent, so inspection agreement is a descriptive count and rate with no confidence interval. Post-target replay divergence is retained as evidence; pre-target divergence is `NOT_REACHED`. The first result set is a baseline only and defines no detection-rate pass threshold.
 
 ## Acceptance and artifact review
 

@@ -65,7 +65,7 @@ uv run --locked python -m qa_smoke.cli validate-faults \
   --headless
 ```
 
-`run`과 옵션이 동일하되, `config/qa-ground-truth-v4.json`에서 시나리오별 `fault_id`를 읽어 `--fault`로 주입한다. control 시나리오는 `fault_id`가 `null`이므로 주입 없이 실행된다.
+`run`과 옵션이 동일하되 각 suite를 `clean`과 `injected` 두 variant로 실행한다. clean variant에는 결함을 넣지 않는다. injected variant는 `config/qa-ground-truth-v4.json`에서 시나리오별 `fault_id`를 읽어 `--fault`로 주입한다. control 시나리오는 `fault_id`가 `null`이므로 두 variant 모두 주입 없이 실행된다.
 
 기대 결과는 결함 5개 전부 `FAIL`, control 3개 전부 `PASS`다. 결함 시나리오가 `PASS`로 나오면 오라클이 그 결함을 못 보는 것이고, control이 `FAIL`로 나오면 오라클이 오탐하는 것이다. 둘 다 하네스의 결함이지 게임의 결함이 아니다.
 
@@ -89,12 +89,20 @@ uv run --locked python -m qa_smoke.cli baseline set QAArtifacts/runs/<run> \
 ### 비교
 
 ```sh
-uv run --locked python -m qa_smoke.cli run \
+uv run --locked python -m qa_smoke.cli validate-faults \
   --build ... --suite v4-core \
   --baseline QAArtifacts/regression/baseline.json
 ```
 
-`--baseline`이 있으면 스위트 루트에 `regression-diff.json`과 `report.md`가 생기고, 판정은 개별 verdict가 아니라 **baseline 대비 변화**로 내려간다.
+`run --baseline`은 기존 단일 clean 회귀 비교를 유지한다. `validate-faults --baseline`은 `baseline set`이 만든 시나리오 id를 paired clean id에 맞춰 비교한다. injected variant는 clean baseline 비교에서 제외하고 현재 deterministic oracle 결과로 별도 표시한다. 따라서 variant 접두사를 손으로 붙인 baseline을 만들 필요가 없다.
+
+paired 비교의 `regression-diff.json`은 `qa-regression-diff/v2`이며 다음 공개 키를 갖는다.
+
+- `baseline_scope: paired-clean-only`
+- `clean_baseline_diffs`: 승인 clean baseline과 현재 clean variant의 diff
+- `injected_current_results`: baseline과 비교하지 않은 현재 injected oracle 결과
+
+`report.md`도 clean baseline diff와 injected current 결과를 별도 절로 표시한다. clean diff에 `NEW FAIL`/`STILL FAIL`이 있거나 injected current verdict가 `PASS`가 아니면 종료 코드 `1`이다. 어느 variant든 `ERROR`면 종료 코드 `2`다.
 
 | DiffKind | 조건 |
 |---|---|
@@ -113,8 +121,8 @@ uv run --locked python -m qa_smoke.cli run \
 
 | 코드 | 상황 |
 |---|---|
-| `0` | (baseline 없음) 전부 PASS / (baseline 있음) 회귀 없음 |
-| `1` | 전부 PASS가 아님 / `NEW FAIL` 또는 `STILL FAIL` 존재 |
+| `0` | (baseline 없음) 전부 PASS / (`run --baseline`) 회귀 없음 / (`validate-faults --baseline`) clean 회귀가 없고 injected current도 전부 PASS |
+| `1` | 전부 PASS가 아님 / `NEW FAIL` 또는 `STILL FAIL` 존재 / paired injected current에 non-PASS 존재 |
 | `2` | `ERROR` 존재 — 판정 불가, 인프라 문제로 취급 |
 
 ## 5. 판정 우선순위
@@ -157,11 +165,15 @@ uv run --locked python -m qa_smoke.benchmark \
 
 ```
 QAArtifacts/runs/<uuid>/
+├── report.md                        # validate-faults paired 결과 또는 --suite all 결과
+├── regression-diff.json             # validate-faults --baseline 또는 --suite all --baseline
 ├── v4-core/
-│   ├── suite-manifest.json          # 시나리오 → 시드/fault/return code/출력 경로
-│   ├── report.md                    # verdict 표 (baseline 없을 때)
-│   ├── regression-diff.json         # --baseline 지정 시
-│   └── <scenario-id>/<seed>/
+│   ├── clean/                       # validate-faults paired clean variant
+│   ├── injected/                    # validate-faults current injected variant
+│   ├── suite-manifest.json          # run 단일-variant 실행 시
+│   ├── report.md                    # run 단일-variant verdict/diff 표
+│   ├── regression-diff.json         # run --baseline 지정 시
+│   └── <scenario-id>/<seed>/        # run 단일-variant 실행 시
 │       ├── manifest.json
 │       ├── steps.jsonl              # 에이전트 채널 (raw trace)
 │       └── verdict.json             # qa-run-verdict/v2
@@ -169,7 +181,7 @@ QAArtifacts/runs/<uuid>/
     └── ...
 ```
 
-`--suite all`일 때는 `report.md`와 `regression-diff.json`이 run 루트에 놓인다.
+`validate-faults`는 clean/injected 두 suite root를 합치므로 `report.md`와 `regression-diff.json`을 run 루트에 둔다. `--suite all`도 같은 위치를 쓴다. 단일 variant인 `run`은 해당 suite root에 둔다.
 
 ## 8. 이 층이 답하지 않는 것
 
