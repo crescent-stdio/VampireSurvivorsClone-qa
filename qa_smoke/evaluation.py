@@ -370,6 +370,20 @@ def evaluate_v4_oracle(oracle_id: str, transitions: list[Transition]) -> OracleR
     """Evaluate v4 invariants against the additive raw/view observation channels."""
 
     refs = _v4_refs(transitions)
+    control_oracles: dict[str, OracleEvaluator] = {
+        "valid_observation": _valid_observation,
+        "normal_state_transitions": _normal_state_transitions,
+        "stable_long_progression": _stable_long_progression,
+    }
+    control_evaluator = control_oracles.get(oracle_id)
+    if control_evaluator is not None:
+        passed, evidence_refs, detail = control_evaluator(transitions)
+        return OracleResult(
+            verdict="pass" if passed else "fail",
+            evidence_refs=evidence_refs or refs,
+            detail=detail,
+        )
+
     if oracle_id == "view_state_match":
         for transition in transitions:
             observation = transition.get("observation") or {}
@@ -456,6 +470,9 @@ ORACLE_REGISTRY.update(
             "item_effect_applied",
             "item_hit_range",
             "exp_conservation",
+            "valid_observation",
+            "normal_state_transitions",
+            "stable_long_progression",
         )
     }
 )

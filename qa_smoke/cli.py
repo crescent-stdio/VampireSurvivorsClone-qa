@@ -57,12 +57,19 @@ def _output_root(args: argparse.Namespace) -> Path:
     return (Path("QAArtifacts") / "runs" / uuid.uuid4().hex).resolve()
 
 
-def _v4_results_root(root: Path) -> Path:
-    return root / "v4-core"
+def _suite_results_root(root: Path, suite: str, variant: str | None = None) -> Path:
+    output_root = root / suite
+    return output_root / variant if variant else output_root
 
 
-def _run_v4_suite(args: argparse.Namespace, root: Path, *, injected: bool) -> Path:
-    output_root = _v4_results_root(root)
+def _run_v4_suite(
+    args: argparse.Namespace,
+    root: Path,
+    *,
+    injected: bool,
+    variant: str | None = None,
+) -> Path:
+    output_root = _suite_results_root(root, "v4-core", variant)
     output_root.mkdir(parents=True, exist_ok=True)
     ground_truth = load_v4_ground_truth()
     v4_scenarios = load_v4_scenarios()
@@ -93,7 +100,10 @@ def _run_v4_suite(args: argparse.Namespace, root: Path, *, injected: bool) -> Pa
             run_arguments.append("--headless")
         if args.quiet:
             run_arguments.append("--quiet")
-        return_code = run_session(parse_run_args(run_arguments))
+        run_args = parse_run_args(run_arguments)
+        run_args.max_simulation_seconds = scenario.limits.max_simulation_seconds
+        run_args.max_steps = scenario.limits.max_steps
+        return_code = run_session(run_args)
         _rewrite_v4_verdict(run_dir, scenario)
         result_manifest["scenarios"][scenario.id] = {
             "legacy_scenario_id": legacy.id,
@@ -107,8 +117,14 @@ def _run_v4_suite(args: argparse.Namespace, root: Path, *, injected: bool) -> Pa
     return output_root
 
 
-def _run_legacy_suite(args: argparse.Namespace, root: Path) -> Path:
-    output_root = root / "legacy-contract"
+def _run_legacy_suite(
+    args: argparse.Namespace,
+    root: Path,
+    *,
+    injected: bool = False,
+    variant: str | None = None,
+) -> Path:
+    output_root = _suite_results_root(root, "legacy-contract", variant)
     scenarios = load_scenarios(args.project_root / "config" / "qa-scenarios.json")
     results = run_benchmark(
         scenarios,
@@ -120,16 +136,29 @@ def _run_legacy_suite(args: argparse.Namespace, root: Path) -> Path:
         policy="heuristic",
         headless=args.headless,
         quiet=args.quiet,
-        inject_faults=False,
+        inject_faults=injected,
     )
     manifest = {
         "schema_version": "qa-suite-run/v1",
         "suite": "legacy-contract",
+        "injected": injected,
         "scenarios": {
             result.scenario_id: {
                 "seed": result.seed,
                 "return_code": result.return_code,
                 "output_dir": str(result.output_dir),
+                "fault_id": (
+                    next(
+                        (
+                            scenario.ground_truth.fault_id
+                            for scenario in scenarios
+                            if scenario.id == result.scenario_id
+                        ),
+                        None,
+                    )
+                    if injected
+                    else None
+                ),
             }
             for result in results
         },
@@ -148,13 +177,29 @@ def _rewrite_v4_verdict(run_dir: Path, scenario: Any) -> None:
     steps_path = run_dir / "steps.jsonl"
     try:
         verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+        if not isinstance(verdict, dict):
+            raise ValueError("verdict.json must contain a JSON object")
         transitions = [
             json.loads(line)
             for line in steps_path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+        if any(not isinstance(transition, dict) for transition in transitions):
+            raise ValueError("steps.jsonl must contain JSON objects")
         oracle = evaluate_v4_oracle(scenario.oracle.id, transitions)
-    except (OSError, json.JSONDecodeError, ValueError):
+    except (OSError, json.JSONDecodeError) as error:
+        _write_v4_error_verdict(
+            verdict_path,
+            scenario,
+            f"invalid v4 artifact: {error}",
+        )
+        return
+    except (TypeError, ValueError) as error:
+        _write_v4_error_verdict(
+            verdict_path,
+            scenario,
+            f"v4 oracle contract failure: {error}",
+        )
         return
     verdict["schema_version"] = "qa-run-verdict/v2"
     verdict["v4_scenario_id"] = scenario.id
@@ -170,6 +215,28 @@ def _rewrite_v4_verdict(run_dir: Path, scenario: Any) -> None:
     else:
         verdict["final_verdict"] = "PASS"
     verdict_path.write_text(json.dumps(verdict, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_v4_error_verdict(verdict_path: Path, scenario: Any, error: str) -> None:
+    try:
+        payload = json.loads(verdict_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload.update(
+        {
+            "schema_version": "qa-run-verdict/v2",
+            "v4_scenario_id": scenario.id,
+            "v4_oracle_id": scenario.oracle.id,
+            "oracle_verdict": "not_evaluated",
+            "evidence_refs": [],
+            "final_verdict": "ERROR",
+            "error": error,
+        }
+    )
+    verdict_path.parent.mkdir(parents=True, exist_ok=True)
+    verdict_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _verdict_from_artifact(path: Path) -> str:
@@ -218,12 +285,23 @@ def _write_suite_report(path: Path, results: dict[str, ScenarioResult]) -> None:
 def _run_command(args: argparse.Namespace) -> int:
     root = _output_root(args)
     suite_roots: list[Path] = []
-    if args.suite in {"v4-core", "all"}:
-        suite_roots.append(
-            _run_v4_suite(args, root, injected=args.command == "validate-faults")
-        )
-    if args.suite in {"legacy-contract", "all"}:
-        suite_roots.append(_run_legacy_suite(args, root))
+    if args.command == "validate-faults":
+        variants = ((False, "clean"), (True, "injected"))
+        if args.suite in {"v4-core", "all"}:
+            for injected, variant in variants:
+                suite_roots.append(
+                    _run_v4_suite(args, root, injected=injected, variant=variant)
+                )
+        if args.suite in {"legacy-contract", "all"}:
+            for injected, variant in variants:
+                suite_roots.append(
+                    _run_legacy_suite(args, root, injected=injected, variant=variant)
+                )
+    else:
+        if args.suite in {"v4-core", "all"}:
+            suite_roots.append(_run_v4_suite(args, root, injected=False))
+        if args.suite in {"legacy-contract", "all"}:
+            suite_roots.append(_run_legacy_suite(args, root))
     current: dict[str, ScenarioResult] = {}
     for suite_root in suite_roots:
         current.update(_collect_suite_results(suite_root))

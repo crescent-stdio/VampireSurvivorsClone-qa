@@ -239,6 +239,13 @@ class V4Scenario(StrictModel):
             raise ValueError("legacy_scenario_id must not be empty")
         return self
 
+    def select_seed(self, requested: int) -> int:
+        if requested not in self.seeds:
+            raise ScenarioContractError(
+                f"seed {requested} is not in v4 scenario {self.id!r} seeds {self.seeds}"
+            )
+        return requested
+
 
 class V4ScenarioDocument(StrictModel):
     schema_version: Literal["qa-scenarios/v4"] = Field(alias="schema")

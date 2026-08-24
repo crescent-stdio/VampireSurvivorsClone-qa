@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from qa_smoke.adapters import EpisodeExit, VampireSurvivorsAdapter
 from qa_smoke.regression import DiffKind, ScenarioResult, diff_scenario_results
@@ -13,6 +14,7 @@ from qa_smoke.reporting import RunRecorder
 from qa_smoke.reporting import build_run_verdict
 from qa_smoke.evaluation import evaluate_v4_oracle
 from qa_smoke import run as run_module
+from qa_smoke import cli as cli_module
 from qa_smoke.cli import parse_cli
 from qa_smoke.scenarios import load_scenarios, load_v4_scenarios
 from qa_smoke.state_channels import build_state_channels, build_agent_observation
@@ -199,6 +201,166 @@ class V4ScenarioTests(unittest.TestCase):
 
         self.assertEqual("fail", result.verdict)
 
+    def test_v4_control_oracles_accept_their_valid_traces(self) -> None:
+        valid_observation = [
+            {
+                "observation": {
+                    "observation_id": "obs-valid",
+                    "player": {
+                        "present": True,
+                        "health": 5.0,
+                        "max_health": 10.0,
+                        "health_ratio": 0.5,
+                        "position": {"x": 0.0, "y": 0.0},
+                    },
+                    "world": {"qa_entities": []},
+                }
+            }
+        ]
+        normal_transitions = [
+            {
+                "decision": {"action": "observe"},
+                "observation": {
+                    "observation_id": "obs-before-upgrade",
+                    "inventory": {"abilities": []},
+                    "world": {"chest_count": 1},
+                    "progress": {"coins_gained": 0, "damage_dealt": 0, "damage_taken": 0},
+                },
+            },
+            {
+                "decision": {"action": "select_upgrade"},
+                "observation": {
+                    "observation_id": "obs-after-upgrade",
+                    "inventory": {"abilities": [{"id": "whip"}]},
+                    "world": {"chest_count": 1},
+                    "progress": {"coins_gained": 0, "damage_dealt": 0, "damage_taken": 0},
+                },
+            },
+            {
+                "decision": {"action": "observe"},
+                "observation": {
+                    "observation_id": "obs-chest",
+                    "world": {"chest_count": 0},
+                    "progress": {"coins_gained": 0, "damage_dealt": 0, "damage_taken": 0},
+                    "event_state": {"type": "chest_collected"},
+                },
+            },
+        ]
+        stable_progression = [
+            {
+                "observation": {
+                    "observation_id": "obs-long",
+                    "player": {
+                        "present": True,
+                        "health": 10.0,
+                        "max_health": 10.0,
+                        "health_ratio": 1.0,
+                        "exp": 1.0,
+                        "next_level_exp": 2.0,
+                        "exp_ratio": 0.5,
+                    },
+                }
+            }
+        ]
+
+        for oracle_id, transitions in (
+            ("valid_observation", valid_observation),
+            ("normal_state_transitions", normal_transitions),
+            ("stable_long_progression", stable_progression),
+        ):
+            with self.subTest(oracle_id=oracle_id):
+                self.assertEqual("pass", evaluate_v4_oracle(oracle_id, transitions).verdict)
+
+    def test_v4_rewrite_marks_an_unreadable_trace_as_error(self) -> None:
+        scenario = next(item for item in load_v4_scenarios() if item.id == "control-easy-observation")
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            (run_dir / "verdict.json").write_text(
+                json.dumps(
+                    {
+                        "execution_status": "completed",
+                        "oracle_verdict": "pass",
+                        "final_verdict": "PASS",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "steps.jsonl").write_text("{not-json}\n", encoding="utf-8")
+
+            cli_module._rewrite_v4_verdict(run_dir, scenario)
+
+            rewritten = json.loads((run_dir / "verdict.json").read_text(encoding="utf-8"))
+            self.assertEqual("qa-run-verdict/v2", rewritten["schema_version"])
+            self.assertEqual("control-easy-observation", rewritten["v4_scenario_id"])
+            self.assertEqual("valid_observation", rewritten["v4_oracle_id"])
+            self.assertEqual("ERROR", rewritten["final_verdict"])
+            self.assertIn("invalid v4 artifact", rewritten["error"])
+
+    def test_v4_rewrite_marks_an_oracle_contract_failure_as_error(self) -> None:
+        scenario = SimpleNamespace(
+            id="invalid-v4-scenario",
+            oracle=SimpleNamespace(id="missing-oracle"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            (run_dir / "verdict.json").write_text(
+                json.dumps({"execution_status": "completed", "final_verdict": "PASS"}),
+                encoding="utf-8",
+            )
+            (run_dir / "steps.jsonl").write_text(
+                json.dumps({"observation": {"observation_id": "obs-1"}}) + "\n",
+                encoding="utf-8",
+            )
+
+            cli_module._rewrite_v4_verdict(run_dir, scenario)
+
+            rewritten = json.loads((run_dir / "verdict.json").read_text(encoding="utf-8"))
+            self.assertEqual("ERROR", rewritten["final_verdict"])
+            self.assertEqual("not_evaluated", rewritten["oracle_verdict"])
+            self.assertIn("v4 oracle contract failure", rewritten["error"])
+
+    def test_v4_suite_forwards_its_own_limits_to_the_run(self) -> None:
+        scenario = next(item for item in load_v4_scenarios() if item.id == "medium-item-hit-range")
+        captured: list[SimpleNamespace] = []
+        args = SimpleNamespace(
+            build=Path("player.app"),
+            project_root=Path.cwd(),
+            seed=None,
+            headless=False,
+            quiet=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.object(cli_module, "load_v4_scenarios", return_value=[scenario]),
+                patch.object(cli_module, "load_v4_ground_truth", return_value={}),
+                patch.object(cli_module, "run_session", side_effect=lambda run_args: captured.append(run_args) or 0),
+            ):
+                cli_module._run_v4_suite(args, Path(directory), injected=False)
+
+        self.assertEqual(1, len(captured))
+        self.assertEqual(120.0, captured[0].max_simulation_seconds)
+        self.assertEqual(40, captured[0].max_steps)
+
+    def test_v4_suite_accepts_a_configured_seed(self) -> None:
+        scenario = next(item for item in load_v4_scenarios() if item.id == "medium-item-hit-range")
+        captured: list[SimpleNamespace] = []
+        args = SimpleNamespace(
+            build=Path("player.app"),
+            project_root=Path.cwd(),
+            seed=9102,
+            headless=False,
+            quiet=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.object(cli_module, "load_v4_scenarios", return_value=[scenario]),
+                patch.object(cli_module, "load_v4_ground_truth", return_value={}),
+                patch.object(cli_module, "run_session", side_effect=lambda run_args: captured.append(run_args) or 0),
+            ):
+                cli_module._run_v4_suite(args, Path(directory), injected=False)
+
+        self.assertEqual(9102, captured[0].seed)
+
 
 class VerdictAndDiffTests(unittest.TestCase):
     def test_final_verdict_applies_error_fail_not_reached_pass_precedence(self) -> None:
@@ -283,6 +445,139 @@ class VerdictAndDiffTests(unittest.TestCase):
         self.assertEqual("v4-core", run_args.suite)
         self.assertEqual("baseline", baseline_args.command)
         self.assertEqual("set", baseline_args.baseline_action)
+
+
+class CliSuiteTests(unittest.TestCase):
+    def test_v4_clean_and_injected_manifests_remain_separate(self) -> None:
+        scenario = next(item for item in load_v4_scenarios() if item.id == "easy-hp-on-hit")
+        args = SimpleNamespace(
+            build=Path("player.app"),
+            project_root=Path.cwd(),
+            seed=None,
+            headless=False,
+            quiet=True,
+        )
+
+        def write_artifacts(run_args):
+            run_args.output.mkdir(parents=True)
+            (run_args.output / "verdict.json").write_text(
+                json.dumps({"execution_status": "completed"}), encoding="utf-8"
+            )
+            (run_args.output / "steps.jsonl").write_text(
+                json.dumps({"observation": {"observation_id": "obs-1"}}) + "\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.object(cli_module, "load_v4_scenarios", return_value=[scenario]),
+                patch.object(
+                    cli_module,
+                    "load_v4_ground_truth",
+                    return_value={scenario.id: {"fault_id": "health_ratio_out_of_range"}},
+                ),
+                patch.object(cli_module, "run_session", side_effect=write_artifacts),
+            ):
+                clean_root = cli_module._run_v4_suite(args, root, injected=False, variant="clean")
+                injected_root = cli_module._run_v4_suite(args, root, injected=True, variant="injected")
+
+            clean_manifest = json.loads((clean_root / "suite-manifest.json").read_text(encoding="utf-8"))
+            injected_manifest = json.loads((injected_root / "suite-manifest.json").read_text(encoding="utf-8"))
+
+        self.assertFalse(clean_manifest["injected"])
+        self.assertIsNone(clean_manifest["scenarios"][scenario.id]["fault_id"])
+        self.assertTrue(injected_manifest["injected"])
+        self.assertEqual(
+            "health_ratio_out_of_range",
+            injected_manifest["scenarios"][scenario.id]["fault_id"],
+        )
+
+    def test_legacy_injected_suite_forwards_faults_and_records_an_injected_manifest(self) -> None:
+        scenario = next(item for item in load_scenarios() if item.id == "easy-health-ratio")
+        args = SimpleNamespace(
+            build=Path("player.app"),
+            project_root=Path.cwd(),
+            seed=None,
+            headless=False,
+            quiet=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_dir = root / "legacy-contract" / "injected" / scenario.id / "9101"
+            result = SimpleNamespace(
+                scenario_id=scenario.id,
+                seed=9101,
+                return_code=0,
+                output_dir=output_dir,
+            )
+            with (
+                patch.object(cli_module, "load_scenarios", return_value=[scenario]),
+                patch.object(cli_module, "run_benchmark", return_value=[result]) as run_benchmark,
+            ):
+                suite_root = cli_module._run_legacy_suite(
+                    args,
+                    root,
+                    injected=True,
+                    variant="injected",
+                )
+
+            manifest = json.loads((suite_root / "suite-manifest.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(run_benchmark.call_args.kwargs["inject_faults"])
+        self.assertTrue(manifest["injected"])
+        self.assertEqual("health_ratio_out_of_range", manifest["scenarios"][scenario.id]["fault_id"])
+
+    def test_validate_faults_all_runs_clean_and_injected_variants_for_both_suites(self) -> None:
+        calls: list[tuple[str, bool, str | None]] = []
+
+        def write_suite(suite: str):
+            def run_suite(_args, root, *, injected, variant=None):
+                calls.append((suite, injected, variant))
+                suite_root = root / suite / str(variant)
+                output_dir = suite_root / "probe"
+                output_dir.mkdir(parents=True)
+                (output_dir / "verdict.json").write_text(
+                    json.dumps({"final_verdict": "FAIL" if injected else "PASS"}),
+                    encoding="utf-8",
+                )
+                (suite_root / "suite-manifest.json").write_text(
+                    json.dumps({"scenarios": {"probe": {"output_dir": str(output_dir)}}}),
+                    encoding="utf-8",
+                )
+                return suite_root
+
+            return run_suite
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = parse_cli(
+                [
+                    "validate-faults",
+                    "--build",
+                    "player.app",
+                    "--suite",
+                    "all",
+                    "--output",
+                    directory,
+                ]
+            )
+            with (
+                patch.object(cli_module, "_run_v4_suite", side_effect=write_suite("v4-core")),
+                patch.object(cli_module, "_run_legacy_suite", side_effect=write_suite("legacy-contract")),
+            ):
+                exit_code = cli_module._run_command(args)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            [
+                ("v4-core", False, "clean"),
+                ("v4-core", True, "injected"),
+                ("legacy-contract", False, "clean"),
+                ("legacy-contract", True, "injected"),
+            ],
+            calls,
+        )
 
 
 if __name__ == "__main__":
