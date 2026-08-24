@@ -377,10 +377,11 @@ def _benchmark_detection(args: argparse.Namespace) -> int:
     from .detection_campaign import (
         BenchmarkCampaignConfig,
         BridgeCampaignBackend,
-        CampaignContractError,
         LLMInspectorAdapter,
+        record_detection_initialization_failure,
         run_detection_campaign,
     )
+    from .memory import sanitize_error_type
 
     config = BenchmarkCampaignConfig(
         build=args.build,
@@ -391,15 +392,35 @@ def _benchmark_detection(args: argparse.Namespace) -> int:
         api_url=args.api_url,
     )
     try:
-        result = run_detection_campaign(
-            config,
-            backend=BridgeCampaignBackend(config),
-            inspector=LLMInspectorAdapter(api_url=args.api_url),
-        )
-    except CampaignContractError as error:
+        backend = BridgeCampaignBackend(config)
+        inspector = LLMInspectorAdapter(api_url=args.api_url)
+    except Exception as error:
+        safe_error_type = sanitize_error_type(type(error).__name__) or "Exception"
+        try:
+            record_detection_initialization_failure(config, error)
+        except Exception as manifest_error:
+            safe_error_type = (
+                sanitize_error_type(type(manifest_error).__name__) or "Exception"
+            )
         print(
             json.dumps(
-                {"status": "incomplete", "error_type": type(error).__name__},
+                {"status": "incomplete", "error_type": safe_error_type},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        result = run_detection_campaign(
+            config,
+            backend=backend,
+            inspector=inspector,
+        )
+    except Exception as error:
+        safe_error_type = sanitize_error_type(type(error).__name__) or "Exception"
+        print(
+            json.dumps(
+                {"status": "incomplete", "error_type": safe_error_type},
                 ensure_ascii=False,
             ),
             file=sys.stderr,

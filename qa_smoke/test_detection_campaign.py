@@ -617,6 +617,85 @@ def test_complete_checkpoints_resume_without_repeating_external_work(tmp_path: P
     assert resumed_inspector.requests == []
 
 
+def test_autonomous_steering_prompt_identity_rejects_changed_resume_only_for_llm_units(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = config(tmp_path)
+    campaign.run_detection_campaign(
+        settings,
+        backend=FakeBackend(),
+        inspector=FakeInspector(),
+    )
+
+    unchanged_backend = FakeBackend()
+    unchanged = campaign.run_detection_campaign(
+        settings,
+        backend=unchanged_backend,
+        inspector=FakeInspector(),
+    )
+    assert unchanged.resumed is True
+    assert unchanged_backend.pilots == []
+    assert unchanged_backend.replays == []
+    assert unchanged_backend.autonomous == []
+    manifest = json.loads(unchanged.manifest_path.read_text())
+    assert manifest["hashes"]["steering_prompt"] == campaign._steering_prompt_digest()
+    assert (
+        manifest["steering_prompt_version"]
+        == campaign.STEERING_PROMPT_TEMPLATE_VERSION
+    )
+    assert "planning_system_prompt" not in unchanged.manifest_path.read_text()
+
+    bindings = campaign.load_fault_bindings(settings.project_root)
+    schedule = campaign.build_track_b_schedule(bindings)
+    official = schedule.official_pairs[0].clean
+    autonomous = schedule.autonomous_pairs[0].clean
+    official_hash = campaign._unit_hash(
+        campaign_hash="fixed-campaign",
+        spec=official,
+        replay_digest="fixed-replay",
+    )
+    autonomous_hash = campaign._unit_hash(
+        campaign_hash="fixed-campaign",
+        spec=autonomous,
+    )
+
+    with monkeypatch.context() as horizon_patch:
+        horizon_patch.setattr(campaign, "STEERING_PLAN_HORIZON_SECONDS", 7.5)
+        assert campaign._unit_hash(
+            campaign_hash="fixed-campaign",
+            spec=official,
+            replay_digest="fixed-replay",
+        ) == official_hash
+        assert campaign._unit_hash(
+            campaign_hash="fixed-campaign",
+            spec=autonomous,
+        ) != autonomous_hash
+
+    monkeypatch.setattr(
+        campaign,
+        "_steering_prompt_digest",
+        lambda: "changed-autonomous-steering-prompt-digest",
+        raising=False,
+    )
+
+    assert campaign._unit_hash(
+        campaign_hash="fixed-campaign",
+        spec=official,
+        replay_digest="fixed-replay",
+    ) == official_hash
+    assert campaign._unit_hash(
+        campaign_hash="fixed-campaign",
+        spec=autonomous,
+    ) != autonomous_hash
+    with pytest.raises(campaign.CampaignContractError, match="campaign hash mismatch"):
+        campaign.run_detection_campaign(
+            settings,
+            backend=FakeBackend(),
+            inspector=FakeInspector(),
+        )
+
+
 def test_regenerated_episode_invalidates_only_its_dependent_inspections(
     tmp_path: Path,
 ) -> None:
@@ -1059,6 +1138,50 @@ def test_benchmark_detection_cli_returns_nonzero_for_incomplete_campaign(
     monkeypatch.setattr(campaign, "run_detection_campaign", fail_campaign)
 
     assert cli_module._benchmark_detection(parsed) == 2
+
+
+def test_benchmark_detection_cli_sanitizes_inspector_initialization_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = config(tmp_path)
+    parsed = parse_cli(
+        [
+            "benchmark-detection",
+            "--build",
+            str(settings.build),
+            "--project-root",
+            str(settings.project_root),
+            "--output",
+            str(settings.output),
+        ]
+    )
+    secret = "credential=fake-secret at /private/provider"
+
+    def fail_inspector(*_args, **_kwargs):
+        raise ValueError(secret)
+
+    monkeypatch.setattr(campaign, "LLMInspectorAdapter", fail_inspector)
+
+    assert cli_module._benchmark_detection(parsed) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "incomplete",
+        "error_type": "ValueError",
+    }
+    assert "Traceback" not in captured.err
+    assert secret not in captured.err
+    manifest_text = (settings.output / "campaign-manifest.json").read_text()
+    manifest = json.loads(manifest_text)
+    assert manifest["status"] == "incomplete"
+    assert manifest["failure"] == {
+        "status": "model_failure",
+        "error_type": "ValueError",
+    }
+    assert secret not in manifest_text
 
 
 def test_bridge_backend_reuses_run_session_for_pilot_and_blind_llm_autonomous(

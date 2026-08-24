@@ -122,13 +122,15 @@ The chunk count for a trace is based on 32 observations with overlap two: step l
 - Track A: `(1 × 3 seeds × 3 passes) + (2 × 3 × 3) + (6 missions × 3 chunks × 3 seeds × 3 passes) = 189` logical calls.
 - Track B official: the private schedule has four 20-step, four 40-step, and three 80-step cases; three seeds and two variants produce 24, 24, and 18 traces. `(24 traces × 1 chunk + 24 × 2 + 18 × 3) × 3 passes = 378` logical calls.
 - Track B autonomous: one seed and two variants produce 8, 8, and 6 traces at those limits. `(8 traces × 1 chunk + 8 × 2 + 6 × 3) × 3 passes = 126` logical calls.
-- Cross-track maximum: `189 + 378 + 126 = 693` logical calls, below the hard cap of 700.
+- Fresh fixed-schedule plan across the two documented workflows: `189 + 378 + 126 = 693` logical calls.
 
-A logical call is one chunk in one inspection pass, not an HTTP attempt. A logical call may perform at most two completion requests, for example when the first structured response needs correction. Each completion request permits at most three HTTP attempts and at most 45 cumulative seconds sleeping between retries. The checkpoint records `logical_calls` and `http_attempts` separately. Do not raise these limits to hide provider or schema failures.
+A logical call is one chunk in one inspection pass, not an HTTP attempt. A second completion request is made only when the first response has `finish_reason=length`; it is truncation recovery, not generic schema or structured-response correction. Each completion request permits at most three HTTP attempts and at most 45 cumulative seconds sleeping between transport retries. The checkpoint records `logical_calls` and `http_attempts` separately.
+
+The hard cap of 700 logical calls is enforced independently by each campaign command against that output directory's checkpoint. It is not a cross-command global counter or a guarantee that two resumed or rerun directories will stay below 700 in aggregate. A fresh fixed Track A plus Track B schedule plans 693 calls; completed reusable inspection chunks do not add calls on resume, while failed or invalidated chunks retain their recorded calls and every rerun attempt adds a new logical call. HTTP retries add `http_attempts`, not logical calls. Do not raise these limits to hide provider or schema failures.
 
 ## Resume, integrity, and failure behavior
 
-Campaign identity binds the build content and path, project root, effective endpoint, fixed models, prompts, rubric, scenario or mission configuration, seeds, inspection normalizer, and relevant execution options. Track A also binds the steering prompt construction. Resume behavior is fail-closed:
+Campaign identity binds the build content and path, project root, effective endpoint, fixed models, prompts, rubric, scenario or mission configuration, seeds, inspection normalizer, and relevant execution options. Both tracks bind autonomous steering prompt construction, its relevant code dependencies, prompt version, and planning horizon; Track B official replay unit identity remains independent of that autonomous-only unit digest. Resume behavior is fail-closed:
 
 - A non-empty output without a valid `qa-campaign-checkpoint/v1` checkpoint is rejected.
 - A campaign or unit input hash mismatch is rejected; results from different builds or configurations are never mixed.
@@ -143,10 +145,10 @@ Both campaign commands use these process outcomes:
 
 | Exit | Meaning |
 |---:|---|
-| `0` | The complete manifest and reports were published. This is infrastructure completion, not a detection-rate pass. |
-| `2` | Argument, configuration, build, credential, checkpoint, replay, gameplay, inspection, publication, or campaign contract failure. Review the `incomplete` manifest and checkpoint when the output was safe to publish; an invalid or non-resumable output may be rejected before either file can be written. |
+| `0` | The complete manifest and reports were published. This may include trace-level invalid statuses such as `INSPECTION_ERROR`; it is infrastructure completion, not a detection-rate pass. |
+| `2` | Campaign-level argument, configuration, build, credential or model initialization, checkpoint, replay, gameplay, inspection contract, publication, or infrastructure failure. Review the `incomplete` manifest and checkpoint when the output was safe to publish; an invalid or non-resumable output may be rejected before either file can be written. |
 
-There is no exit code `1` gameplay-quality threshold for these commands. A first-run detection rate never creates a performance gate. Infrastructure contract violations still fail closed with exit code 2. During execution `campaign-manifest.json` has status `running`; success replaces it with `complete`, and failure publishes `incomplete`. Final JSON and Markdown reports are authoritative only beside a `complete` manifest.
+There is no exit code `1` gameplay-quality threshold for these commands. A first-run detection rate never creates a performance gate. A failed or malformed individual model response is recorded as a failed pass; when the three-pass trace verdict has no valid majority, that trace is `INSPECTION_ERROR`, the pair is invalid, and the campaign can still publish `complete` with exit 0. Campaign-level initialization, infrastructure, cap, artifact, or contract failures instead fail closed with `incomplete` and exit 2. During execution `campaign-manifest.json` has status `running`; success replaces it with `complete`, and campaign failure publishes `incomplete`. Final JSON and Markdown reports are authoritative only beside a `complete` manifest.
 
 ## Artifact layout
 
@@ -394,7 +396,9 @@ The private evaluator counts a detection only when a numeric finding names a rea
 
 The confusion-matrix unit is one trace verdict after three inspection passes, never one model call. Two detecting passes produce a target alert; two non-detecting passes produce no target alert. Fewer than two valid passes, or a one-to-one split among only two valid passes, produces `INSPECTION_ERROR`. Valid fault traces become TP/FN and valid clean traces become FP/TN.
 
-The report removes invalid traces from conditional detection denominators and lists them separately:
+Validity is paired: if either the clean trace or the fault trace has an invalid status, the entire pair is excluded. Neither trace in that pair contributes to TP/FN/FP/TN or their derived denominators, even if the other trace has a confusion verdict. The report still counts each invalid trace status separately, so one invalid pair can contribute one or two invalid-trace counts.
+
+Invalid statuses are:
 
 | Status | Interpretation |
 |---|---|
@@ -439,7 +443,7 @@ scripts/qa/test-editmode.sh
 scripts/qa/test-playmode.sh
 ```
 
-For a real-model acceptance, run the clean harness and both campaign commands from this guide with a clean current build and an approved credential. A complete live acceptance requires all 145 scheduled gameplay launches and up to 693 logical inspection calls; unit tests use fake adapters and do not substitute for this run.
+For a real-model acceptance, run the clean harness and both campaign commands from this guide with a clean current build and an approved credential. A fresh complete live acceptance executes the 145-launch schedule and plans 693 logical inspection calls across Track A and Track B. Each command enforces its own 700-call checkpoint cap; resumed or rerun work follows the cumulative accounting described above. Unit tests use fake adapters and do not substitute for this run.
 
 Before accepting a campaign:
 

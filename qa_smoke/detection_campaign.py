@@ -37,6 +37,7 @@ from .inspector import (
 )
 from .memory import sanitize_error_type as _sanitize_error_type
 from .planners import LLMPlanner, observation_phase, resolve_llm_api_url
+from .reporting import RunRecorder
 from .run import execute_game_action, parse_args as parse_run_args, run_session
 from .scenarios import load_scenarios, load_v4_ground_truth, load_v4_scenarios
 
@@ -46,6 +47,10 @@ CAMPAIGN_MANIFEST_SCHEMA = "qa-campaign-manifest/v1"
 CHECKPOINT_SCHEMA = "qa-campaign-checkpoint/v1"
 INSPECTION_AUDIT_SCHEMA = "qa-inspection-audit/v1"
 STEERING_MODEL = "gpt-4o-mini"
+STEERING_PROMPT_TEMPLATE_VERSION = str(
+    RunRecorder.__dataclass_fields__["prompt_version"].default
+)
+STEERING_PLAN_HORIZON_SECONDS = 5.0
 INSPECTOR_MODEL = "gpt-5.6-luna"
 INSPECTOR_EFFORT = "low"
 SEEDS = (9101, 9102, 9103)
@@ -272,6 +277,14 @@ def hash_path(path: Path) -> str:
 
 def _file_hash(path: Path) -> str:
     return hash_path(path) if path.exists() else _sha256("missing")
+
+
+def _steering_prompt_digest() -> str:
+    """Reuse Track A's stable digest for the shared autonomous planner implementation."""
+
+    from .exploration_campaign import _steering_prompt_digest as track_a_digest
+
+    return track_a_digest()
 
 
 def _public_api_endpoint_hash(api_url: str | None) -> str:
@@ -1049,6 +1062,9 @@ def _campaign_hash(config: BenchmarkCampaignConfig, build_hash: str) -> str:
             "headless": config.headless,
             "quiet": config.quiet,
             "steering_model": STEERING_MODEL,
+            "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
+            "steering_prompt": _steering_prompt_digest(),
+            "steering_plan_horizon_seconds": STEERING_PLAN_HORIZON_SECONDS,
             "inspector_model": INSPECTOR_MODEL,
             "inspector_effort": INSPECTOR_EFFORT,
             "inspector_prompt_hash": _sha256(INSPECTOR_SYSTEM_PROMPT),
@@ -1117,6 +1133,15 @@ def _unit_hash(
             "campaign_hash": campaign_hash,
             "spec": asdict(spec),
             "replay_digest": replay_digest,
+            "autonomous_steering": (
+                {
+                    "prompt_digest": _steering_prompt_digest(),
+                    "prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
+                    "plan_horizon_seconds": STEERING_PLAN_HORIZON_SECONDS,
+                }
+                if isinstance(spec, AutonomousEpisodeSpec)
+                else None
+            ),
         }
     )
 
@@ -1375,6 +1400,7 @@ def _write_incomplete_manifest(
     checkpoint: CheckpointStore,
     error: Exception,
     api_url: str | None,
+    failure_status: str = "failed",
 ) -> None:
     _atomic_write_json(
         output / "campaign-manifest.json",
@@ -1388,14 +1414,16 @@ def _write_incomplete_manifest(
                 "config": campaign_hash,
                 "rubric": _file_hash(project_root / "config" / "qa-detection-rubric.json"),
                 "api_endpoint": _public_api_endpoint_hash(api_url),
+                "steering_prompt": _steering_prompt_digest(),
             },
+            "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
             "counts": {
                 "logical_inspection_calls": checkpoint.logical_calls,
                 "http_attempts": checkpoint.http_attempts,
             },
             "failure": {
-                "status": "failed",
-                "error_type": type(error).__name__,
+                "status": failure_status,
+                "error_type": _sanitize_error_type(type(error).__name__) or "Exception",
             },
         },
     )
@@ -1438,9 +1466,35 @@ def _write_running_manifest(
                 "config": campaign_hash,
                 "rubric": _file_hash(project_root / "config" / "qa-detection-rubric.json"),
                 "api_endpoint": _public_api_endpoint_hash(api_url),
+                "steering_prompt": _steering_prompt_digest(),
             },
+            "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
         },
     )
+
+
+def record_detection_initialization_failure(
+    config: BenchmarkCampaignConfig,
+    error: Exception,
+) -> Path:
+    """Publish a safe incomplete Track B manifest before gameplay starts."""
+
+    build_hash = hash_path(config.build)
+    campaign_hash = _campaign_hash(config, build_hash)
+    output = config.output.resolve()
+    checkpoint = _prepare_campaign_output(output, campaign_hash)
+    _supersede_published_results(output)
+    _write_incomplete_manifest(
+        output=output,
+        campaign_hash=campaign_hash,
+        build_hash=build_hash,
+        project_root=config.project_root,
+        checkpoint=checkpoint,
+        error=error,
+        api_url=config.api_url,
+        failure_status="model_failure",
+    )
+    return output / "campaign-manifest.json"
 
 
 def run_detection_campaign(
@@ -1668,11 +1722,13 @@ def _run_detection_campaign_impl(
             "steering_model": _sha256(STEERING_MODEL),
             "inspector_model": _sha256(INSPECTOR_MODEL),
             "inspector_prompt": _sha256(INSPECTOR_SYSTEM_PROMPT),
+            "steering_prompt": _steering_prompt_digest(),
             "rubric": _file_hash(
                 config.project_root / "config" / "qa-detection-rubric.json"
             ),
             "api_endpoint": _public_api_endpoint_hash(config.api_url),
         },
+        "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
         "models": {
             "steering": STEERING_MODEL,
             "inspection": INSPECTOR_MODEL,
@@ -1680,6 +1736,7 @@ def _run_detection_campaign_impl(
         },
         "limits": {
             "logical_inspection_call_cap": LOGICAL_INSPECTION_CALL_CAP,
+            "autonomous_plan_horizon_seconds": STEERING_PLAN_HORIZON_SECONDS,
             "planned_track_a": planned_calls["track_a"],
             "planned_track_b": planned_calls["track_b"],
             "planned_cross_track_max": planned_calls["cross_track"],
@@ -1821,6 +1878,8 @@ class BridgeCampaignBackend:
                 NEUTRAL_REACHABILITY_GOAL,
                 "--max-source-steps",
                 "0",
+                "--plan-horizon-seconds",
+                str(STEERING_PLAN_HORIZON_SECONDS),
                 "--max-simulation-seconds",
                 str(spec.max_simulation_seconds),
                 "--max-steps",
