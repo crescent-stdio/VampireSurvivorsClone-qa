@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import shutil
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
@@ -130,6 +132,38 @@ class InspectionResponseError(InspectionPassFailure):
     """Raised after a malformed model response has been safely audited."""
 
 
+_PUBLIC_ERROR_TYPE_NAMES = frozenset(
+    name
+    for name, value in vars(builtins).items()
+    if isinstance(value, type) and issubclass(value, BaseException)
+) | frozenset(
+    {
+        "CampaignContractError",
+        "CampaignExecutionError",
+        "ReportPublicationError",
+        "InspectionPassFailure",
+        "InspectionCallError",
+        "InspectionResponseError",
+    }
+)
+
+
+def _public_error_type(value: Any) -> str:
+    """Reduce a free-form failure to one bounded public error identifier."""
+
+    if isinstance(value, BaseException):
+        return _sanitize_error_type(type(value).__name__) or "Exception"
+    if isinstance(value, type) and issubclass(value, BaseException):
+        return _sanitize_error_type(value.__name__) or "Exception"
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    candidate = text.partition(":")[0].strip()
+    if candidate not in _PUBLIC_ERROR_TYPE_NAMES:
+        return "Exception"
+    return _sanitize_error_type(candidate) or "Exception"
+
+
 @dataclass(frozen=True)
 class FaultBinding:
     fault_id: str
@@ -199,7 +233,7 @@ class EpisodeResult:
             "coverage_override": self.coverage_override,
             "oracle_override": self.oracle_override,
             "divergence_evidence": self.divergence_evidence,
-            "error": self.error,
+            "error": _public_error_type(self.error),
         }
 
     @classmethod
@@ -315,23 +349,29 @@ def _file_hash(path: Path) -> str:
     return hash_path(path) if path.exists() else _sha256("missing")
 
 
+@lru_cache(maxsize=1)
+def _inspection_contract_source_hashes() -> dict[str, str]:
+    """Freeze hashes of code loaded for this process before a long campaign."""
+
+    return {
+        name: _file_hash(Path(__file__).with_name(name))
+        for name in (
+            "detection_campaign.py",
+            "inspector.py",
+            "memory.py",
+            "planners.py",
+            "state_channels.py",
+        )
+    }
+
+
 def _inspection_request_contract_digest() -> str:
     """Bind resume to the exact sanitized inspection request and retry contract."""
 
-    source_names = (
-        "detection_campaign.py",
-        "inspector.py",
-        "memory.py",
-        "planners.py",
-        "state_channels.py",
-    )
     return _sha256(
         {
             "version": INSPECTION_REQUEST_CONTRACT_VERSION,
-            "sources": {
-                name: _file_hash(Path(__file__).with_name(name))
-                for name in source_names
-            },
+            "sources": _inspection_contract_source_hashes(),
             "schema": _sha256(FINDINGS_SCHEMA),
             "schema_version": INSPECTION_SCHEMA_V2,
             "normalizer_version": INSPECTION_NORMALIZER_VERSION,
@@ -351,21 +391,27 @@ def _inspection_request_contract_digest() -> str:
     )
 
 
+@lru_cache(maxsize=1)
+def _scoring_contract_source_hashes() -> dict[str, str]:
+    """Freeze scoring source hashes for the lifetime of the loaded evaluator."""
+
+    return {
+        name: _file_hash(Path(__file__).with_name(name))
+        for name in (
+            "detection_benchmark.py",
+            "evaluation.py",
+            "scenarios.py",
+        )
+    }
+
+
 def _scoring_contract_digest() -> str:
     """Bind Track B reports to the private target, comparison, and aggregation code."""
 
-    source_names = (
-        "detection_benchmark.py",
-        "evaluation.py",
-        "scenarios.py",
-    )
     return _sha256(
         {
             "version": SCORING_CONTRACT_VERSION,
-            "sources": {
-                name: _file_hash(Path(__file__).with_name(name))
-                for name in source_names
-            },
+            "sources": _scoring_contract_source_hashes(),
         }
     )
 
@@ -853,7 +899,7 @@ class CheckpointStore:
             "status": "failed",
             "input_hash": input_hash,
             "artifacts": [],
-            "error": str(error)[:1000],
+            "error": _public_error_type(error) or "Exception",
         }
         self._write()
 
@@ -1664,31 +1710,29 @@ def record_detection_initialization_failure(
     campaign_hash = _campaign_hash(config, build_hash)
     output = config.output.resolve()
     checkpoint = _prepare_campaign_output(output, campaign_hash)
-    if _has_published_results(output):
-        _write_running_manifest(
-            output=output,
-            campaign_hash=campaign_hash,
-            build_hash=build_hash,
-            project_root=config.project_root,
-            api_url=config.api_url,
-        )
     try:
+        if _has_published_results(output):
+            _write_running_manifest(
+                output=output,
+                campaign_hash=campaign_hash,
+                build_hash=build_hash,
+                project_root=config.project_root,
+                api_url=config.api_url,
+            )
         _supersede_published_results(output)
-    except OSError as archive_error:
-        cleanup_error = _cleanup_published_results(output) or "OSError"
+    except OSError as publication_error:
+        _cleanup_published_results(output)
         _write_incomplete_manifest(
             output=output,
             campaign_hash=campaign_hash,
             build_hash=build_hash,
             project_root=config.project_root,
             checkpoint=checkpoint,
-            error=archive_error,
+            error=publication_error,
             api_url=config.api_url,
             failure_status="publication_cleanup_failure",
         )
-        raise CampaignExecutionError(
-            f"score publication cleanup failed ({cleanup_error})"
-        ) from archive_error
+        raise
     _write_incomplete_manifest(
         output=output,
         campaign_hash=campaign_hash,
@@ -2214,12 +2258,14 @@ class BridgeCampaignBackend:
                 previous_observation = observed
         except Exception as caught:
             execution_status = "infrastructure_error"
-            error = f"{type(caught).__name__}: {caught}"
+            error = _public_error_type(type(caught).__name__)
         finally:
             episode_exit = adapter.stop()
             if getattr(episode_exit, "kind", "normal") != "normal":
                 execution_status = "infrastructure_error"
-                error = str(getattr(episode_exit, "detail", "") or episode_exit.kind)
+                error = _public_error_type(
+                    getattr(episode_exit, "detail", "") or episode_exit.kind
+                )
         steps_path = output_dir / "steps.jsonl"
         steps_path.write_text(
             "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in transitions),
@@ -2273,13 +2319,13 @@ class BridgeCampaignBackend:
             return EpisodeResult(
                 transitions=[],
                 execution_status="infrastructure_error",
-                error=f"invalid session artifact: {error}",
+                error=_public_error_type(type(error).__name__),
             )
         if any(not isinstance(item, dict) for item in transitions):
             return EpisodeResult(
                 transitions=[],
                 execution_status="contract_error",
-                error="steps.jsonl must contain JSON objects",
+                error="CampaignContractError",
             )
         return EpisodeResult(
             transitions=transitions,

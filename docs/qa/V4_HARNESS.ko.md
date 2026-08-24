@@ -100,9 +100,9 @@ paired 비교의 `regression-diff.json`은 `qa-regression-diff/v2`이며 다음 
 
 - `baseline_scope: paired-clean-only`
 - `clean_baseline_diffs`: 승인 clean baseline과 현재 clean variant의 diff
-- `injected_current_results`: baseline과 비교하지 않은 현재 injected oracle 결과
+- `injected_current_results`: baseline과 비교하지 않은 현재 injected oracle 결과, 기대 verdict, 일치 여부
 
-`report.md`도 clean baseline diff와 injected current 결과를 별도 절로 표시한다. clean diff에 `NEW FAIL`/`STILL FAIL`이 있거나 injected current verdict가 `PASS`가 아니면 종료 코드 `1`이다. 어느 variant든 `ERROR`면 종료 코드 `2`다.
+`report.md`도 clean baseline diff와 injected current 결과를 별도 절로 표시한다. injected 기대값은 비공개 authoritative scenario→fault 매핑으로 정하고, 실행 manifest의 suite·scenario·`fault_id`가 이 등록값과 정확히 일치하는지 먼저 검증한다. 결함이 등록된 시나리오는 `FAIL`, control은 `PASS`여야 성공이다. current clean이 `PASS`가 아니거나 clean diff에 `NEW FAIL`/`STILL FAIL`이 있거나 injected current가 이 기대값과 다르면 종료 코드 `1`이다. 어느 variant든 `ERROR`이거나 clean/injected 쌍 계약이 잘못되면 종료 코드 `2`다.
 
 | DiffKind | 조건 |
 |---|---|
@@ -121,9 +121,9 @@ paired 비교의 `regression-diff.json`은 `qa-regression-diff/v2`이며 다음 
 
 | 코드 | 상황 |
 |---|---|
-| `0` | (baseline 없음) 전부 PASS / (`run --baseline`) 회귀 없음 / (`validate-faults --baseline`) clean 회귀가 없고 injected current도 전부 PASS |
-| `1` | 전부 PASS가 아님 / `NEW FAIL` 또는 `STILL FAIL` 존재 / paired injected current에 non-PASS 존재 |
-| `2` | `ERROR` 존재 — 판정 불가, 인프라 문제로 취급 |
+| `0` | (`run`) 전부 PASS / (`run --baseline`) 회귀 없음 / (`validate-faults`) clean은 PASS이고 injected는 fault=FAIL, control=PASS / (`validate-faults --baseline`) 여기에 clean 회귀도 없음 |
+| `1` | `run` 결과가 전부 PASS가 아님 / paired current clean이 non-PASS / `NEW FAIL` 또는 `STILL FAIL` 존재 / paired injected current가 기대 verdict와 다름 |
+| `2` | `ERROR` 존재 또는 paired suite/manifest 계약 불일치 — 판정 불가, 인프라 문제로 취급 |
 
 ## 5. 판정 우선순위
 

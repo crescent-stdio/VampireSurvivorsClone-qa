@@ -416,6 +416,31 @@ class V4ScenarioTests(unittest.TestCase):
             self.assertEqual("ERROR", rewritten["final_verdict"])
             self.assertIn("invalid v4 artifact", rewritten["error"])
 
+    def test_v4_rewrite_redacts_filesystem_exception_details(self) -> None:
+        scenario = next(
+            item
+            for item in load_v4_scenarios()
+            if item.id == "control-easy-observation"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            secret = "fakeSecretCredential123"
+            run_dir = Path(directory) / secret
+            run_dir.mkdir()
+            (run_dir / "verdict.json").write_text(
+                json.dumps({"execution_status": "completed", "final_verdict": "PASS"}),
+                encoding="utf-8",
+            )
+
+            cli_module._rewrite_v4_verdict(run_dir, scenario)
+
+            rewritten = json.loads(
+                (run_dir / "verdict.json").read_text(encoding="utf-8")
+            )
+            serialized = json.dumps(rewritten)
+            self.assertEqual("FileNotFoundError", rewritten["error_type"])
+            self.assertNotIn(secret, serialized)
+            self.assertNotIn(directory, serialized)
+
     def test_v4_rewrite_marks_an_oracle_contract_failure_as_error(self) -> None:
         scenario = SimpleNamespace(
             id="invalid-v4-scenario",
@@ -690,7 +715,18 @@ class CliSuiteTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 (suite_root / "suite-manifest.json").write_text(
-                    json.dumps({"scenarios": {"probe": {"output_dir": str(output_dir)}}}),
+                    json.dumps(
+                        {
+                            "suite": suite,
+                            "variant": variant,
+                            "scenarios": {
+                                "probe": {
+                                    "output_dir": str(output_dir),
+                                    "fault_id": "injected-probe" if injected else None,
+                                }
+                            },
+                        }
+                    ),
                     encoding="utf-8",
                 )
                 return suite_root
@@ -712,10 +748,18 @@ class CliSuiteTests(unittest.TestCase):
             with (
                 patch.object(cli_module, "_run_v4_suite", side_effect=write_suite("v4-core")),
                 patch.object(cli_module, "_run_legacy_suite", side_effect=write_suite("legacy-contract")),
+                patch.object(
+                    cli_module,
+                    "_authoritative_fault_bindings",
+                    return_value={
+                        "v4-core": {"probe": "injected-probe"},
+                        "legacy-contract": {"probe": "injected-probe"},
+                    },
+                ),
             ):
                 exit_code = cli_module._run_command(args)
 
-        self.assertEqual(1, exit_code)
+        self.assertEqual(0, exit_code)
         self.assertEqual(
             [
                 ("v4-core", False, "clean"),
@@ -740,7 +784,12 @@ class CliSuiteTests(unittest.TestCase):
                     {
                         "suite": "v4-core",
                         "variant": variant,
-                        "scenarios": {"probe": {"output_dir": str(artifact_dir)}},
+                        "scenarios": {
+                            "probe": {
+                                "output_dir": str(artifact_dir),
+                                "fault_id": None,
+                            }
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -754,6 +803,11 @@ class CliSuiteTests(unittest.TestCase):
             output = StringIO()
             with (
                 patch.object(cli_module, "_run_v4_suite", side_effect=run_v4),
+                patch.object(
+                    cli_module,
+                    "_authoritative_fault_bindings",
+                    return_value={"v4-core": {"probe": None}},
+                ),
                 redirect_stdout(output),
             ):
                 exit_code = cli_module._run_command(args)
@@ -761,7 +815,7 @@ class CliSuiteTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             report = (Path(directory) / "report.md").read_text(encoding="utf-8")
 
-        self.assertEqual(1, exit_code)
+        self.assertEqual(2, exit_code)
         self.assertEqual(
             {
                 "v4-core/clean/probe": "ERROR",
@@ -772,6 +826,249 @@ class CliSuiteTests(unittest.TestCase):
         self.assertIn("v4-core/clean/probe", report)
         self.assertIn("v4-core/injected/probe", report)
 
+    def test_validate_faults_rejects_missing_injected_expectation_contract(self) -> None:
+        def run_v4(_args, root, *, injected, variant=None):
+            suite_root = root / "v4-core" / str(variant)
+            artifact_dir = suite_root / "probe"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "verdict.json").write_text(
+                json.dumps({"final_verdict": "PASS"}),
+                encoding="utf-8",
+            )
+            scenario = {"output_dir": str(artifact_dir)}
+            if not injected:
+                scenario["fault_id"] = None
+            (suite_root / "suite-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "suite": "v4-core",
+                        "variant": variant,
+                        "scenarios": {"probe": scenario},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return suite_root
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = parse_cli(
+                ["validate-faults", "--build", "player.app", "--output", directory]
+            )
+            output = StringIO()
+            with (
+                patch.object(cli_module, "_run_v4_suite", side_effect=run_v4),
+                patch.object(
+                    cli_module,
+                    "_authoritative_fault_bindings",
+                    return_value={"v4-core": {"probe": None}},
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = cli_module._run_command(args)
+            report = (Path(directory) / "report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual(
+            "CampaignContractError",
+            json.loads(output.getvalue())["error_type"],
+        )
+        self.assertNotIn("fault_id", report)
+        self.assertNotIn(directory, report)
+
+    def test_validate_faults_requires_nonempty_exact_clean_injected_pairs(self) -> None:
+        for malformed_pair in ("empty-injected", "duplicate-clean", "mismatched-set"):
+            with self.subTest(malformed_pair=malformed_pair):
+                def run_v4(_args, root, *, injected, variant=None):
+                    manifest_variant = (
+                        "clean" if malformed_pair == "duplicate-clean" else variant
+                    )
+                    scenario_id = (
+                        "fault-probe"
+                        if injected and malformed_pair == "mismatched-set"
+                        else "probe"
+                    )
+                    scenarios = {}
+                    suite_root = root / "v4-core" / str(variant)
+                    suite_root.mkdir(parents=True, exist_ok=True)
+                    if not (injected and malformed_pair == "empty-injected"):
+                        artifact_dir = suite_root / scenario_id
+                        artifact_dir.mkdir(parents=True, exist_ok=True)
+                        (artifact_dir / "verdict.json").write_text(
+                            json.dumps(
+                                {"final_verdict": "FAIL" if injected else "PASS"}
+                            ),
+                            encoding="utf-8",
+                        )
+                        scenarios[scenario_id] = {
+                            "output_dir": str(artifact_dir),
+                            "fault_id": "injected-probe" if injected else None,
+                        }
+                    (suite_root / "suite-manifest.json").write_text(
+                        json.dumps(
+                            {
+                                "suite": "v4-core",
+                                "variant": manifest_variant,
+                                "scenarios": scenarios,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    return suite_root
+
+                with tempfile.TemporaryDirectory() as directory:
+                    args = parse_cli(
+                        [
+                            "validate-faults",
+                            "--build",
+                            "player.app",
+                            "--output",
+                            directory,
+                        ]
+                    )
+                    output = StringIO()
+                    with (
+                        patch.object(cli_module, "_run_v4_suite", side_effect=run_v4),
+                        patch.object(
+                            cli_module,
+                            "_authoritative_fault_bindings",
+                            return_value={
+                                "v4-core": {"probe": "injected-probe"}
+                            },
+                        ),
+                        redirect_stdout(output),
+                    ):
+                        exit_code = cli_module._run_command(args)
+
+                self.assertEqual(2, exit_code)
+                self.assertEqual(
+                    "CampaignContractError",
+                    json.loads(output.getvalue())["error_type"],
+                )
+
+    def test_validate_faults_rejects_manifest_drift_from_authoritative_registry(self) -> None:
+        for drift in ("omitted-fault", "tampered-fault-id"):
+            with self.subTest(drift=drift):
+                authoritative = {"probe": "injected-probe"}
+                if drift == "omitted-fault":
+                    authoritative["required-fault"] = "required-fault-id"
+
+                def run_v4(_args, root, *, injected, variant=None):
+                    suite_root = root / "v4-core" / str(variant)
+                    artifact_dir = suite_root / "probe"
+                    artifact_dir.mkdir(parents=True, exist_ok=True)
+                    injected_fault_id = (
+                        None
+                        if not injected or drift == "tampered-fault-id"
+                        else "injected-probe"
+                    )
+                    verdict = "FAIL" if injected_fault_id else "PASS"
+                    (artifact_dir / "verdict.json").write_text(
+                        json.dumps({"final_verdict": verdict}),
+                        encoding="utf-8",
+                    )
+                    (suite_root / "suite-manifest.json").write_text(
+                        json.dumps(
+                            {
+                                "suite": "v4-core",
+                                "variant": variant,
+                                "scenarios": {
+                                    "probe": {
+                                        "output_dir": str(artifact_dir),
+                                        "fault_id": injected_fault_id if injected else None,
+                                    }
+                                },
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    return suite_root
+
+                with tempfile.TemporaryDirectory() as directory:
+                    args = parse_cli(
+                        [
+                            "validate-faults",
+                            "--build",
+                            "player.app",
+                            "--output",
+                            directory,
+                        ]
+                    )
+                    output = StringIO()
+                    with (
+                        patch.object(cli_module, "_run_v4_suite", side_effect=run_v4),
+                        patch.object(
+                            cli_module,
+                            "_authoritative_fault_bindings",
+                            create=True,
+                            return_value={"v4-core": authoritative},
+                        ),
+                        redirect_stdout(output),
+                    ):
+                        exit_code = cli_module._run_command(args)
+
+                self.assertEqual(2, exit_code)
+                self.assertEqual(
+                    "CampaignContractError",
+                    json.loads(output.getvalue())["error_type"],
+                )
+
+    def test_validate_faults_sanitizes_invalid_artifact_binding(self) -> None:
+        def run_v4(_args, root, *, injected, variant=None):
+            suite_root = root / "v4-core" / str(variant)
+            suite_root.mkdir(parents=True, exist_ok=True)
+            output_dir = "\0" if injected else str(suite_root / "probe")
+            if not injected:
+                artifact_dir = Path(output_dir)
+                artifact_dir.mkdir()
+                (artifact_dir / "verdict.json").write_text(
+                    json.dumps({"final_verdict": "PASS"}),
+                    encoding="utf-8",
+                )
+            (suite_root / "suite-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "suite": "v4-core",
+                        "variant": variant,
+                        "scenarios": {
+                            "probe": {
+                                "output_dir": output_dir,
+                                "fault_id": "injected-probe" if injected else None,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return suite_root
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = parse_cli(
+                ["validate-faults", "--build", "player.app", "--output", directory]
+            )
+            output = StringIO()
+            with (
+                patch.object(cli_module, "_run_v4_suite", side_effect=run_v4),
+                patch.object(
+                    cli_module,
+                    "_authoritative_fault_bindings",
+                    create=True,
+                    return_value={"v4-core": {"probe": "injected-probe"}},
+                ),
+                redirect_stdout(output),
+            ):
+                try:
+                    exit_code = cli_module._run_command(args)
+                except (OSError, UnicodeError, ValueError) as error:
+                    self.fail(f"artifact contract exception escaped: {type(error).__name__}")
+            report = (Path(directory) / "report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual(
+            "CampaignContractError",
+            json.loads(output.getvalue())["error_type"],
+        )
+        self.assertNotIn("\\u0000", report)
+
     def test_approved_clean_run_baseline_is_consumed_by_validate_faults(self) -> None:
         def run_v4(_args, root, *, injected, variant=None):
             if variant is None:
@@ -781,7 +1078,9 @@ class CliSuiteTests(unittest.TestCase):
             artifact_dir = suite_root / "probe"
             artifact_dir.mkdir(parents=True, exist_ok=True)
             (artifact_dir / "verdict.json").write_text(
-                json.dumps({"final_verdict": "PASS"}),
+                json.dumps(
+                    {"final_verdict": "FAIL" if variant == "injected" else "PASS"}
+                ),
                 encoding="utf-8",
             )
             (suite_root / "suite-manifest.json").write_text(
@@ -789,7 +1088,14 @@ class CliSuiteTests(unittest.TestCase):
                     {
                         "suite": "v4-core",
                         "variant": variant,
-                        "scenarios": {"probe": {"output_dir": str(artifact_dir)}},
+                        "scenarios": {
+                            "probe": {
+                                "output_dir": str(artifact_dir),
+                                "fault_id": (
+                                    "injected-probe" if variant == "injected" else None
+                                ),
+                            }
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -830,7 +1136,14 @@ class CliSuiteTests(unittest.TestCase):
                     str(baseline),
                 ]
             )
-            with patch.object(cli_module, "_run_v4_suite", side_effect=run_v4):
+            with (
+                patch.object(cli_module, "_run_v4_suite", side_effect=run_v4),
+                patch.object(
+                    cli_module,
+                    "_authoritative_fault_bindings",
+                    return_value={"v4-core": {"probe": "injected-probe"}},
+                ),
+            ):
                 with redirect_stdout(StringIO()):
                     self.assertEqual(0, cli_module._run_command(run_args))
                     self.assertEqual(0, cli_module._baseline_set(baseline_args))
@@ -851,11 +1164,92 @@ class CliSuiteTests(unittest.TestCase):
             set(diff["clean_baseline_diffs"]),
         )
         self.assertEqual(
-            {"v4-core/injected/probe": {"verdict": "PASS", "stability": "stable"}},
+            {
+                "v4-core/injected/probe": {
+                    "verdict": "FAIL",
+                    "stability": "stable",
+                    "expected_verdict": "FAIL",
+                    "matches_expected": True,
+                }
+            },
             diff["injected_current_results"],
         )
         self.assertIn("paired clean variants only", report)
         self.assertIn("Injected current oracle results", report)
+
+    def test_validate_faults_baseline_rejects_clean_not_reached(self) -> None:
+        def run_v4(_args, root, *, injected, variant=None):
+            suite_root = root / "v4-core" / str(variant)
+            artifact_dir = suite_root / "probe"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            verdict = "FAIL" if injected else "NOT_REACHED"
+            (artifact_dir / "verdict.json").write_text(
+                json.dumps({"final_verdict": verdict}),
+                encoding="utf-8",
+            )
+            (suite_root / "suite-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "suite": "v4-core",
+                        "variant": variant,
+                        "scenarios": {
+                            "probe": {
+                                "output_dir": str(artifact_dir),
+                                "fault_id": "injected-probe" if injected else None,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return suite_root
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "baseline.json"
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "qa-regression-baseline/v1",
+                        "scenarios": {
+                            "probe": {"verdict": "PASS", "stability": "stable"}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = parse_cli(
+                [
+                    "validate-faults",
+                    "--build",
+                    "player.app",
+                    "--output",
+                    str(root / "validate-output"),
+                    "--baseline",
+                    str(baseline),
+                ]
+            )
+            with (
+                patch.object(cli_module, "_run_v4_suite", side_effect=run_v4),
+                patch.object(
+                    cli_module,
+                    "_authoritative_fault_bindings",
+                    return_value={"v4-core": {"probe": "injected-probe"}},
+                ),
+                redirect_stdout(StringIO()),
+            ):
+                exit_code = cli_module._run_command(args)
+            diff = json.loads(
+                (root / "validate-output" / "regression-diff.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            "NEWLY NOT_REACHED",
+            diff["clean_baseline_diffs"]["v4-core/clean/probe"]["kind"],
+        )
 
 
 if __name__ == "__main__":

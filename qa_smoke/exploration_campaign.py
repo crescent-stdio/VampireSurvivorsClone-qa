@@ -7,6 +7,7 @@ import re
 import uuid
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol, Sequence
 
@@ -33,6 +34,7 @@ from .detection_campaign import (
     _opaque_trace_id,
     _prepare_campaign_output,
     _public_api_endpoint_hash,
+    _public_error_type,
     _read_json_object,
     _sha256,
     hash_path,
@@ -173,7 +175,7 @@ class ExplorationEpisodeResult:
             "invariant_validations": list(self.invariant_validations),
             "harness_failures": list(self.harness_failures),
             "trace_evidence_refs": list(self.trace_evidence_refs),
-            "error": self.error,
+            "error": _public_error_type(self.error),
         }
 
     @classmethod
@@ -317,9 +319,21 @@ _PLANNER_NUMERIC_OPERATORS = {
     "gt": ">",
     "ge": ">=",
 }
-_PLANNER_NUMERIC_CANDIDATE_PATTERN = re.compile(
-    r"numeric:(eq|ne|lt|le|gt|ge):([a-zA-Z0-9_.]+)"
+_PLANNER_FIELD_SEGMENT = r"[a-zA-Z_][a-zA-Z0-9_]*(?:\[[0-9]+\])*"
+_PLANNER_FIELD_PATH_PATTERN = re.compile(
+    rf"{_PLANNER_FIELD_SEGMENT}(?:\.{_PLANNER_FIELD_SEGMENT})*"
 )
+_PLANNER_NUMERIC_CANDIDATE_PATTERN = re.compile(
+    rf"numeric:(eq|ne|lt|le|gt|ge):({_PLANNER_FIELD_SEGMENT}"
+    rf"(?:\.{_PLANNER_FIELD_SEGMENT})*)"
+)
+
+
+def _normalize_field_token(field_name: Any) -> str:
+    candidate = str(field_name or "").strip().lower()
+    if _PLANNER_FIELD_PATH_PATTERN.fullmatch(candidate):
+        return candidate
+    return _normalize_token(candidate)
 
 
 def _planner_numeric_relation(candidate_id: str) -> tuple[str, str] | None:
@@ -383,7 +397,7 @@ def _candidate_key(
     return (
         _normalize_token(category) or "behavior",
         _normalize_token(rule) or "unspecified-rule",
-        _normalize_token(field_name),
+        _normalize_field_token(field_name),
         _normalize_token(phase) or "unknown",
         _normalize_token(event),
     )
@@ -818,24 +832,30 @@ def _callable_code_digest(function: Any) -> str:
     )
 
 
+@lru_cache(maxsize=1)
+def _steering_dependency_source_hashes() -> dict[str, str]:
+    """Freeze planner dependency hashes for the lifetime of the loaded evaluator."""
+
+    return {
+        name: _file_hash(Path(__file__).with_name(name))
+        for name in (
+            "charter.py",
+            "memory.py",
+            "planners.py",
+            "reporting.py",
+            "run.py",
+            "state_channels.py",
+        )
+    }
+
+
 def _steering_prompt_digest() -> str:
     """Bind resume identity to the exact planner prompt construction code."""
 
-    dependency_files = (
-        "charter.py",
-        "memory.py",
-        "planners.py",
-        "reporting.py",
-        "run.py",
-        "state_channels.py",
-    )
     return _sha256(
         {
             "version": STEERING_PROMPT_TEMPLATE_VERSION,
-            "dependencies": {
-                name: _file_hash(Path(__file__).with_name(name))
-                for name in dependency_files
-            },
+            "dependencies": _steering_dependency_source_hashes(),
             "planning_system_prompt": _callable_code_digest(
                 LLMPlanner._planning_system_prompt
             ),
@@ -1255,22 +1275,22 @@ def record_exploration_initialization_failure(
     if output.exists() and any(output.iterdir()) and not config.resume:
         raise CampaignContractError("non-empty exploration output requires --resume")
     checkpoint = _prepare_campaign_output(output, campaign_hash)
-    if _has_published_results(output):
-        _write_running_manifest(output, campaign_hash, build_hash, config)
-        try:
-            _archive_published_results(output)
-        except OSError:
-            cleanup_error = _cleanup_published_results(output) or "OSError"
-            _write_incomplete_manifest(
-                output=output,
-                campaign_hash=campaign_hash,
-                build_hash=build_hash,
-                config=config,
-                checkpoint=checkpoint,
-                failure_status="publication_cleanup_failure",
-                error_type=cleanup_error,
-            )
-            raise
+    try:
+        if _has_published_results(output):
+            _write_running_manifest(output, campaign_hash, build_hash, config)
+        _archive_published_results(output)
+    except OSError:
+        cleanup_error = _cleanup_published_results(output) or "OSError"
+        _write_incomplete_manifest(
+            output=output,
+            campaign_hash=campaign_hash,
+            build_hash=build_hash,
+            config=config,
+            checkpoint=checkpoint,
+            failure_status="publication_cleanup_failure",
+            error_type=cleanup_error,
+        )
+        raise
     return _write_incomplete_manifest(
         output=output,
         campaign_hash=campaign_hash,
@@ -1594,7 +1614,7 @@ def _anomaly_artifacts(
             continue
         if kind == "bridge_action_failed":
             harness.append(
-                {"kind": "bridge_failure", "detail": str(anomaly.get("evidence") or "")}
+                {"kind": "bridge_failure", "detail": "bridge action failed"}
             )
             continue
         try:

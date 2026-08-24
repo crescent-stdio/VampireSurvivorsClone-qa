@@ -307,6 +307,42 @@ def test_numeric_planner_and_inspector_findings_share_only_an_exact_structured_k
     }
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "world.threat_entities[0].relative_x",
+        "inventory.abilities[0].level",
+    ],
+)
+def test_numeric_shared_surface_accepts_strict_indexed_field_paths(
+    field_name: str,
+) -> None:
+    record = make_record(
+        "core-combat-survival",
+        9101,
+        transitions=[
+            transition(
+                0,
+                candidate_id=f"numeric:ne:{field_name}",
+                statement=f"{field_name} differs from the expected value.",
+                event="combat",
+            )
+        ],
+        passes=[artifact(numeric_finding(field_name)), artifact(), artifact()],
+    )
+
+    report = exploration.build_exploration_report([record], metadata={})
+
+    assert report["surface_counts"] == {
+        "planner_only": 0,
+        "inspector_only": 0,
+        "shared": 1,
+        "runtime_oracle": 0,
+        "union": 1,
+    }
+    assert report["candidates"][0]["field"] == field_name
+
+
 def test_candidate_tiers_reproduction_and_priorities_are_deterministic() -> None:
     def records(rule: str, *, reproduced: bool, invariant: bool = False):
         seeds = (9101, 9102) if reproduced else (9101,)
@@ -640,6 +676,19 @@ def test_backend_failure_artifacts_keep_only_a_safe_error_type(tmp_path: Path) -
     assert "provider-secret" not in public_artifacts
 
 
+def test_exploration_episode_serialization_discards_free_form_error_details() -> None:
+    serialized = exploration.ExplorationEpisodeResult(
+        transitions=[],
+        execution_status="infrastructure_error",
+        coverage_status="error",
+        error="RuntimeError: token=fake-secret at /private/provider",
+    ).to_dict()
+
+    assert serialized["error"] == "RuntimeError"
+    assert "fake-secret" not in json.dumps(serialized)
+    assert "/private/provider" not in json.dumps(serialized)
+
+
 def test_coverage_not_reached_remains_a_separately_reported_outcome(
     tmp_path: Path,
 ) -> None:
@@ -761,6 +810,41 @@ def test_archive_failure_invalidates_stale_complete_publication(
             replace(settings, resume=True),
             backend=FakeBackend(),
             inspector=FakeInspector(),
+        )
+
+    manifest_text = (settings.output / "campaign-manifest.json").read_text()
+    manifest = json.loads(manifest_text)
+    assert manifest["status"] == "incomplete"
+    assert manifest["failure"] == {
+        "status": "publication_cleanup_failure",
+        "error_type": "OSError",
+    }
+    assert not (settings.output / "exploration-report.json").exists()
+    assert not (settings.output / "exploration-report.ko.md").exists()
+    assert "/private/qa" not in manifest_text
+    assert "fake-secret" not in manifest_text
+
+
+def test_initialization_running_manifest_failure_invalidates_stale_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = campaign_config(tmp_path)
+    exploration.run_exploration_campaign(
+        settings,
+        backend=FakeBackend(),
+        inspector=FakeInspector(),
+    )
+
+    def fail_running_manifest(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("running manifest failed at /private/qa token=fake-secret")
+
+    monkeypatch.setattr(exploration, "_write_running_manifest", fail_running_manifest)
+
+    with pytest.raises(OSError):
+        exploration.record_exploration_initialization_failure(
+            replace(settings, resume=True),
+            ValueError("model initialization failed"),
         )
 
     manifest_text = (settings.output / "campaign-manifest.json").read_text()
@@ -1044,6 +1128,12 @@ def test_steering_identity_includes_all_effective_prompt_dependencies(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    cache_clear = getattr(
+        getattr(exploration, "_steering_dependency_source_hashes", None),
+        "cache_clear",
+        lambda: None,
+    )
+    cache_clear()
     called_files: set[str] = set()
     original_file_hash = exploration._file_hash
 
@@ -1063,6 +1153,28 @@ def test_steering_identity_includes_all_effective_prompt_dependencies(
         "state_channels.py",
     } <= called_files
     assert exploration.STEERING_PROMPT_TEMPLATE_VERSION == "qa-planning/v6"
+    cache_clear()
+
+
+def test_steering_dependency_source_hashes_are_frozen_for_the_loaded_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[str] = []
+    cache = getattr(exploration, "_steering_dependency_source_hashes", lambda: None)
+    getattr(cache, "cache_clear", lambda: None)()
+
+    def count_hash_reads(path: Path) -> str:
+        reads.append(path.name)
+        return "a" * 64
+
+    monkeypatch.setattr(exploration, "_file_hash", count_hash_reads)
+
+    first = exploration._steering_prompt_digest()
+    second = exploration._steering_prompt_digest()
+
+    assert first == second
+    assert len(reads) == len(set(reads)) == 6
+    getattr(cache, "cache_clear", lambda: None)()
 
 
 def test_campaign_identity_includes_inspection_normalizer_version(

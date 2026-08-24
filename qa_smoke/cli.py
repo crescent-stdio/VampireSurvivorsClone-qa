@@ -8,8 +8,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Sequence
 
-from .benchmark import run_benchmark
+from .benchmark import DETERMINISTIC_GATE_SCENARIO_IDS, run_benchmark
 from .evaluation import evaluate_v4_oracle
+from .memory import sanitize_error_type
 from .regression import (
     DiffKind,
     ScenarioResult,
@@ -221,14 +222,16 @@ def _rewrite_v4_verdict(run_dir: Path, scenario: Any) -> None:
         _write_v4_error_verdict(
             verdict_path,
             scenario,
-            f"invalid v4 artifact: {error}",
+            "invalid v4 artifact",
+            type(error).__name__,
         )
         return
     except (AttributeError, TypeError, ValueError) as error:
         _write_v4_error_verdict(
             verdict_path,
             scenario,
-            f"v4 oracle contract failure: {error}",
+            "v4 oracle contract failure",
+            type(error).__name__,
         )
         return
     verdict["schema_version"] = "qa-run-verdict/v2"
@@ -247,13 +250,19 @@ def _rewrite_v4_verdict(run_dir: Path, scenario: Any) -> None:
     verdict_path.write_text(json.dumps(verdict, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _write_v4_error_verdict(verdict_path: Path, scenario: Any, error: str) -> None:
+def _write_v4_error_verdict(
+    verdict_path: Path,
+    scenario: Any,
+    category: str,
+    error_type: str,
+) -> None:
     try:
         payload = json.loads(verdict_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
+    safe_error_type = sanitize_error_type(error_type) or "Exception"
     payload.update(
         {
             "schema_version": "qa-run-verdict/v2",
@@ -262,7 +271,8 @@ def _write_v4_error_verdict(verdict_path: Path, scenario: Any, error: str) -> No
             "oracle_verdict": "not_evaluated",
             "evidence_refs": [],
             "final_verdict": "ERROR",
-            "error": error,
+            "error_type": safe_error_type,
+            "error": f"{category}: details redacted",
         }
     )
     verdict_path.parent.mkdir(parents=True, exist_ok=True)
@@ -338,10 +348,135 @@ def _paired_clean_baseline(
     return aligned
 
 
+def _authoritative_fault_bindings(
+    args: argparse.Namespace,
+) -> dict[str, dict[str, str | None]]:
+    """Load the private suite registries used to verify paired run completeness."""
+
+    bindings: dict[str, dict[str, str | None]] = {}
+    if args.suite in {"v4-core", "all"}:
+        scenarios = load_v4_scenarios()
+        ground_truth = load_v4_ground_truth()
+        scenario_ids = {scenario.id for scenario in scenarios}
+        if scenario_ids != set(ground_truth):
+            raise ValueError("v4 scenario and ground-truth registries must match")
+        v4_bindings: dict[str, str | None] = {}
+        for scenario in scenarios:
+            fault_id = ground_truth[scenario.id].get("fault_id")
+            if fault_id is not None and (
+                not isinstance(fault_id, str) or not fault_id
+            ):
+                raise ValueError("v4 fault binding must be null or a non-empty string")
+            if (scenario.bug_type == "control") != (fault_id is None):
+                raise ValueError("v4 control and fault bindings must agree")
+            v4_bindings[scenario.id] = fault_id
+        bindings["v4-core"] = v4_bindings
+    if args.suite in {"legacy-contract", "all"}:
+        scenarios = load_scenarios(args.project_root / "config" / "qa-scenarios.json")
+        scenario_by_id = {scenario.id: scenario for scenario in scenarios}
+        if set(scenario_by_id) != set(DETERMINISTIC_GATE_SCENARIO_IDS):
+            raise ValueError("legacy deterministic gate registry must match")
+        bindings["legacy-contract"] = {
+            scenario_id: scenario_by_id[scenario_id].ground_truth.fault_id
+            for scenario_id in DETERMINISTIC_GATE_SCENARIO_IDS
+        }
+    return bindings
+
+
+def _injected_oracle_expectations(
+    suite_roots: Sequence[Path],
+    authoritative_bindings: dict[str, dict[str, str | None]],
+) -> dict[str, str]:
+    """Return deterministic expected verdicts for injected fault and control runs."""
+
+    expectations: dict[str, str] = {}
+    paired_scenarios: dict[str, dict[str, set[str]]] = {}
+    for suite_root in suite_roots:
+        manifest = json.loads(
+            (suite_root / "suite-manifest.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(manifest, dict):
+            raise ValueError("suite manifest must be an object")
+        suite = manifest.get("suite")
+        variant = manifest.get("variant")
+        scenarios = manifest.get("scenarios")
+        if not isinstance(suite, str) or not suite:
+            raise ValueError("suite manifest requires a suite identity")
+        if variant not in {"clean", "injected"}:
+            raise ValueError("suite manifest requires a paired variant")
+        if not isinstance(scenarios, dict):
+            raise ValueError("suite manifest scenarios must be an object")
+        scenario_ids = {str(scenario_id) for scenario_id in scenarios}
+        if not scenario_ids:
+            raise ValueError("paired suite scenarios must not be empty")
+        expected_bindings = authoritative_bindings.get(suite)
+        if expected_bindings is None or scenario_ids != set(expected_bindings):
+            raise ValueError("suite scenarios must match the authoritative registry")
+        variants = paired_scenarios.setdefault(suite, {})
+        if variant in variants:
+            raise ValueError("paired suite variant must be unique")
+        variants[variant] = scenario_ids
+        resolved_suite_root = suite_root.resolve()
+        for scenario_id, entry in scenarios.items():
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("output_dir"), str)
+                or not entry["output_dir"]
+            ):
+                raise ValueError("scenario output binding is invalid")
+            try:
+                Path(entry["output_dir"]).resolve().relative_to(resolved_suite_root)
+            except (OSError, UnicodeError, ValueError) as error:
+                raise ValueError("scenario output binding is invalid") from error
+            if "fault_id" not in entry:
+                raise ValueError("scenario requires an explicit fault binding")
+            expected_fault_id = expected_bindings[str(scenario_id)]
+            if variant == "clean" and entry["fault_id"] is not None:
+                raise ValueError("clean scenario must not declare an injected fault")
+            if variant == "injected" and entry["fault_id"] != expected_fault_id:
+                raise ValueError("injected fault binding does not match the registry")
+        if variant != "injected":
+            continue
+        for scenario_id, entry in scenarios.items():
+            if not isinstance(entry, dict) or "fault_id" not in entry:
+                raise ValueError("injected scenario requires an explicit fault binding")
+            fault_id = expected_bindings[str(scenario_id)]
+            if fault_id is not None and (not isinstance(fault_id, str) or not fault_id):
+                raise ValueError("fault binding must be null or a non-empty string")
+            identity = _result_identity(manifest, str(scenario_id))
+            if identity in expectations:
+                raise ValueError("duplicate injected scenario identity")
+            expectations[identity] = "FAIL" if fault_id else "PASS"
+    for variants in paired_scenarios.values():
+        if set(variants) != {"clean", "injected"}:
+            raise ValueError("suite requires one clean and one injected variant")
+        if variants["clean"] != variants["injected"]:
+            raise ValueError("paired variants require identical scenario identities")
+    if set(paired_scenarios) != set(authoritative_bindings):
+        raise ValueError("paired suites must match the requested registries")
+    return expectations
+
+
+def _injected_result_payload(
+    injected: dict[str, ScenarioResult],
+    expectations: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    return {
+        scenario_id: {
+            "verdict": result.verdict,
+            "stability": result.stability,
+            "expected_verdict": expectations[scenario_id],
+            "matches_expected": result.verdict == expectations[scenario_id],
+        }
+        for scenario_id, result in injected.items()
+    }
+
+
 def _write_paired_diff_report(
     path: Path,
     clean_diffs: dict[str, Any],
     injected: dict[str, ScenarioResult],
+    injected_expectations: dict[str, str],
 ) -> None:
     counts = Counter(diff.kind.value for diff in clean_diffs.values())
     lines = [
@@ -373,20 +508,79 @@ def _write_paired_diff_report(
             "",
             "## Injected current oracle results",
             "",
-            "| Scenario | Verdict | Stability |",
-            "|---|---|---|",
+            "| Scenario | Verdict | Expected | Match | Stability |",
+            "|---|---|---|---|---|",
         ]
     )
     for scenario_id, result in sorted(injected.items()):
-        lines.append(f"| `{scenario_id}` | **{result.verdict}** | {result.stability} |")
+        expected = injected_expectations[scenario_id]
+        match = "yes" if result.verdict == expected else "no"
+        lines.append(
+            f"| `{scenario_id}` | **{result.verdict}** | **{expected}** | "
+            f"{match} | {result.stability} |"
+        )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_suite_report(path: Path, results: dict[str, ScenarioResult]) -> None:
-    lines = ["# QA Suite Run", "", "| Scenario | Verdict | Stability |", "|---|---|---|"]
+def _write_suite_report(
+    path: Path,
+    results: dict[str, ScenarioResult],
+    injected_expectations: dict[str, str] | None = None,
+) -> None:
+    if injected_expectations is None:
+        lines = [
+            "# QA Suite Run",
+            "",
+            "| Scenario | Verdict | Stability |",
+            "|---|---|---|",
+        ]
+    else:
+        lines = [
+            "# QA Fault Validation",
+            "",
+            "Injected expectations are deterministic: fault-bearing variants must FAIL; controls must PASS.",
+            "",
+            "| Scenario | Verdict | Expected | Stability |",
+            "|---|---|---|---|",
+        ]
     for scenario_id, result in sorted(results.items()):
-        lines.append(f"| `{scenario_id}` | **{result.verdict}** | {result.stability} |")
+        if injected_expectations is None:
+            lines.append(
+                f"| `{scenario_id}` | **{result.verdict}** | {result.stability} |"
+            )
+        else:
+            expected = (
+                injected_expectations[scenario_id]
+                if "/injected/" in scenario_id
+                else "PASS"
+            )
+            lines.append(
+                f"| `{scenario_id}` | **{result.verdict}** | **{expected}** | "
+                f"{result.stability} |"
+            )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_fault_contract_error(root: Path) -> int:
+    """Publish a bounded failure when paired evaluator metadata is invalid."""
+
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "report.md").write_text(
+        "# QA Fault Validation\n\nEvaluation status: **ERROR**.\n\n"
+        "The paired scenario contract is invalid.\n",
+        encoding="utf-8",
+    )
+    print(
+        json.dumps(
+            {
+                "suite_root": str(root),
+                "status": "ERROR",
+                "error_type": "CampaignContractError",
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 2
 
 
 def _run_command(args: argparse.Namespace) -> int:
@@ -409,13 +603,63 @@ def _run_command(args: argparse.Namespace) -> int:
             suite_roots.append(_run_v4_suite(args, root, injected=False))
         if args.suite in {"legacy-contract", "all"}:
             suite_roots.append(_run_legacy_suite(args, root))
-    current: dict[str, ScenarioResult] = {}
-    for suite_root in suite_roots:
-        current.update(_collect_suite_results(suite_root))
     suite_root = root if len(suite_roots) > 1 else suite_roots[0]
+    current: dict[str, ScenarioResult] = {}
+    if args.command == "validate-faults":
+        try:
+            authoritative_bindings = _authoritative_fault_bindings(args)
+            injected_expectations = _injected_oracle_expectations(
+                suite_roots,
+                authoritative_bindings,
+            )
+            for result_root in suite_roots:
+                current.update(_collect_suite_results(result_root))
+        except (KeyError, OSError, TypeError, UnicodeError, ValueError):
+            return _write_fault_contract_error(suite_root)
+    else:
+        injected_expectations = {}
+        for result_root in suite_roots:
+            current.update(_collect_suite_results(result_root))
+    if args.command == "validate-faults":
+        injected_result_ids = {
+            scenario_id for scenario_id in current if "/injected/" in scenario_id
+        }
+        if set(injected_expectations) != injected_result_ids:
+            return _write_fault_contract_error(suite_root)
     if args.baseline is None:
-        _write_suite_report(suite_root / "report.md", current)
+        _write_suite_report(
+            suite_root / "report.md",
+            current,
+            injected_expectations=(
+                injected_expectations
+                if args.command == "validate-faults"
+                else None
+            ),
+        )
         print(json.dumps({"suite_root": str(suite_root), "results": {key: value.verdict for key, value in current.items()}}, ensure_ascii=False))
+        if any(result.verdict == "ERROR" for result in current.values()):
+            return 2
+        if args.command == "validate-faults":
+            clean_results = {
+                scenario_id: result
+                for scenario_id, result in current.items()
+                if "/clean/" in scenario_id
+            }
+            injected_results = {
+                scenario_id: result
+                for scenario_id, result in current.items()
+                if "/injected/" in scenario_id
+            }
+            if clean_results and injected_results:
+                if any(result.verdict != "PASS" for result in clean_results.values()):
+                    return 1
+                if any(
+                    result.verdict
+                    != injected_expectations[scenario_id]
+                    for scenario_id, result in injected_results.items()
+                ):
+                    return 1
+                return 0
         return 0 if all(result.verdict == "PASS" for result in current.values()) else 1
     baseline = load_baseline(args.baseline)
     if args.command == "validate-faults":
@@ -438,20 +682,20 @@ def _run_command(args: argparse.Namespace) -> int:
                 scenario_id: diff.as_dict()
                 for scenario_id, diff in clean_diffs.items()
             },
-            "injected_current_results": {
-                scenario_id: {
-                    "verdict": result.verdict,
-                    "stability": result.stability,
-                }
-                for scenario_id, result in injected_current.items()
-            },
+            "injected_current_results": _injected_result_payload(
+                injected_current,
+                injected_expectations,
+            ),
         }
         (suite_root / "regression-diff.json").write_text(
             json.dumps(diff_payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
         _write_paired_diff_report(
-            suite_root / "report.md", clean_diffs, injected_current
+            suite_root / "report.md",
+            clean_diffs,
+            injected_current,
+            injected_expectations,
         )
         print(
             json.dumps(
@@ -470,7 +714,12 @@ def _run_command(args: argparse.Namespace) -> int:
         if any(
             diff.kind in {DiffKind.NEW_FAIL, DiffKind.STILL_FAIL}
             for diff in clean_diffs.values()
-        ) or any(result.verdict != "PASS" for result in injected_current.values()):
+        ) or any(
+            result.verdict != "PASS" for result in clean_current.values()
+        ) or any(
+            result.verdict != injected_expectations[scenario_id]
+            for scenario_id, result in injected_current.items()
+        ):
             return 1
         return 0
     diffs = diff_scenario_results(baseline, current)
@@ -503,8 +752,6 @@ def _benchmark_detection(args: argparse.Namespace) -> int:
         record_detection_initialization_failure,
         run_detection_campaign,
     )
-    from .memory import sanitize_error_type
-
     config = BenchmarkCampaignConfig(
         build=args.build,
         project_root=args.project_root,
@@ -569,8 +816,6 @@ def _explore(args: argparse.Namespace) -> int:
         run_exploration_campaign,
     )
     from .detection_campaign import LLMInspectorAdapter
-    from .memory import sanitize_error_type
-
     config = ExplorationCampaignConfig(
         build=args.build,
         project_root=args.project_root,

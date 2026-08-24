@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -587,6 +588,59 @@ def test_campaign_contract_errors_are_not_downgraded_to_inspection_errors(tmp_pa
             budget=campaign.InspectionCallBudget(cap=0),
             campaign_hash="campaign-hash",
         )
+
+
+def test_checkpoint_and_episode_failure_artifacts_store_only_error_types(
+    tmp_path: Path,
+) -> None:
+    secret = "token=fake-secret at /private/provider"
+    checkpoint_path = tmp_path / "checkpoint.json"
+    episode_path = tmp_path / "episode-result.json"
+    checkpoint = campaign.CheckpointStore(checkpoint_path, "campaign-hash")
+
+    with pytest.raises(campaign.CampaignExecutionError):
+        campaign._run_episode_unit(
+            checkpoint=checkpoint,
+            unit_id="official/opaque/fault",
+            input_hash="input-hash",
+            path=episode_path,
+            execute=lambda: campaign.EpisodeResult(
+                transitions=[],
+                execution_status="infrastructure_error",
+                error=f"RuntimeError: {secret}",
+            ),
+        )
+
+    episode = json.loads(episode_path.read_text())
+    checkpoint_payload = json.loads(checkpoint_path.read_text())
+    serialized = json.dumps([episode, checkpoint_payload])
+    assert episode["error"] == "RuntimeError"
+    assert checkpoint_payload["units"]["official/opaque/fault"]["error"] == (
+        "CampaignExecutionError"
+    )
+    assert "fake-secret" not in serialized
+    assert "/private/provider" not in serialized
+
+
+def test_public_failure_artifacts_reject_unclassified_alphanumeric_messages(
+    tmp_path: Path,
+) -> None:
+    secret = "fakeSecretCredential123"
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint = campaign.CheckpointStore(checkpoint_path, "campaign-hash")
+
+    episode = campaign.EpisodeResult(
+        transitions=[],
+        execution_status="infrastructure_error",
+        error=secret,
+    ).to_dict()
+    checkpoint.mark_failed("unit", "input-hash", secret)
+    checkpoint_payload = json.loads(checkpoint_path.read_text())
+
+    serialized = json.dumps([episode, checkpoint_payload])
+    assert episode["error"] == "Exception"
+    assert checkpoint_payload["units"]["unit"]["error"] == "Exception"
+    assert secret not in serialized
 
 
 @pytest.mark.parametrize("failure_surface", ["audit", "checkpoint"])
@@ -1368,6 +1422,42 @@ def test_archive_failure_invalidates_stale_scores_and_sanitizes_public_state(
     assert "fake-secret" not in manifest_text
 
 
+def test_initialization_running_manifest_failure_invalidates_stale_scores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = config(tmp_path)
+    campaign.run_detection_campaign(
+        settings,
+        backend=FakeBackend(),
+        inspector=FakeInspector(),
+    )
+
+    def fail_running_manifest(**_kwargs: Any) -> None:
+        raise OSError("running manifest failed at /private/path token=fake-secret")
+
+    monkeypatch.setattr(campaign, "_write_running_manifest", fail_running_manifest)
+
+    with pytest.raises(OSError):
+        campaign.record_detection_initialization_failure(
+            settings,
+            ValueError("model initialization failed"),
+        )
+
+    manifest_text = (settings.output / "campaign-manifest.json").read_text()
+    manifest = json.loads(manifest_text)
+    assert manifest["status"] == "incomplete"
+    assert manifest["failure"] == {
+        "status": "publication_cleanup_failure",
+        "error_type": "OSError",
+    }
+    assert not (settings.output / "detection-benchmark.json").exists()
+    assert not (settings.output / "detection-benchmark.ko.md").exists()
+    assert not (settings.output / "metrics").exists()
+    assert "/private/path" not in manifest_text
+    assert "fake-secret" not in manifest_text
+
+
 def test_exact_identity_binds_schema_request_policy_scoring_and_pass_contracts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1377,6 +1467,12 @@ def test_exact_identity_binds_schema_request_policy_scoring_and_pass_contracts(
     baseline_hash = campaign._campaign_hash(settings, build_hash)
 
     inspected_sources: list[str] = []
+    inspection_cache_clear = getattr(
+        getattr(campaign, "_inspection_contract_source_hashes", None),
+        "cache_clear",
+        lambda: None,
+    )
+    inspection_cache_clear()
     with monkeypatch.context() as source_patch:
         source_patch.setattr(
             campaign,
@@ -1384,6 +1480,7 @@ def test_exact_identity_binds_schema_request_policy_scoring_and_pass_contracts(
             lambda path: inspected_sources.append(path.name) or "d" * 64,
         )
         campaign._inspection_request_contract_digest()
+    inspection_cache_clear()
     assert set(inspected_sources) == {
         "detection_campaign.py",
         "inspector.py",
@@ -1393,6 +1490,12 @@ def test_exact_identity_binds_schema_request_policy_scoring_and_pass_contracts(
     }
 
     scoring_sources: list[str] = []
+    scoring_cache_clear = getattr(
+        getattr(campaign, "_scoring_contract_source_hashes", None),
+        "cache_clear",
+        lambda: None,
+    )
+    scoring_cache_clear()
     with monkeypatch.context() as source_patch:
         source_patch.setattr(
             campaign,
@@ -1400,6 +1503,7 @@ def test_exact_identity_binds_schema_request_policy_scoring_and_pass_contracts(
             lambda path: scoring_sources.append(path.name) or "e" * 64,
         )
         campaign._scoring_contract_digest()
+    scoring_cache_clear()
     assert set(scoring_sources) == {
         "detection_benchmark.py",
         "evaluation.py",
@@ -1460,6 +1564,35 @@ def test_exact_identity_binds_schema_request_policy_scoring_and_pass_contracts(
             budget=campaign.InspectionCallBudget(),
             input_hash="fixed-input",
         )
+
+
+def test_contract_source_hashes_are_frozen_for_the_loaded_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[str] = []
+
+    def count_hash_reads(path: Path) -> str:
+        reads.append(path.name)
+        return hashlib.sha256(path.name.encode("utf-8")).hexdigest()
+
+    inspection_cache = getattr(
+        campaign, "_inspection_contract_source_hashes", lambda: None
+    )
+    scoring_cache = getattr(campaign, "_scoring_contract_source_hashes", lambda: None)
+    getattr(inspection_cache, "cache_clear", lambda: None)()
+    getattr(scoring_cache, "cache_clear", lambda: None)()
+    monkeypatch.setattr(campaign, "_file_hash", count_hash_reads)
+
+    first_inspection = campaign._inspection_request_contract_digest()
+    first_scoring = campaign._scoring_contract_digest()
+    second_inspection = campaign._inspection_request_contract_digest()
+    second_scoring = campaign._scoring_contract_digest()
+
+    assert first_inspection == second_inspection
+    assert first_scoring == second_scoring
+    assert len(reads) == len(set(reads)) == 8
+    getattr(inspection_cache, "cache_clear", lambda: None)()
+    getattr(scoring_cache, "cache_clear", lambda: None)()
 
 
 def test_resume_rejects_exact_hash_and_replay_artifact_mismatches(tmp_path: Path) -> None:
