@@ -514,6 +514,75 @@ def test_failed_inspection_chunks_audit_attempts_without_credentials(tmp_path: P
     assert budget.http_attempts == 3
 
 
+@pytest.mark.parametrize("model_content", ["not JSON", '["not", "an", "object"]'])
+def test_preparse_model_failures_preserve_only_raw_content_in_failed_audit(
+    tmp_path: Path,
+    model_content: str,
+) -> None:
+    envelope = json.dumps(
+        {
+            "id": "provider-metadata-must-not-be-audited",
+            "choices": [
+                {
+                    "message": {"content": model_content},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 3},
+        }
+    ).encode()
+
+    class ProviderResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return envelope
+
+    adapter = campaign.LLMInspectorAdapter.__new__(campaign.LLMInspectorAdapter)
+    adapter.planner = campaign.LLMPlanner(
+        "qa",
+        campaign.INSPECTOR_MODEL,
+        campaign.TestCharter(objective=campaign.NEUTRAL_REACHABILITY_GOAL),
+        5.0,
+        "https://example.invalid/v1/chat/completions",
+        api_key="request-credential-must-not-be-audited",
+        urlopen=lambda *_args, **_kwargs: ProviderResponse(),
+        max_attempts=1,
+    )
+    checkpoint = campaign.CheckpointStore(tmp_path / "checkpoint.json", "campaign-hash")
+
+    with pytest.raises(campaign.InspectionCallError):
+        campaign.inspect_trace_pass(
+            trace_id="opaque-preparse",
+            pass_index=1,
+            transitions=[transition(0)],
+            output_dir=tmp_path / "inspection",
+            inspector=adapter,
+            checkpoint=checkpoint,
+            budget=campaign.InspectionCallBudget(),
+            input_hash="input-hash",
+        )
+
+    audit = json.loads(
+        (
+            tmp_path
+            / "inspection"
+            / "pass-1"
+            / "inspection-chunk-000000-000000.audit.json"
+        ).read_text()
+    )
+    assert audit["status"] == "error"
+    assert audit["raw_response"] == model_content
+    assert audit["usage"]["prompt_tokens"] == 4
+    serialized = json.dumps(audit)
+    assert "provider-metadata-must-not-be-audited" not in serialized
+    assert "request-credential-must-not-be-audited" not in serialized
+
+
 def test_complete_checkpoints_resume_without_repeating_external_work(tmp_path: Path) -> None:
     settings = config(tmp_path)
     first_backend = FakeBackend()
@@ -533,6 +602,116 @@ def test_complete_checkpoints_resume_without_repeating_external_work(tmp_path: P
     assert resumed_backend.replays == []
     assert resumed_backend.autonomous == []
     assert resumed_inspector.requests == []
+
+
+def test_regenerated_episode_invalidates_only_its_dependent_inspections(
+    tmp_path: Path,
+) -> None:
+    settings = config(tmp_path)
+    campaign.run_detection_campaign(
+        settings,
+        backend=FakeBackend(),
+        inspector=FakeInspector(),
+    )
+    manifest = json.loads((settings.output / "campaign-manifest.json").read_text())
+    regenerated_unit = "official/health_ratio_out_of_range/9101/clean"
+    regenerated_trace = next(
+        item["opaque_trace_id"]
+        for item in manifest["traces"]
+        if item["unit_id"] == regenerated_unit
+    )
+    untouched_trace = next(
+        item["opaque_trace_id"]
+        for item in manifest["traces"]
+        if item["unit_id"] == "official/health_ratio_out_of_range/9101/fault"
+    )
+    checkpoint_path = settings.output / "checkpoint.json"
+    before_checkpoint = json.loads(checkpoint_path.read_text())
+    untouched_before = {
+        unit_id: value
+        for unit_id, value in before_checkpoint["units"].items()
+        if unit_id.startswith(f"inspection/{untouched_trace}/")
+    }
+    dependent_before = {
+        unit_id: value
+        for unit_id, value in before_checkpoint["units"].items()
+        if unit_id.startswith(f"inspection/{regenerated_trace}/")
+    }
+    assert len(dependent_before) == 6
+
+    episode_path = settings.output / "traces" / regenerated_unit / "episode-result.json"
+    episode_path.write_text('{"transitions": []}\n', encoding="utf-8")
+
+    class RegeneratedTraceBackend(FakeBackend):
+        def run_replay(self, spec, replay, output_dir):
+            result = super().run_replay(spec, replay, output_dir)
+            rows = json.loads(json.dumps(result.transitions))
+            rows[0]["command_id"] = "new-command-after-bridge-restart"
+            rows[0]["observation"]["observation_id"] = "new-observation-after-bridge-restart"
+            return replace(result, transitions=rows)
+
+    resumed_backend = RegeneratedTraceBackend()
+    resumed_inspector = FakeInspector()
+    result = campaign.run_detection_campaign(
+        settings,
+        backend=resumed_backend,
+        inspector=resumed_inspector,
+    )
+
+    assert result.resumed is True
+    assert [spec.unit_id for spec, _digest in resumed_backend.replays] == [
+        regenerated_unit
+    ]
+    assert len(resumed_inspector.requests) == 3
+    assert all(
+        "new-observation-after-bridge-restart" in json.dumps(request)
+        for request in resumed_inspector.requests
+    )
+    after_checkpoint = json.loads(checkpoint_path.read_text())
+    dependent_after = {
+        unit_id: value
+        for unit_id, value in after_checkpoint["units"].items()
+        if unit_id.startswith(f"inspection/{regenerated_trace}/")
+    }
+    assert set(dependent_after) == set(dependent_before)
+    assert all(
+        dependent_after[unit_id]["input_hash"]
+        != dependent_before[unit_id]["input_hash"]
+        for unit_id in dependent_before
+    )
+    assert {
+        unit_id: value
+        for unit_id, value in after_checkpoint["units"].items()
+        if unit_id.startswith(f"inspection/{untouched_trace}/")
+    } == untouched_before
+
+
+def test_effective_api_url_environment_change_rejects_exact_resume_without_leaking_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = config(tmp_path)
+    first_url = "https://user:credential-one@example.invalid/v1/chat?token=secret-one"
+    second_url = "https://user:credential-two@example.invalid/v2/chat?token=secret-two"
+    monkeypatch.setenv("QA_API_URL", first_url)
+    campaign.run_detection_campaign(
+        settings,
+        backend=FakeBackend(),
+        inspector=FakeInspector(),
+    )
+    manifest_text = (settings.output / "campaign-manifest.json").read_text()
+    manifest = json.loads(manifest_text)
+    assert len(manifest["hashes"]["api_endpoint"]) == 64
+    assert "credential-one" not in manifest_text
+    assert "secret-one" not in manifest_text
+
+    monkeypatch.setenv("QA_API_URL", second_url)
+    with pytest.raises(campaign.CampaignContractError, match="campaign hash mismatch"):
+        campaign.run_detection_campaign(
+            settings,
+            backend=FakeBackend(),
+            inspector=FakeInspector(),
+        )
 
 
 def test_checkpoint_hashes_prevent_stale_episode_pass_and_chunk_reuse(tmp_path: Path) -> None:

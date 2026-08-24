@@ -15,6 +15,15 @@ from .memory import PlanningHistory, sanitize_agent_channel
 from .state_channels import project_public_player_view
 
 
+DEFAULT_LLM_API_URL = "https://api.openai.com/v1/chat/completions"
+
+
+def resolve_llm_api_url(api_url: str | None) -> str:
+    """Match the planner's explicit, environment, then default URL precedence."""
+
+    return api_url or os.environ.get("QA_API_URL", DEFAULT_LLM_API_URL)
+
+
 TRACKED_DELTA_PATHS = (
     "scene",
     "player.health",
@@ -891,7 +900,7 @@ class LLMPlanner:
         self.model = model
         self.charter = charter
         self.plan_horizon_seconds = plan_horizon_seconds
-        self.api_url = api_url or os.environ.get("QA_API_URL", "https://api.openai.com/v1/chat/completions")
+        self.api_url = resolve_llm_api_url(api_url)
         self.api_key = api_key or os.environ.get("QA_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
         if not self.model:
             raise ValueError("LLM policy requires --model or QA_MODEL")
@@ -910,6 +919,7 @@ class LLMPlanner:
         self.monotonic = monotonic
         self._urlopen = urlopen or urllib.request.urlopen
         self.last_usage: dict[str, int] = {}
+        self._last_model_content: str | None = None
         self._retry_count = 0
         self._retry_wait_seconds = 0.0
         self._http_attempts = 0
@@ -1144,6 +1154,7 @@ If the computed value and the reported value disagree, or a fraction falls outsi
         include_planning_history: bool = True,
         cache_boundary: bool = False,
     ) -> dict[str, Any]:
+        self._last_model_content = None
         if messages is None:
             if include_planning_history:
                 messages = self._planning_request_messages(user)
@@ -1182,7 +1193,9 @@ If the computed value and the reported value disagree, or a fraction falls outsi
         content = choice["message"]["content"]
         if isinstance(content, list):
             content = "".join(item.get("text", "") for item in content if isinstance(item, dict))
-        return self._parse_json(str(content))
+        model_content = str(content)
+        self._last_model_content = model_content
+        return self._parse_json(model_content)
 
     def _session_usage(
         self,
@@ -1374,6 +1387,11 @@ If the computed value and the reported value disagree, or a fraction falls outsi
         usage = self.last_usage
         self.last_usage = {}
         return usage
+
+    def take_last_model_content(self) -> str | None:
+        content = self._last_model_content
+        self._last_model_content = None
+        return content
 
     @staticmethod
     def _normalize_usage(usage: dict[str, Any]) -> dict[str, int]:

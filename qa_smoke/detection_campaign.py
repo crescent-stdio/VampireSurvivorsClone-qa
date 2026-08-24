@@ -10,6 +10,7 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
+from urllib.parse import urlsplit
 
 from .adapters import VampireSurvivorsAdapter
 from .charter import TestCharter
@@ -33,7 +34,7 @@ from .inspector import (
     normalize_inspection_artifact,
     validate_inspection_artifact_v2,
 )
-from .planners import LLMPlanner, observation_phase
+from .planners import LLMPlanner, observation_phase, resolve_llm_api_url
 from .run import execute_game_action, parse_args as parse_run_args, run_session
 from .scenarios import load_scenarios, load_v4_ground_truth, load_v4_scenarios
 
@@ -68,7 +69,7 @@ class CampaignExecutionError(CampaignContractError):
 
 
 class InspectionCallError(RuntimeError):
-    """Carry failed-call audit counters without persisting provider response details."""
+    """Carry failed-call audit counters and model content without provider metadata."""
 
     def __init__(
         self,
@@ -76,10 +77,12 @@ class InspectionCallError(RuntimeError):
         *,
         usage: Mapping[str, int],
         elapsed_seconds: float,
+        raw_response: str | None = None,
     ) -> None:
         super().__init__(message)
         self.usage = dict(usage)
         self.elapsed_seconds = elapsed_seconds
+        self.raw_response = raw_response
 
 
 @dataclass(frozen=True)
@@ -265,6 +268,21 @@ def hash_path(path: Path) -> str:
 
 def _file_hash(path: Path) -> str:
     return hash_path(path) if path.exists() else _sha256("missing")
+
+
+def _public_api_endpoint_hash(api_url: str | None) -> str:
+    """Hash endpoint routing while excluding URL credentials, query, and fragment."""
+
+    resolved = resolve_llm_api_url(api_url)
+    parsed = urlsplit(resolved)
+    return _sha256(
+        {
+            "scheme": parsed.scheme.lower(),
+            "host": (parsed.hostname or "").lower(),
+            "port": parsed.port,
+            "path": parsed.path,
+        }
+    )
 
 
 def load_fault_bindings(project_root: Path) -> tuple[FaultBinding, ...]:
@@ -731,6 +749,16 @@ class CheckpointStore:
         }
         self._write()
 
+    def invalidate_prefix(self, unit_prefix: str) -> None:
+        """Remove only checkpoint units owned by one regenerated dependency."""
+
+        matching = [unit_id for unit_id in self.units if unit_id.startswith(unit_prefix)]
+        if not matching:
+            return
+        for unit_id in matching:
+            del self.units[unit_id]
+        self._write()
+
     def record_logical_call(self) -> None:
         usage = self.payload.setdefault("inspection_usage", {})
         usage["logical_calls"] = int(usage.get("logical_calls", 0) or 0) + 1
@@ -942,7 +970,7 @@ def inspect_trace_pass(
                             "payload": chunk,
                             "source_tools_enabled": False,
                         },
-                        "raw_response": None,
+                        "raw_response": error.raw_response,
                         "normalized": {
                             "schema_version": INSPECTION_SCHEMA_V2,
                             "findings": [],
@@ -1005,12 +1033,13 @@ def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
 
 def _campaign_hash(config: BenchmarkCampaignConfig, build_hash: str) -> str:
     root = config.project_root.resolve()
+    effective_api_url = resolve_llm_api_url(config.api_url)
     return _sha256(
         {
             "build_hash": build_hash,
             "build_path": str(config.build.resolve()),
             "project_root": str(root),
-            "api_url_hash": _sha256(config.api_url or "default"),
+            "api_url_hash": _sha256(effective_api_url),
             "headless": config.headless,
             "quiet": config.quiet,
             "steering_model": STEERING_MODEL,
@@ -1088,6 +1117,23 @@ def _unit_hash(
 
 def _opaque_trace_id(campaign_hash: str, unit_id: str) -> str:
     return _sha256({"campaign_hash": campaign_hash, "unit_id": unit_id})[:24]
+
+
+def _invalidate_trace_inspections(
+    *,
+    checkpoint: CheckpointStore,
+    output: Path,
+    opaque_trace_id: str,
+) -> None:
+    """Quarantine inspection artifacts whose upstream episode was regenerated."""
+
+    checkpoint.invalidate_prefix(f"inspection/{opaque_trace_id}/")
+    active = output / "inspections" / opaque_trace_id
+    if not active.exists():
+        return
+    archived = output / ".superseded-inspections" / uuid.uuid4().hex / opaque_trace_id
+    archived.parent.mkdir(parents=True, exist_ok=True)
+    active.replace(archived)
 
 
 def _run_episode_unit(
@@ -1322,6 +1368,7 @@ def _write_incomplete_manifest(
     project_root: Path,
     checkpoint: CheckpointStore,
     error: Exception,
+    api_url: str | None,
 ) -> None:
     _atomic_write_json(
         output / "campaign-manifest.json",
@@ -1334,6 +1381,7 @@ def _write_incomplete_manifest(
                 "build": build_hash,
                 "config": campaign_hash,
                 "rubric": _file_hash(project_root / "config" / "qa-detection-rubric.json"),
+                "api_endpoint": _public_api_endpoint_hash(api_url),
             },
             "counts": {
                 "logical_inspection_calls": checkpoint.logical_calls,
@@ -1370,6 +1418,7 @@ def _write_running_manifest(
     campaign_hash: str,
     build_hash: str,
     project_root: Path,
+    api_url: str | None,
 ) -> None:
     _atomic_write_json(
         output / "campaign-manifest.json",
@@ -1382,6 +1431,7 @@ def _write_running_manifest(
                 "build": build_hash,
                 "config": campaign_hash,
                 "rubric": _file_hash(project_root / "config" / "qa-detection-rubric.json"),
+                "api_endpoint": _public_api_endpoint_hash(api_url),
             },
         },
     )
@@ -1407,6 +1457,7 @@ def run_detection_campaign(
             campaign_hash=campaign_hash,
             build_hash=build_hash,
             project_root=config.project_root,
+            api_url=config.api_url,
         )
         return _run_detection_campaign_impl(
             resolved_config,
@@ -1427,6 +1478,7 @@ def run_detection_campaign(
                 project_root=config.project_root,
                 checkpoint=latest_checkpoint,
                 error=error,
+                api_url=config.api_url,
             )
         except OSError:
             pass
@@ -1510,12 +1562,19 @@ def _run_detection_campaign_impl(
                     spec, replay, trace_dir
                 ),
             )
+            opaque_trace_id = _opaque_trace_id(campaign_hash, spec.unit_id)
+            if not was_resumed:
+                _invalidate_trace_inspections(
+                    checkpoint=checkpoint,
+                    output=output,
+                    opaque_trace_id=opaque_trace_id,
+                )
             result = apply_replay_divergence(result, replay)
             results.append(result)
             trace_metadata.append(
                 {
                     "unit_id": spec.unit_id,
-                    "opaque_trace_id": _opaque_trace_id(campaign_hash, spec.unit_id),
+                    "opaque_trace_id": opaque_trace_id,
                     "pair_id": spec.pair_id,
                     "variant": spec.variant,
                     "driver": spec.driver,
@@ -1556,11 +1615,18 @@ def _run_detection_campaign_impl(
                     spec, trace_dir
                 ),
             )
+            opaque_trace_id = _opaque_trace_id(campaign_hash, base_spec.unit_id)
+            if not was_resumed:
+                _invalidate_trace_inspections(
+                    checkpoint=checkpoint,
+                    output=output,
+                    opaque_trace_id=opaque_trace_id,
+                )
             results.append(result)
             trace_metadata.append(
                 {
                     "unit_id": base_spec.unit_id,
-                    "opaque_trace_id": _opaque_trace_id(campaign_hash, base_spec.unit_id),
+                    "opaque_trace_id": opaque_trace_id,
                     "pair_id": base_spec.pair_id,
                     "variant": base_spec.variant,
                     "driver": base_spec.driver,
@@ -1599,6 +1665,7 @@ def _run_detection_campaign_impl(
             "rubric": _file_hash(
                 config.project_root / "config" / "qa-detection-rubric.json"
             ),
+            "api_endpoint": _public_api_endpoint_hash(config.api_url),
         },
         "models": {
             "steering": STEERING_MODEL,
@@ -1678,12 +1745,15 @@ class LLMInspectorAdapter:
             )
         except Exception as error:
             usage = self.planner.take_last_usage()
+            raw_response = self.planner.take_last_model_content()
             raise InspectionCallError(
                 type(error).__name__,
                 usage=usage,
                 elapsed_seconds=max(0.0, time.monotonic() - started),
+                raw_response=raw_response,
             ) from error
         usage = self.planner.take_last_usage()
+        self.planner.take_last_model_content()
         return InspectionResponse(
             raw_response=response,
             usage=usage,

@@ -3457,6 +3457,74 @@ class TruncationTests(unittest.TestCase):
         self.assertEqual(700, bodies[0]["max_tokens"])
 
 
+class PlannerModelContentTests(unittest.TestCase):
+    """Parsing failures expose only the model content needed for failure audits."""
+
+    def test_non_json_model_content_is_preserved_and_drained_without_request_metadata(self) -> None:
+        response = json.dumps(
+            {
+                "id": "provider-envelope-metadata",
+                "model": "provider-model-metadata",
+                "choices": [
+                    {
+                        "message": {"content": "plain model output"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"total_tokens": 10},
+            }
+        )
+        planner = LLMPlanner(
+            "qa",
+            "test-model",
+            TestCharter(),
+            5.0,
+            api_key="request-header-secret",
+            urlopen=fake_opener(response),
+        )
+
+        with self.assertRaises(json.JSONDecodeError):
+            planner._request("private system prompt", "private user prompt")
+
+        self.assertEqual("plain model output", planner.take_last_model_content())
+        self.assertIsNone(planner.take_last_model_content())
+
+    def test_json_non_object_content_is_preserved_and_the_next_request_resets_it(self) -> None:
+        responses = iter(
+            [
+                completion('["array item"]'),
+                completion("stale model output"),
+            ]
+        )
+
+        def opener(*_args, **_kwargs):
+            try:
+                return fake_opener(next(responses))()
+            except StopIteration:
+                raise urllib.error.URLError("provider unavailable") from None
+
+        planner = LLMPlanner(
+            "qa",
+            "test-model",
+            TestCharter(),
+            5.0,
+            api_key="test-key",
+            urlopen=opener,
+            max_attempts=1,
+        )
+
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            planner._request("system", "user")
+        self.assertEqual('["array item"]', planner.take_last_model_content())
+
+        with self.assertRaises(json.JSONDecodeError):
+            planner._request("system", "user")
+        with self.assertRaises(planners_module.LLMTransportError):
+            planner._request("system", "user")
+
+        self.assertIsNone(planner.take_last_model_content())
+
+
 class PlannerUsageAccountingTests(unittest.TestCase):
     """Tokens the provider billed must be recorded even when the call fails."""
 
