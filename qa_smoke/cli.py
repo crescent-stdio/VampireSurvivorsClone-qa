@@ -44,6 +44,22 @@ def parse_cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     detection_parser.add_argument("--headless", action="store_true")
     detection_parser.add_argument("--quiet", action="store_true")
 
+    exploration_parser = subparsers.add_parser(
+        "explore",
+        help="Run clean-build autonomous exploration and candidate aggregation.",
+    )
+    exploration_parser.add_argument("--build", type=Path, required=True)
+    exploration_parser.add_argument("--project-root", type=Path, default=Path.cwd())
+    exploration_parser.add_argument("--output", type=Path, required=True)
+    exploration_parser.add_argument("--api-url", default=None)
+    exploration_parser.add_argument("--headless", action="store_true")
+    exploration_parser.add_argument("--quiet", action="store_true")
+    exploration_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume only when all fixed campaign hashes match the existing checkpoint.",
+    )
+
     baseline_parser = subparsers.add_parser("baseline", help="Manage an explicit regression baseline.")
     baseline_subparsers = baseline_parser.add_subparsers(dest="baseline_action", required=True)
     set_parser = baseline_subparsers.add_parser("set", help="Approve a run directory as baseline.")
@@ -402,12 +418,61 @@ def _benchmark_detection(args: argparse.Namespace) -> int:
     return 0
 
 
+def _explore(args: argparse.Namespace) -> int:
+    from .exploration_campaign import (
+        BridgeExplorationBackend,
+        ExplorationCampaignConfig,
+        run_exploration_campaign,
+    )
+    from .detection_campaign import CampaignContractError, LLMInspectorAdapter
+
+    config = ExplorationCampaignConfig(
+        build=args.build,
+        project_root=args.project_root,
+        output=args.output,
+        headless=args.headless,
+        quiet=args.quiet,
+        api_url=args.api_url,
+        resume=args.resume,
+    )
+    try:
+        result = run_exploration_campaign(
+            config,
+            backend=BridgeExplorationBackend(config),
+            inspector=LLMInspectorAdapter(api_url=args.api_url),
+        )
+    except CampaignContractError as error:
+        print(
+            json.dumps(
+                {"status": "incomplete", "error_type": type(error).__name__},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    print(
+        json.dumps(
+            {
+                "manifest": str(result.manifest_path),
+                "traces": len(result.records),
+                "candidates": (report.get("summary") or {}).get("candidate_count", 0),
+                "resumed": result.resumed,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_cli(argv)
     if args.command == "baseline":
         code = _baseline_set(args)
     elif args.command == "benchmark-detection":
         code = _benchmark_detection(args)
+    elif args.command == "explore":
+        code = _explore(args)
     else:
         code = _run_command(args)
     raise SystemExit(code)
