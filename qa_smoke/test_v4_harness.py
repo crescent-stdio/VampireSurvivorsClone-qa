@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -258,7 +260,9 @@ class V4ScenarioTests(unittest.TestCase):
                         "exp": 1.0,
                         "next_level_exp": 2.0,
                         "exp_ratio": 0.5,
+                        "level": 3,
                     },
+                    "progress": {"level_time": 120.0},
                 }
             }
         ]
@@ -270,6 +274,55 @@ class V4ScenarioTests(unittest.TestCase):
         ):
             with self.subTest(oracle_id=oracle_id):
                 self.assertEqual("pass", evaluate_v4_oracle(oracle_id, transitions).verdict)
+
+    def test_v4_control_oracles_do_not_evaluate_without_required_evidence(self) -> None:
+        no_player = [{"observation": {"observation_id": "obs-no-player"}}]
+        no_normal_transitions = [{"observation": {"observation_id": "obs-no-transitions"}}]
+        no_long_progression = [
+            {
+                "observation": {
+                    "observation_id": "obs-short",
+                    "player": {
+                        "present": True,
+                        "health": 10.0,
+                        "max_health": 10.0,
+                        "health_ratio": 1.0,
+                        "exp": 1.0,
+                        "next_level_exp": 2.0,
+                        "exp_ratio": 0.5,
+                        "level": 1,
+                    },
+                    "progress": {"level_time": 10.0},
+                }
+            }
+        ]
+
+        for oracle_id, transitions in (
+            ("valid_observation", no_player),
+            ("normal_state_transitions", no_normal_transitions),
+            ("stable_long_progression", no_long_progression),
+        ):
+            with self.subTest(oracle_id=oracle_id):
+                self.assertEqual("not_evaluated", evaluate_v4_oracle(oracle_id, transitions).verdict)
+
+    def test_v4_rewrite_preserves_a_control_not_reached_verdict(self) -> None:
+        scenario = next(item for item in load_v4_scenarios() if item.id == "control-easy-observation")
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            (run_dir / "verdict.json").write_text(
+                json.dumps({"execution_status": "completed", "final_verdict": "PASS"}),
+                encoding="utf-8",
+            )
+            (run_dir / "steps.jsonl").write_text(
+                json.dumps({"observation": {"observation_id": "obs-no-player"}}) + "\n",
+                encoding="utf-8",
+            )
+
+            cli_module._rewrite_v4_verdict(run_dir, scenario)
+
+            rewritten = json.loads((run_dir / "verdict.json").read_text(encoding="utf-8"))
+            self.assertEqual("not_evaluated", rewritten["oracle_verdict"])
+            self.assertEqual("NOT_REACHED", rewritten["final_verdict"])
 
     def test_v4_rewrite_marks_an_unreadable_trace_as_error(self) -> None:
         scenario = next(item for item in load_v4_scenarios() if item.id == "control-easy-observation")
@@ -317,6 +370,25 @@ class V4ScenarioTests(unittest.TestCase):
             rewritten = json.loads((run_dir / "verdict.json").read_text(encoding="utf-8"))
             self.assertEqual("ERROR", rewritten["final_verdict"])
             self.assertEqual("not_evaluated", rewritten["oracle_verdict"])
+            self.assertIn("v4 oracle contract failure", rewritten["error"])
+
+    def test_v4_rewrite_marks_a_nested_non_object_observation_as_error(self) -> None:
+        scenario = next(item for item in load_v4_scenarios() if item.id == "control-easy-observation")
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            (run_dir / "verdict.json").write_text(
+                json.dumps({"execution_status": "completed", "final_verdict": "PASS"}),
+                encoding="utf-8",
+            )
+            (run_dir / "steps.jsonl").write_text(
+                json.dumps({"observation": []}) + "\n",
+                encoding="utf-8",
+            )
+
+            cli_module._rewrite_v4_verdict(run_dir, scenario)
+
+            rewritten = json.loads((run_dir / "verdict.json").read_text(encoding="utf-8"))
+            self.assertEqual("ERROR", rewritten["final_verdict"])
             self.assertIn("v4 oracle contract failure", rewritten["error"])
 
     def test_v4_suite_forwards_its_own_limits_to_the_run(self) -> None:
@@ -448,6 +520,14 @@ class VerdictAndDiffTests(unittest.TestCase):
 
 
 class CliSuiteTests(unittest.TestCase):
+    def test_verdict_reader_treats_array_and_scalar_payloads_as_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_dir = Path(directory)
+            for payload in ([], "not-an-object", 1):
+                with self.subTest(payload=payload):
+                    (artifact_dir / "verdict.json").write_text(json.dumps(payload), encoding="utf-8")
+                    self.assertEqual("ERROR", cli_module._verdict_from_artifact(artifact_dir))
+
     def test_v4_clean_and_injected_manifests_remain_separate(self) -> None:
         scenario = next(item for item in load_v4_scenarios() if item.id == "easy-hp-on-hit")
         args = SimpleNamespace(
@@ -577,6 +657,109 @@ class CliSuiteTests(unittest.TestCase):
                 ("legacy-contract", True, "injected"),
             ],
             calls,
+        )
+
+    def test_validate_faults_keeps_clean_results_in_json_report_and_exit_status(self) -> None:
+        def run_v4(_args, root, *, injected, variant=None):
+            suite_root = root / "v4-core" / str(variant)
+            artifact_dir = suite_root / "probe"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "verdict.json").write_text(
+                json.dumps({"final_verdict": "PASS" if injected else "ERROR"}),
+                encoding="utf-8",
+            )
+            (suite_root / "suite-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "suite": "v4-core",
+                        "variant": variant,
+                        "scenarios": {"probe": {"output_dir": str(artifact_dir)}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return suite_root
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = parse_cli(
+                ["validate-faults", "--build", "player.app", "--output", directory]
+            )
+            output = StringIO()
+            with (
+                patch.object(cli_module, "_run_v4_suite", side_effect=run_v4),
+                redirect_stdout(output),
+            ):
+                exit_code = cli_module._run_command(args)
+
+            payload = json.loads(output.getvalue())
+            report = (Path(directory) / "report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            {
+                "v4-core/clean/probe": "ERROR",
+                "v4-core/injected/probe": "PASS",
+            },
+            payload["results"],
+        )
+        self.assertIn("v4-core/clean/probe", report)
+        self.assertIn("v4-core/injected/probe", report)
+
+    def test_validate_faults_baseline_diff_keeps_clean_and_injected_results(self) -> None:
+        def run_v4(_args, root, *, injected, variant=None):
+            suite_root = root / "v4-core" / str(variant)
+            artifact_dir = suite_root / "probe"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "verdict.json").write_text(
+                json.dumps({"final_verdict": "PASS" if injected else "ERROR"}),
+                encoding="utf-8",
+            )
+            (suite_root / "suite-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "suite": "v4-core",
+                        "variant": variant,
+                        "scenarios": {"probe": {"output_dir": str(artifact_dir)}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return suite_root
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "baseline.json"
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "scenarios": {
+                            "v4-core/clean/probe": {"verdict": "PASS", "stability": "stable"},
+                            "v4-core/injected/probe": {"verdict": "PASS", "stability": "stable"},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = parse_cli(
+                [
+                    "validate-faults",
+                    "--build",
+                    "player.app",
+                    "--output",
+                    directory,
+                    "--baseline",
+                    str(baseline),
+                ]
+            )
+            with patch.object(cli_module, "_run_v4_suite", side_effect=run_v4):
+                exit_code = cli_module._run_command(args)
+
+            diff = json.loads((root / "regression-diff.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual(
+            {"v4-core/clean/probe", "v4-core/injected/probe"},
+            set(diff),
         )
 
 

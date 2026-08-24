@@ -76,6 +76,7 @@ def _run_v4_suite(
     result_manifest: dict[str, Any] = {
         "schema_version": "qa-suite-run/v1",
         "suite": "v4-core",
+        "variant": variant,
         "injected": injected,
         "scenarios": {},
     }
@@ -141,6 +142,7 @@ def _run_legacy_suite(
     manifest = {
         "schema_version": "qa-suite-run/v1",
         "suite": "legacy-contract",
+        "variant": variant,
         "injected": injected,
         "scenarios": {
             result.scenario_id: {
@@ -194,7 +196,7 @@ def _rewrite_v4_verdict(run_dir: Path, scenario: Any) -> None:
             f"invalid v4 artifact: {error}",
         )
         return
-    except (TypeError, ValueError) as error:
+    except (AttributeError, TypeError, ValueError) as error:
         _write_v4_error_verdict(
             verdict_path,
             scenario,
@@ -244,6 +246,8 @@ def _verdict_from_artifact(path: Path) -> str:
         payload = json.loads((path / "verdict.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return "ERROR"
+    if not isinstance(payload, dict):
+        return "ERROR"
     if payload.get("final_verdict") in {"PASS", "FAIL", "NOT_REACHED", "ERROR"}:
         return str(payload["final_verdict"])
     if payload.get("execution_status") != "completed":
@@ -258,8 +262,16 @@ def _collect_suite_results(suite_root: Path) -> dict[str, ScenarioResult]:
     results: dict[str, ScenarioResult] = {}
     for scenario_id, entry in (manifest.get("scenarios") or {}).items():
         verdict = _verdict_from_artifact(Path(entry["output_dir"]))
-        results[scenario_id] = ScenarioResult(verdict, "stable")
+        results[_result_identity(manifest, scenario_id)] = ScenarioResult(verdict, "stable")
     return results
+
+
+def _result_identity(manifest: dict[str, Any], scenario_id: str) -> str:
+    suite = manifest.get("suite")
+    variant = manifest.get("variant")
+    if isinstance(suite, str) and suite and isinstance(variant, str) and variant:
+        return f"{suite}/{variant}/{scenario_id}"
+    return scenario_id
 
 
 def _write_diff_report(path: Path, diffs: dict[str, Any]) -> None:

@@ -370,13 +370,20 @@ def evaluate_v4_oracle(oracle_id: str, transitions: list[Transition]) -> OracleR
     """Evaluate v4 invariants against the additive raw/view observation channels."""
 
     refs = _v4_refs(transitions)
-    control_oracles: dict[str, OracleEvaluator] = {
-        "valid_observation": _valid_observation,
-        "normal_state_transitions": _normal_state_transitions,
-        "stable_long_progression": _stable_long_progression,
+    control_oracles: dict[str, tuple[CoverageEvaluator, OracleEvaluator]] = {
+        "valid_observation": (_first_player_state, _valid_observation),
+        "normal_state_transitions": (_normal_transitions, _normal_state_transitions),
+        "stable_long_progression": (_long_progression, _stable_long_progression),
     }
-    control_evaluator = control_oracles.get(oracle_id)
-    if control_evaluator is not None:
+    control_definition = control_oracles.get(oracle_id)
+    if control_definition is not None:
+        coverage_evaluator, control_evaluator = control_definition
+        if not coverage_evaluator(transitions):
+            return OracleResult(
+                verdict="not_evaluated",
+                evidence_refs=refs,
+                detail="required control evidence was not observed",
+            )
         passed, evidence_refs, detail = control_evaluator(transitions)
         return OracleResult(
             verdict="pass" if passed else "fail",
