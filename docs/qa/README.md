@@ -1,6 +1,6 @@
 # QA Gameplay lane
 
-This repository contains additive QA-only gameplay lanes for deterministic smoke, replay, ML-Agents PPO, the existing opt-in OpenAI LLM workflow, and a production-scene BYOK QA Bridge. See the [Korean AI agent QA guide](AI_AGENT_QA_GUIDE.ko.md) for onboarding and operational details, the [Korean BYOK Bridge guide](BYOK_BRIDGE.ko.md) for observable autonomous play against Main Menu and Level 1, the [Korean v4 harness guide](V4_HARNESS.ko.md) for the fault-injection suites and the regression baseline, the [Korean PPO quickstart](PPO_QUICKSTART.ko.md) for connecting PPO from a fresh clone, and the [Korean player distribution guide](PLAYER_DISTRIBUTION.ko.md) for sharing builds with teammates.
+This repository contains additive QA-only gameplay lanes for deterministic smoke, replay, ML-Agents PPO, the existing opt-in OpenAI LLM workflow, and a production-scene BYOK QA Bridge. See the [LLM evaluation operator guide](LLM_EVALUATION_OPERATOR_GUIDE.md) for clean-build exploration and blind injected-fault detection, the [Korean AI agent QA guide](AI_AGENT_QA_GUIDE.ko.md) for onboarding and operational details, the [Korean BYOK Bridge guide](BYOK_BRIDGE.ko.md) for observable autonomous play against Main Menu and Level 1, the [Korean v4 harness guide](V4_HARNESS.ko.md) for the fault-injection suites and the regression baseline, the [Korean PPO quickstart](PPO_QUICKSTART.ko.md) for connecting PPO from a fresh clone, and the [Korean player distribution guide](PLAYER_DISTRIBUTION.ko.md) for sharing builds with teammates.
 
 ## Architecture
 
@@ -29,7 +29,7 @@ Build scenes are exactly Main Menu (index 0), Level 1 (index 1), then QA Gamepla
 
 - Unity `6000.0.80f1`; set `UNITY_EDITOR` only when the editor is installed outside the default macOS Hub location.
 - [uv](https://docs.astral.sh/uv/) `0.12.x`; the committed `.python-version` selects Python `3.10.12`, the upper bound supported by ML-Agents 1.1.0.
-- PyTorch `2.8.0`, the latest version supported by the pinned ML-Agents trainer. CPU is the default; set `QA_TORCH_DEVICE=mps` only when PyTorch reports MPS as available.
+- PyTorch `2.8.0` is required only for the optional standalone PPO and ML-Agents trainer suites. The smoke, LLM evaluation, and other non-trainer Python suites install with `uv sync --locked`. Use `uv sync --locked --extra trainer` before collecting `qa_pytorch_ppo` tests; do not treat a missing `torch` collection error as a skipped or passing test.
 - Locked ML-Agents Python packages. `scripts/qa/setup.sh` runs `uv sync --locked --extra trainer`. ML-Agents is Apache-2.0 licensed; verify organizational dependency policy before distribution.
 - `uv sync --locked` installs the pinned development tools, including pre-commit. Run `uv run --locked pre-commit install` once per clone to enable the Git hook.
 - `OPENAI_API_KEY` only for the opt-in LLM path. Never store it in repository files or artifacts.
@@ -64,7 +64,15 @@ scripts/qa/evaluate-pytorch.sh
 scripts/qa/evaluate-sweep.sh
 OPENAI_API_KEY=... scripts/qa/run-llm-agent.sh --seed 9301
 scripts/qa/replay.sh QAArtifacts/traces/example.json
+uv run --locked python -m qa_smoke.cli explore \
+  --build QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app \
+  --output QAArtifacts/evaluation/track-a --headless
+uv run --locked python -m qa_smoke.cli benchmark-detection \
+  --build QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app \
+  --output QAArtifacts/evaluation/track-b --headless
 ```
+
+The two evaluation campaigns use fixed roles: `gpt-4o-mini` performs pure-LLM steering and `gpt-5.6-luna` with low reasoning effort inspects sanitized traces after play. Source tools are disabled. Track A accepts only clean launches with an empty fault list; Track B uses the same build and enables one evaluator-private fault only for the matching fault trace. Both commands require an API credential through `QA_API_KEY` or `OPENAI_API_KEY`. `QA_API_URL` or `--api-url` may select a compatible endpoint, but credentials must not be embedded in the URL. These roles and safety settings are not command-line tuning knobs. See the [operator guide](LLM_EVALUATION_OPERATOR_GUIDE.md) for schedules, exact resume behavior, exit codes, and report interpretation.
 
 `smoke.sh` runs exactly ten default scripted seeds at the supported `4x` Unity time scale, exits after one terminal result per player process, and requires at least one recorded final-boss phase. Values above `4x` are rejected explicitly because the controller performs at most four 10 Hz logical ticks per frame. A transient loading-frame backlog may drain over the next frames; a backlog remaining for eight consecutive frames is classified as `ControlBacklogExceeded`, preventing silent long-term drift without unbounded frame work. A smoke episode is classified as `TimedOut` after 150 seconds of game time. A provider-neutral POSIX watchdog also terminates a non-responsive player after 60 seconds of wall-clock time by default; override `QA_SMOKE_WALL_TIMEOUT_SECONDS` only for slower hosts. A crash, watchdog timeout, missing unique summary, or incomplete failure artifacts is an infrastructure failure and makes the smoke command exit non-zero. Classified gameplay failures retain the seed, action trace, summary, Unity log, and anomaly screenshot under `QAArtifacts`.
 
@@ -128,6 +136,8 @@ Generated outputs are intentionally ignored under `QAArtifacts/`:
 - `traces/`, `screenshots/`, `checkpoints/`, `models/`, and `pytorch-ppo/`: replay and training products.
 - `evaluate-sweep.json`: aggregated multi-seed evaluation report.
 - `episode-*` and `llm-failures/`: Unity episode data, buffered LLM decisions, and pre-terminal LLM infrastructure failures.
+- `evaluation/track-a/`: `qa-campaign-manifest/v1`, checkpoints, opaque inspection audits, and `qa-exploration-report/v1` JSON/Korean Markdown.
+- `evaluation/track-b/`: pilot replay artifacts, official and autonomous traces, opaque inspection audits, `qa-detection-benchmark/v1` metrics, and Korean Markdown.
 
 ## Known source risks
 
