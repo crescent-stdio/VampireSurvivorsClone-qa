@@ -166,7 +166,7 @@ def agent_claims(
 def scored_inspection_findings(
     inspection: dict[str, Any] | None, fault_refs: list[str], tolerance: float = 1e-6
 ) -> list[dict[str, Any]]:
-    """Findings whose own numbers disagree, on a transition the oracle rejects.
+    """Numeric findings whose explicit relation holds on a rejected transition.
 
     Scored numerically rather than by keyword. The rubric undercounted real finds three
     separate times on wording alone -- "exceed" against "exceeds", "inconsistency"
@@ -180,18 +180,51 @@ def scored_inspection_findings(
         if not isinstance(finding, dict):
             continue
         try:
-            computed = float(finding["computed_value"])
-            reported = float(finding["reported_value"])
+            if finding.get("kind") == "numeric":
+                expected = float(finding["expected_value"])
+                observed = float(finding["observed_value"])
+                comparison = str(finding["comparison"])
+            else:
+                # Existing v1 artifacts use computed/reported values and imply a
+                # mismatch. Keep this reader until all stored artifacts age out.
+                expected = float(finding["computed_value"])
+                observed = float(finding["reported_value"])
+                comparison = "!="
         except (KeyError, TypeError, ValueError):
             continue
-        if abs(computed - reported) <= tolerance:
-            continue  # the agent checked and the numbers agreed; that is not a finding
+        if not _comparison_holds(comparison, expected, observed, tolerance):
+            continue
         cited = [
             str(ref) for ref in finding.get("evidence_refs") or [] if str(ref) in flagged
         ]
         if cited:
-            scored.append({**finding, "cited_evidence_refs": cited})
+            scored.append(
+                {
+                    **finding,
+                    "expected_value": expected,
+                    "observed_value": observed,
+                    "cited_evidence_refs": cited,
+                }
+            )
     return scored
+
+
+def _comparison_holds(
+    comparison: str, expected: float, observed: float, tolerance: float
+) -> bool:
+    if comparison == "==":
+        return abs(observed - expected) <= tolerance
+    if comparison == "!=":
+        return abs(observed - expected) > tolerance
+    if comparison == ">":
+        return observed > expected + tolerance
+    if comparison == ">=":
+        return observed >= expected - tolerance
+    if comparison == "<":
+        return observed < expected - tolerance
+    if comparison == "<=":
+        return observed <= expected + tolerance
+    return False
 
 
 def _terms_hit(text: str, terms: list[str]) -> list[str]:
@@ -333,8 +366,8 @@ def _score(
         return DetectionResult(
             status="match",
             reason=(
-                f"the inspector computed {first['computed_value']} for {first['field']} "
-                f"where the observation reported {first['reported_value']}"
+                f"the inspector expected {first['expected_value']} for {first['field']} "
+                f"and observed {first['observed_value']}"
             ),
             matched_terms=[str(first.get("field") or "")],
             matched_surfaces=["inspection"],

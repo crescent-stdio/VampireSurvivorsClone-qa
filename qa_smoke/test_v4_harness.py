@@ -96,7 +96,7 @@ class StateChannelTests(unittest.TestCase):
         self.assertNotIn("ground_truth", agent)
         self.assertNotIn("danger_score", json.dumps(agent))
 
-    def test_agent_observation_does_not_include_evaluator_or_view_channels(self) -> None:
+    def test_agent_observation_excludes_evaluator_state_and_projects_player_view(self) -> None:
         agent = build_agent_observation(
             {
                 "player": {"health": 10.0},
@@ -107,8 +107,8 @@ class StateChannelTests(unittest.TestCase):
         )
 
         self.assertNotIn("evaluator_state", agent)
-        self.assertNotIn("player_view", agent)
         self.assertNotIn("agent_state", agent)
+        self.assertEqual({"health": 10.0}, agent["player_view"])
 
     def test_view_state_mismatch_is_recorded_as_always_on_anomaly(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

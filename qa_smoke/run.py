@@ -206,6 +206,9 @@ def resolve_run_arguments(args: argparse.Namespace) -> argparse.Namespace:
             setattr(args, "focus_area" if name == "focus_areas" else name, value)
         args.max_simulation_seconds = scenario.limits.max_simulation_seconds
         args.max_steps = scenario.limits.max_steps
+        # Scenario runs are evaluation commands. Their model channel must remain
+        # observation-only even when a caller supplies the legacy source budget flag.
+        args.max_source_steps = 0
         return args
 
     for name, value in AD_HOC_DEFAULTS.items():

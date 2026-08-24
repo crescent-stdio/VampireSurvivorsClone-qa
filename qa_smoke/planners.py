@@ -11,7 +11,8 @@ import time
 from typing import Any, Protocol
 
 from .charter import TestCharter
-from .memory import PlanningHistory
+from .memory import PlanningHistory, sanitize_agent_channel
+from .state_channels import project_public_player_view
 
 
 TRACKED_DELTA_PATHS = (
@@ -641,6 +642,8 @@ def compact_observation(observation: dict[str, Any], max_threats: int = 8, max_c
     logs: list[str] = []
     for item in reversed(observation.get("recent_logs") or []):
         text = str(item)
+        if sanitize_agent_channel(text) is None:
+            continue
         lowered = text.lower()
         if text not in logs and any(marker in lowered for marker in ("exception", "error:", "assert:", "warning:")):
             logs.append(text)
@@ -648,7 +651,7 @@ def compact_observation(observation: dict[str, Any], max_threats: int = 8, max_c
             break
     logs.reverse()
     pause_reason = observation_pause_reason(observation)
-    return {
+    compacted = {
         "phase": observation_phase(observation),
         "scene": observation.get("scene"),
         "bridge_clock": {
@@ -669,6 +672,10 @@ def compact_observation(observation: dict[str, Any], max_threats: int = 8, max_c
         "available_actions": observation.get("available_actions") or [],
         "recent_logs": logs,
     }
+    player_view = project_public_player_view(observation.get("player_view"))
+    if player_view:
+        compacted["player_view"] = player_view
+    return compacted
 
 
 # Statuses worth another attempt. 400/401/403/404/413/422 are deliberately

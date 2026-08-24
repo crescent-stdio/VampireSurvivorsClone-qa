@@ -3,8 +3,12 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 from collections import Counter
+from functools import lru_cache
 from typing import Any
+
+from .scenarios import load_scenarios, load_v4_ground_truth, load_v4_scenarios
 
 
 EVALUATOR_PRIVATE_KEYS = frozenset(
@@ -22,19 +26,103 @@ EVALUATOR_PRIVATE_KEYS = frozenset(
     }
 )
 
+_PRIVATE_KEY_MARKERS = EVALUATOR_PRIVATE_KEYS | frozenset(
+    {
+        "context_ref",
+        "context_refs",
+        "injection_log",
+        "injection_logs",
+        "source_path",
+        "source_paths",
+    }
+)
+_PRIVATE_TEXT_MARKERS = (
+    "injected",
+    "injecting",
+    "fault injection",
+    "ground truth",
+    "expected behavior",
+    "evaluator state",
+    "injection log",
+    "context ref",
+    "qafaultinjection",
+)
+_SOURCE_PATH_PATTERN = re.compile(
+    r"(?:^|[\s\"'])(?:[a-z]:)?(?:[/\\]|(?:[\w.-]+[/\\])+[\w.-]+\.(?:cs|py|json|md))",
+    re.IGNORECASE,
+)
+_DROP = object()
+
+
+def _is_private_key(key: str) -> bool:
+    return key in _PRIVATE_KEY_MARKERS or any(
+        marker in key
+        for marker in (
+            "fault",
+            "ground_truth",
+            "expected_behavior",
+            "bug_id",
+            "oracle",
+            "evaluator",
+            "context_ref",
+            "injection",
+            "source_path",
+        )
+    )
+
+
+@lru_cache(maxsize=1)
+def _known_private_text() -> tuple[str, ...]:
+    """Load only private identifiers used to reject accidental prompt leakage."""
+    markers: set[str] = set(_PRIVATE_TEXT_MARKERS)
+    try:
+        for scenario in load_scenarios():
+            if scenario.ground_truth.fault_id:
+                markers.add(scenario.ground_truth.fault_id.lower())
+        for scenario in load_v4_scenarios():
+            markers.update(reference.lower() for reference in scenario.context_refs)
+        for entry in load_v4_ground_truth().values():
+            fault_id = entry.get("fault_id")
+            if isinstance(fault_id, str) and fault_id:
+                markers.add(fault_id.lower())
+    except ValueError:
+        # A malformed local configuration must not weaken the static private-key gate.
+        pass
+    return tuple(sorted(marker for marker in markers if marker))
+
+
+def _contains_private_text(value: str) -> bool:
+    lowered = value.lower()
+    return bool(
+        _SOURCE_PATH_PATTERN.search(value)
+        or any(marker in lowered for marker in _known_private_text())
+    )
+
+
+def _sanitize_agent_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = str(key).lower()
+            if _is_private_key(normalized_key):
+                continue
+            clean = _sanitize_agent_value(item)
+            if clean is not _DROP:
+                sanitized[key] = clean
+        return sanitized
+    if isinstance(value, list):
+        return [clean for item in value if (clean := _sanitize_agent_value(item)) is not _DROP]
+    if isinstance(value, tuple):
+        return [clean for item in value if (clean := _sanitize_agent_value(item)) is not _DROP]
+    if isinstance(value, str) and _contains_private_text(value):
+        return _DROP
+    return copy.deepcopy(value)
+
 
 def sanitize_agent_channel(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: sanitize_agent_channel(item)
-            for key, item in value.items()
-            if str(key).lower() not in EVALUATOR_PRIVATE_KEYS
-        }
-    if isinstance(value, list):
-        return [sanitize_agent_channel(item) for item in value]
-    if isinstance(value, tuple):
-        return [sanitize_agent_channel(item) for item in value]
-    return value
+    """Remove evaluator-only values from nested payloads and free-text fields."""
+    sanitized = _sanitize_agent_value(value)
+    return None if sanitized is _DROP else sanitized
 
 
 class SessionMemory:

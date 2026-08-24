@@ -2575,7 +2575,7 @@ class InspectorPayloadTests(unittest.TestCase):
     """The inspector must never be handed the answer."""
 
     EVALUATOR_KEYS = (
-        "fault_id", "ground_truth", "player_view", "oracle", "oracle_verdict",
+        "fault_id", "ground_truth", "oracle", "oracle_verdict",
         "coverage_status", "verdict", "manifest", "bug_id", "expected_behavior",
     )
 
@@ -2617,7 +2617,10 @@ class InspectorPayloadTests(unittest.TestCase):
         self.assertEqual("run-obs-00000003", payload["observations"][0]["observation_id"])
 
     def test_an_empty_trace_needs_no_api_call(self) -> None:
-        self.assertEqual({"findings": []}, inspector_module.inspect_trace(None, []))
+        self.assertEqual(
+            {"schema_version": "qa-inspection/v2", "findings": []},
+            inspector_module.inspect_trace(None, []),
+        )
 
     def test_malformed_model_output_is_dropped_not_raised(self) -> None:
         cases = (None, {"findings": "nope"}, {"findings": [{"field": "x"}]},
