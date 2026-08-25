@@ -696,11 +696,16 @@ class LLMPlannerTests(unittest.TestCase):
 
         correction = json.loads(request.call_args.kwargs["messages"][-1]["content"])
 
-        self.assertIn("allowed_calls", correction)
         self.assertEqual(
             ["game.restart", "game.return_to_menu"], correction["allowed_calls"]
         )
+        # allowed_calls carry the game. prefix but decision.action does not, and a
+        # correction that echoed the call name produced "game.game.restart is invalid".
+        self.assertEqual(
+            ["restart", "return_to_menu"], correction["allowed_actions"]
+        )
         self.assertIn("replace", correction["instruction"].lower())
+        self.assertIn("allowed_actions", correction["instruction"])
         self.assertNotIn(
             "Preserve valid gameplay tool, action, and arguments;",
             correction["instruction"],

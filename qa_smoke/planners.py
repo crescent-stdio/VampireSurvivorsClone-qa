@@ -1016,6 +1016,9 @@ class LLMPlanner:
             "reflection_contract": payload["reflection_contract"],
         }
         schema = build_decision_response_schema(contract)
+        allowed_calls = [
+            str(call) for call in payload["action_contract"].get("allowed_calls") or []
+        ]
         correction_content = json.dumps(
             {
                 # The previous wording said to preserve tool, action and arguments. When the
@@ -1025,13 +1028,17 @@ class LLMPlanner:
                 # the correction and replacing the action is explicit.
                 "instruction": (
                     "Correct the previous response once. Return only a valid JSON decision. "
-                    "Choose a call from allowed_calls: when the previous action is not in that "
-                    "list, replace it and supply that call's arguments instead of preserving "
-                    "the rejected one. Otherwise keep the valid gameplay tool, action and "
-                    "arguments and correct only the fields named by contract_error. "
+                    "When the previous action is not permitted here, replace it: set action to "
+                    "one of allowed_actions verbatim and supply that action's arguments. "
+                    "allowed_actions carry no tool prefix, so never copy an allowed_calls entry "
+                    "into action. Otherwise keep the valid gameplay tool, action and arguments "
+                    "and correct only the fields named by contract_error. "
                     "Do not invent evidence IDs or candidate IDs."
                 ),
-                "allowed_calls": list(payload["action_contract"].get("allowed_calls") or []),
+                "allowed_calls": allowed_calls,
+                "allowed_actions": [
+                    call.split(".", 1)[1] if "." in call else call for call in allowed_calls
+                ],
                 "contract_error": contract_error,
             },
             ensure_ascii=False,
