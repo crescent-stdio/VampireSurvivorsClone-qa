@@ -159,7 +159,7 @@ class StateChannelTests(unittest.TestCase):
 class V4ScenarioTests(unittest.TestCase):
     def test_v4_suite_contains_three_bug_types_and_verified_paths(self) -> None:
         scenarios = load_v4_scenarios()
-        self.assertEqual(8, len(scenarios))
+        self.assertEqual(14, len(scenarios))
         self.assertEqual(
             {"logic_error", "description_flaw", "data_inconsistency", "control"},
             {scenario.bug_type for scenario in scenarios},
@@ -269,6 +269,201 @@ class V4ScenarioTests(unittest.TestCase):
         result = evaluate_v4_oracle("item_hit_range", transitions)
 
         self.assertEqual("fail", result.verdict)
+
+    def test_v4_gameplay_fault_oracles_detect_each_injected_contract_break(self) -> None:
+        cases = {
+            "upgrade_dialog_closes": [
+                {
+                    "observation": {
+                        "observation_id": "obs-upgrade-before",
+                        "phase": "upgrade_selection",
+                        "menu": {"upgrade_open": True},
+                    }
+                },
+                {
+                    "decision": {"action": "select_upgrade"},
+                    "observation": {
+                        "observation_id": "obs-upgrade-after",
+                        "phase": "upgrade_selection",
+                        "menu": {"upgrade_open": True},
+                    },
+                },
+            ],
+            "movement_matches_input": [
+                {
+                    "observation": {
+                        "observation_id": f"obs-movement-{index}",
+                        "player": {"velocity": {"x": -1.0, "y": 0.0}},
+                        "controller": {"steering": {"x": 1.0, "y": 0.0}},
+                    }
+                }
+                for index in range(3)
+            ],
+            "regular_monster_spawning_continues": [
+                {
+                    "observation": {
+                        "observation_id": "obs-spawn",
+                        "progress": {"level_time": 23.0},
+                        "evaluator_state": {
+                            "telemetry": {
+                                "regular_monsters_spawned": 20,
+                                "regular_last_spawn_time": 18.0,
+                                "regular_expected_spawn_delay": 0.5,
+                                "regular_spawn_schedule_active": True,
+                            }
+                        },
+                    }
+                }
+            ],
+            "weapon_cooldown_repeats": [
+                {
+                    "observation": {
+                        "observation_id": "obs-weapon",
+                        "evaluator_state": {
+                            "telemetry": {
+                                "telemetry_time": 8.0,
+                                "primary_weapon_attacks": 1,
+                                "primary_weapon_first_attack_time": 1.0,
+                                "primary_weapon_last_attack_time": 1.0,
+                                "primary_weapon_expected_cooldown": 2.0,
+                                "primary_weapon_max_interval_ratio": 0.0,
+                            }
+                        },
+                    }
+                }
+            ],
+            "contact_damage_respects_cooldown": [
+                {
+                    "observation": {
+                        "observation_id": "obs-contact",
+                        "evaluator_state": {
+                            "telemetry": {
+                                "contact_damage_hits": 3,
+                                "contact_cooldown_resets": 1,
+                                "contact_interval_samples": 2,
+                                "contact_minimum_interval_ratio": 0.1,
+                            }
+                        },
+                    }
+                }
+            ],
+            "projectile_enemy_collision_applies": [
+                {
+                    "observation": {
+                        "observation_id": "obs-projectile",
+                        "evaluator_state": {
+                            "telemetry": {
+                                "projectile_enemy_collisions": 2,
+                                "projectile_enemy_hits": 0,
+                                "projectile_enemy_consumptions": 0,
+                            }
+                        },
+                    }
+                }
+            ],
+        }
+
+        for oracle_id, transitions in cases.items():
+            with self.subTest(oracle_id=oracle_id):
+                self.assertEqual("fail", evaluate_v4_oracle(oracle_id, transitions).verdict)
+
+    def test_generalized_gameplay_oracles_accept_contract_compliant_outcomes(self) -> None:
+        cases = {
+            "upgrade_dialog_closes": [
+                {
+                    "observation": {
+                        "observation_id": "obs-upgrade-before",
+                        "phase": "upgrade_selection",
+                        "menu": {"upgrade_open": True},
+                    }
+                },
+                {
+                    "decision": {"action": "select_upgrade"},
+                    "observation": {
+                        "observation_id": "obs-upgrade-after",
+                        "phase": "active_gameplay",
+                        "menu": {"upgrade_open": False},
+                    },
+                },
+            ],
+            "movement_matches_input": [
+                {
+                    "observation": {
+                        "observation_id": f"obs-movement-pass-{index}",
+                        "player": {"velocity": {"x": 0.8, "y": 0.1}},
+                        "controller": {"steering": {"x": 1.0, "y": 0.0}},
+                    }
+                }
+                for index in range(3)
+            ],
+            "regular_monster_spawning_continues": [
+                {
+                    "observation": {
+                        "observation_id": f"obs-spawn-pass-{index}",
+                        "progress": {"level_time": 10.0 + index},
+                        "evaluator_state": {
+                            "telemetry": {
+                                "regular_monsters_spawned": 10 + index,
+                                "regular_last_spawn_time": 9.8 + index,
+                                "regular_expected_spawn_delay": 0.5,
+                                "regular_spawn_schedule_active": True,
+                            }
+                        },
+                    }
+                }
+                for index in range(2)
+            ],
+            "weapon_cooldown_repeats": [
+                {
+                    "observation": {
+                        "observation_id": "obs-weapon-pass",
+                        "evaluator_state": {
+                            "telemetry": {
+                                "telemetry_time": 4.1,
+                                "primary_weapon_attacks": 4,
+                                "primary_weapon_first_attack_time": 1.0,
+                                "primary_weapon_last_attack_time": 4.0,
+                                "primary_weapon_expected_cooldown": 1.0,
+                                "primary_weapon_max_interval_ratio": 1.02,
+                            }
+                        },
+                    }
+                }
+            ],
+            "contact_damage_respects_cooldown": [
+                {
+                    "observation": {
+                        "observation_id": "obs-contact-pass",
+                        "evaluator_state": {
+                            "telemetry": {
+                                "contact_damage_hits": 3,
+                                "contact_cooldown_resets": 3,
+                                "contact_interval_samples": 2,
+                                "contact_minimum_interval_ratio": 0.98,
+                            }
+                        },
+                    }
+                }
+            ],
+            "projectile_enemy_collision_applies": [
+                {
+                    "observation": {
+                        "observation_id": "obs-projectile-pass",
+                        "evaluator_state": {
+                            "telemetry": {
+                                "projectile_enemy_collisions": 2,
+                                "projectile_enemy_hits": 2,
+                                "projectile_enemy_consumptions": 2,
+                            }
+                        },
+                    }
+                }
+            ],
+        }
+
+        for oracle_id, transitions in cases.items():
+            with self.subTest(oracle_id=oracle_id):
+                self.assertEqual("pass", evaluate_v4_oracle(oracle_id, transitions).verdict)
 
     def test_v4_control_oracles_accept_their_valid_traces(self) -> None:
         valid_observation = [

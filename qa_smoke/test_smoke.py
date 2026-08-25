@@ -5,6 +5,7 @@ import io
 import json
 import os
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -1563,6 +1564,26 @@ class BridgeProtocolTests(unittest.TestCase):
         observation = client.command("observe", timeout=2.0)
         thread.join(timeout=2.0)
         self.assertEqual("fake Unity response", observation["result"])
+
+    def test_atomic_command_write_retries_transient_windows_sharing_violation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "command.json"
+            real_replace = os.replace
+            attempts = 0
+
+            def transient_replace(source: Path, target: Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise PermissionError("simulated Windows sharing violation")
+                real_replace(source, target)
+
+            with patch.object(bridge_client_module.os, "replace", side_effect=transient_replace):
+                with patch.object(bridge_client_module.time, "sleep"):
+                    BridgeClient._write_json_atomic(destination, {"id": "command-1"})
+
+            self.assertEqual(2, attempts)
+            self.assertEqual({"id": "command-1"}, json.loads(destination.read_text()))
 
     def test_duplicate_observation_identifier_is_rejected(self) -> None:
         client = self.make_client("duplicate-observation")
