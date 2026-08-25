@@ -662,6 +662,46 @@ class LLMPlannerTests(unittest.TestCase):
             request.call_args.kwargs["messages"][-1]["content"],
         )
 
+    def test_decision_schema_covers_a_phase_with_several_allowed_calls(self) -> None:
+        """game_over offers restart and return_to_menu, and used to get no schema at all.
+
+        Without one the model may drop required keys: four of five failed
+        corrections were "qa_observation must be a string", which the schema
+        would have made impossible.
+        """
+        contract = {
+            "phase": "game_over",
+            "allowed_calls": ["game.restart", "game.return_to_menu"],
+            "has_previous_transition": True,
+            "reflection_contract": {"allowed_statuses": ["matched", "unexpected", "uncertain"]},
+        }
+
+        schema = build_decision_response_schema(contract)
+
+        self.assertIsNotNone(schema)
+        self.assertEqual(
+            ["restart", "return_to_menu"], schema["properties"]["action"]["enum"]
+        )
+        self.assertIn("qa_observation", schema["required"])
+        self.assertIn("reflection", schema["required"])
+
+    def test_decision_schema_keeps_single_call_arguments_strict(self) -> None:
+        """Generalising to several calls must not loosen the single-call shape."""
+        contract = {
+            "phase": "active_gameplay",
+            "allowed_calls": ["game.direct_steer"],
+            "has_previous_transition": False,
+            "reflection_contract": {"allowed_statuses": ["not_applicable"]},
+        }
+
+        schema = build_decision_response_schema(contract)
+
+        self.assertEqual(["direct_steer"], schema["properties"]["action"]["enum"])
+        self.assertEqual(
+            ["x", "y", "duration", "intent", "target_id"],
+            schema["properties"]["arguments"]["required"],
+        )
+
     def test_repair_prompt_replaces_an_action_the_phase_forbids(self) -> None:
         """A game-over episode died twice because the correction told the model to keep its action.
 

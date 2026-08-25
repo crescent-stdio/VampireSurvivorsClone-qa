@@ -61,6 +61,8 @@ from .screenshot_evidence import finalize_evidence_screenshot
 
 
 EXPLORATION_REPORT_SCHEMA = "qa-exploration-report/v1"
+# Statuses a campaign survives: the episode is excluded, the run continues.
+SURVIVABLE_EXECUTION_STATUSES = frozenset({"schema_failure"})
 TRACK_A_PRESET = "smoke"
 PLANNED_INSPECTION_CALLS = 189
 POC_TRACK_A_MISSION_IDS = (
@@ -1249,6 +1251,11 @@ def _validate_required_episode_result(
         raise CampaignContractError(
             f"Track A clean-launch contract failed for {spec.unit_id}"
         )
+    if result.execution_status in SURVIVABLE_EXECUTION_STATUSES:
+        # The model broke its own action contract and the one correction did not
+        # recover. That is a finding about the model, not a broken campaign, and
+        # the trace is dropped from candidate aggregation by _candidate_eligible.
+        return
     if result.execution_status != "completed":
         raise CampaignExecutionError(
             f"required exploration execution failed for {spec.unit_id}: "
@@ -1510,22 +1517,27 @@ def run_exploration_campaign(
                     opaque_trace_id=opaque_id,
                 )
             _validate_required_episode_result(spec, result)
-            passes = _inspect_record(
-                opaque_trace_id=opaque_id,
-                result=result,
-                output=output,
-                inspector=inspector,
-                checkpoint=checkpoint,
-                budget=budget,
-                campaign_hash=campaign_hash,
-            )
-            if (
-                len(passes) != INSPECTION_REPETITIONS
-                or any(artifact is None for artifact in passes)
-            ):
-                raise CampaignExecutionError(
-                    f"required exploration inspection failed for {spec.unit_id}"
+            excluded = result.execution_status in SURVIVABLE_EXECUTION_STATUSES
+            passes: list[Any] = []
+            if not excluded:
+                # An excluded trace never reaches candidate aggregation, so paying
+                # three inspection calls on it would buy nothing.
+                passes = _inspect_record(
+                    opaque_trace_id=opaque_id,
+                    result=result,
+                    output=output,
+                    inspector=inspector,
+                    checkpoint=checkpoint,
+                    budget=budget,
+                    campaign_hash=campaign_hash,
                 )
+                if (
+                    len(passes) != INSPECTION_REPETITIONS
+                    or any(artifact is None for artifact in passes)
+                ):
+                    raise CampaignExecutionError(
+                        f"required exploration inspection failed for {spec.unit_id}"
+                    )
             record = ExplorationTraceRecord(
                 spec=spec,
                 opaque_trace_id=opaque_id,

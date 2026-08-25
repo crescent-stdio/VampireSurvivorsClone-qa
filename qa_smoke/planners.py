@@ -444,11 +444,18 @@ def canonicalize_decision_arguments(decision: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_decision_response_schema(contract: dict[str, Any]) -> dict[str, Any] | None:
-    """Build a strict schema when the phase has exactly one unambiguous game-call shape."""
-    allowed_calls = contract.get("allowed_calls") or []
-    if len(allowed_calls) != 1 or not str(allowed_calls[0]).startswith("game."):
+    """Build a strict schema for any phase whose calls are all game calls.
+
+    A single call pins the argument shape too. Several calls cannot, since their
+    arguments differ, but the action enum and the required top-level keys still
+    apply: leaving those phases schema-free is how corrections came back missing
+    qa_observation, which was four of the five unrecoverable contract failures.
+    """
+    allowed_calls = [str(call) for call in contract.get("allowed_calls") or []]
+    if not allowed_calls or not all(call.startswith("game.") for call in allowed_calls):
         return None
-    action = str(allowed_calls[0]).split(".", 1)[1]
+    actions = [call.split(".", 1)[1] for call in allowed_calls]
+    action = actions[0] if len(actions) == 1 else ""
     reflection_contract = contract.get("reflection_contract") or {}
     allowed_reflection_statuses = reflection_contract.get("allowed_statuses")
     if not isinstance(allowed_reflection_statuses, list) or not allowed_reflection_statuses:
@@ -459,7 +466,11 @@ def build_decision_response_schema(contract: dict[str, Any]) -> dict[str, Any] |
         )
     argument_properties: dict[str, Any] = {}
     required_arguments: list[str] = []
-    if action in ("start_game", "select_upgrade", "use_item"):
+    if not action:
+        # Several actions share this phase and their argument shapes differ, so the
+        # object stays open here and validate_decision_against_contract checks it.
+        arguments_schema: dict[str, Any] = {"type": "object"}
+    elif action in ("start_game", "select_upgrade", "use_item"):
         index_schema: dict[str, Any] = {"type": "integer"}
         allowed_indices = contract.get("allowed_indices") or []
         if allowed_indices:
@@ -511,20 +522,26 @@ def build_decision_response_schema(contract: dict[str, Any]) -> dict[str, Any] |
         "arguments",
         "reflection",
     ]
-    requires_expected = (
-        not contract.get("has_previous_transition")
-        or action
-        in (
-            "direct_steer",
-            "steer",
-            "move",
-            "wait",
-            "select_upgrade",
-            "use_item",
-            "restart",
-            "start_game",
-            "return_to_menu",
-        )
+    if action:
+        arguments_schema = {
+            "type": "object",
+            "properties": argument_properties,
+            "required": required_arguments,
+            "additionalProperties": False,
+        }
+    expected_effect_actions = (
+        "direct_steer",
+        "steer",
+        "move",
+        "wait",
+        "select_upgrade",
+        "use_item",
+        "restart",
+        "start_game",
+        "return_to_menu",
+    )
+    requires_expected = not contract.get("has_previous_transition") or any(
+        candidate in expected_effect_actions for candidate in actions
     )
     if requires_expected:
         required_fields.append("expected_effect")
@@ -535,13 +552,8 @@ def build_decision_response_schema(contract: dict[str, Any]) -> dict[str, Any] |
             "hypothesis": {"type": "string"},
             "qa_observation": {"type": "string"},
             "tool": {"type": "string", "enum": ["game"]},
-            "action": {"type": "string", "enum": [action]},
-            "arguments": {
-                "type": "object",
-                "properties": argument_properties,
-                "required": required_arguments,
-                "additionalProperties": False,
-            },
+            "action": {"type": "string", "enum": actions},
+            "arguments": arguments_schema,
             "expected_effect": {"type": "string"},
             "reflection": reflection_schema,
         },

@@ -677,6 +677,36 @@ def test_dirty_or_required_execution_failure_makes_campaign_incomplete(
     assert not (settings.output / "exploration-report.ko.md").exists()
 
 
+def test_contract_failure_completes_the_campaign_and_excludes_the_trace(
+    tmp_path: Path,
+) -> None:
+    """The campaign publishes, the trace is excluded, and no inspection is spent on it."""
+    settings = campaign_config(tmp_path)
+    inspector = FakeInspector()
+
+    result = exploration.run_exploration_campaign(
+        settings,
+        backend=ResultBackend(
+            exploration.ExplorationEpisodeResult(
+                transitions=[transition(0)],
+                execution_status="schema_failure",
+                coverage_status="error",
+                error="LLMContractError",
+            )
+        ),
+        inspector=inspector,
+    )
+
+    manifest = json.loads((settings.output / "campaign-manifest.json").read_text())
+    report = json.loads((settings.output / "exploration-report.json").read_text())
+
+    assert manifest["status"] == "complete"
+    assert report["summary"]["excluded_harness_traces"] == report["summary"]["scheduled_traces"]
+    assert report["summary"]["candidate_count"] == 0
+    assert manifest["counts"]["logical_inspection_calls"] == 0
+    assert all(not record.inspection_passes for record in result.records)
+
+
 def test_backend_failure_artifacts_keep_only_a_safe_error_type(tmp_path: Path) -> None:
     settings = campaign_config(tmp_path)
 
@@ -1880,3 +1910,35 @@ def test_campaign_output_preserves_explicit_path(tmp_path: Path) -> None:
     )
 
     assert resolved == explicit
+
+
+def test_contract_failure_excludes_the_trace_instead_of_killing_the_campaign() -> None:
+    """A single unrepaired contract violation used to end a 24 trace campaign.
+
+    The one correction succeeds about 58% of the time, so requiring 24 clean
+    recoveries in a row never completes. The trace is excluded from candidate
+    aggregation and the campaign carries on.
+    """
+    spec = exploration.build_track_a_schedule("poc")[0]
+    result = exploration.ExplorationEpisodeResult(
+        transitions=[{"observation": {"observation_id": "obs-1"}}],
+        execution_status="schema_failure",
+        coverage_status="error",
+        error="LLMContractError",
+    )
+
+    exploration._validate_required_episode_result(spec, result)
+
+
+def test_infrastructure_failure_still_kills_the_campaign() -> None:
+    """Only the model's own contract slips are survivable; a broken bridge is not."""
+    spec = exploration.build_track_a_schedule("poc")[0]
+    result = exploration.ExplorationEpisodeResult(
+        transitions=[],
+        execution_status="infrastructure_error",
+        coverage_status="error",
+        error="BridgeError",
+    )
+
+    with pytest.raises(exploration.CampaignExecutionError):
+        exploration._validate_required_episode_result(spec, result)
