@@ -3914,6 +3914,121 @@ class BridgeAssistGuardTests(unittest.TestCase):
         self.assertEqual(0.6, decision["arguments"]["x"])
         self.assertEqual(-0.8, decision["arguments"]["y"])
 
+    def test_hybrid_active_gameplay_exposes_only_ready_inventory_items(self) -> None:
+        observation = {
+            "player": {"present": True, "alive": True},
+            "menu": {},
+            "available_actions": ["direct_steer", "use_item"],
+            "inventory": {
+                "slots": [
+                    {"index": 0, "type": "Health", "count": 1, "pending_count": 0},
+                    {"index": 1, "type": "Bomb", "count": 0, "pending_count": 2},
+                    {"index": 2, "type": "Magnet", "count": 3, "pending_count": 0},
+                ]
+            },
+        }
+
+        contract = build_action_contract(
+            observation, "qa", TestCharter(bridge_assist=True), 0
+        )
+
+        self.assertEqual(
+            ["game.direct_steer", "game.use_item"], contract["allowed_calls"]
+        )
+        self.assertEqual([0, 2], contract["allowed_indices"])
+        self.assertEqual(
+            {"index": "integer chosen from ready_item_indices=[0, 2]"},
+            contract["argument_contracts"]["game.use_item"],
+        )
+
+    def test_hybrid_ready_item_contract_reason_permits_item_use(self) -> None:
+        contract = build_action_contract(
+            {
+                "player": {"present": True, "alive": True},
+                "menu": {},
+                "available_actions": ["direct_steer", "use_item"],
+                "inventory": {
+                    "slots": [{"index": 0, "type": "Health", "count": 1}]
+                },
+            },
+            "qa",
+            TestCharter(bridge_assist=True),
+            0,
+        )
+
+        self.assertIn("game.use_item", contract["allowed_calls"])
+        self.assertIn("use_item", contract["reason"])
+        self.assertNotIn("next movement vector", contract["reason"])
+
+    def test_hybrid_item_only_contract_reason_does_not_offer_movement(self) -> None:
+        contract = build_action_contract(
+            {
+                "player": {"present": True, "alive": True},
+                "menu": {},
+                "available_actions": ["use_item"],
+                "inventory": {
+                    "slots": [{"index": 0, "type": "Health", "count": 1}]
+                },
+            },
+            "qa",
+            TestCharter(bridge_assist=True),
+            0,
+        )
+
+        self.assertEqual(["game.use_item"], contract["allowed_calls"])
+        self.assertIn("game.use_item", contract["reason"])
+        self.assertNotIn("permitted movement action", contract["reason"])
+
+    def test_hybrid_item_decision_uses_the_selected_call_contract(self) -> None:
+        observation = {
+            "player": {"present": True, "alive": True},
+            "menu": {},
+            "available_actions": ["direct_steer", "use_item"],
+            "inventory": {"slots": [{"index": 4, "type": "Health", "count": 1}]},
+        }
+        planner = LLMPlanner(
+            "qa", "test-model", TestCharter(bridge_assist=True), 5.0, api_key="test-key"
+        )
+        contract = planner._planning_payload(observation, 1, [], 0)["action_contract"]
+        item_decision = {
+            "qa_observation": "Health is low enough to justify consuming the ready item.",
+            "tool": "game",
+            "action": "use_item",
+            "arguments": {"index": 4},
+            "expected_effect": "The ready item should be consumed and affect the player.",
+            "reflection": {
+                "status": "not_applicable",
+                "summary": "No previous transition exists.",
+                "evidence_refs": [],
+                "candidate_id": "",
+                "reproduction_attempted": False,
+            },
+        }
+
+        self.assertEqual(
+            {"index": "integer chosen from ready_item_indices=[4]"},
+            contract["argument_contracts"]["game.use_item"],
+        )
+        self.assertIsNone(validate_decision_against_contract(item_decision, contract))
+
+    def test_llm_active_gameplay_contract_remains_movement_only(self) -> None:
+        observation = {
+            "player": {"present": True, "alive": True},
+            "menu": {},
+            "available_actions": ["direct_steer", "use_item"],
+            "inventory": {
+                "slots": [
+                    {"index": 0, "type": "Health", "count": 1, "pending_count": 0}
+                ]
+            },
+        }
+
+        contract = build_action_contract(observation, "qa", TestCharter(), 0)
+
+        self.assertEqual(["game.direct_steer"], contract["allowed_calls"])
+        self.assertEqual([], contract["allowed_indices"])
+        self.assertNotIn("argument_contracts", contract)
+
     def test_bridge_assist_is_not_recorded_as_a_constraint_enforcement(self) -> None:
         """constraint_enforcements means the agent violated the charter.
 
@@ -3932,6 +4047,68 @@ class BridgeAssistGuardTests(unittest.TestCase):
         )
 
         self.assertEqual([], decision["constraint_enforcements"])
+
+    def test_hybrid_high_danger_caps_movement_horizon_and_records_adjustment(self) -> None:
+        decision = normalize_decision(
+            {
+                "tool": "game",
+                "action": "direct_steer",
+                "arguments": {"x": 1.0, "y": 0.0, "duration": 5.0},
+            },
+            "qa",
+            TestCharter(bridge_assist=True),
+            action_seconds=5.0,
+            llm_direct_control=True,
+            observation={"world": {"danger_score": 0.85}},
+        )
+
+        self.assertEqual(1.0, decision["arguments"]["duration"])
+        self.assertEqual(
+            [
+                {
+                    "kind": "hybrid_danger_horizon_cap",
+                    "danger_score": 0.85,
+                    "threshold": 0.85,
+                    "requested_duration": 5.0,
+                    "executed_duration": 1.0,
+                }
+            ],
+            decision["policy_adjustments"],
+        )
+
+    def test_hybrid_safe_state_keeps_configured_movement_horizon(self) -> None:
+        decision = normalize_decision(
+            {
+                "tool": "game",
+                "action": "direct_steer",
+                "arguments": {"x": 1.0, "y": 0.0, "duration": 5.0},
+            },
+            "qa",
+            TestCharter(bridge_assist=True),
+            action_seconds=5.0,
+            llm_direct_control=True,
+            observation={"world": {"danger_score": 0.84}},
+        )
+
+        self.assertEqual(5.0, decision["arguments"]["duration"])
+        self.assertNotIn("policy_adjustments", decision)
+
+    def test_llm_high_danger_keeps_pure_policy_movement_horizon(self) -> None:
+        decision = normalize_decision(
+            {
+                "tool": "game",
+                "action": "direct_steer",
+                "arguments": {"x": 1.0, "y": 0.0, "duration": 5.0},
+            },
+            "qa",
+            TestCharter(),
+            action_seconds=5.0,
+            llm_direct_control=True,
+            observation={"world": {"danger_score": 0.95}},
+        )
+
+        self.assertEqual(5.0, decision["arguments"]["duration"])
+        self.assertNotIn("policy_adjustments", decision)
 
     def test_hybrid_policy_selects_the_llm_planner(self) -> None:
         args = run_module.parse_args(
@@ -4062,7 +4239,7 @@ class BridgeAssistGuardTests(unittest.TestCase):
         hybrid = RunRecorder(output_dir=TEST_TEMP_ROOT / "pv-hybrid", seed=1, mode="qa", policy="hybrid")
 
         self.assertEqual("qa-planning/v6", base.effective_prompt_version())
-        self.assertEqual("qa-planning/v6-hybrid", hybrid.effective_prompt_version())
+        self.assertEqual("qa-planning/v6-hybrid-smart-v1", hybrid.effective_prompt_version())
 
     def test_hybrid_charter_declares_the_automatic_avoidance(self) -> None:
         control = TestCharter(bridge_assist=True).as_dict()["control_policy"]
@@ -4073,6 +4250,27 @@ class BridgeAssistGuardTests(unittest.TestCase):
         # The assist blends; it never re-aims or targets, so these stay true.
         self.assertFalse(control["automatic_chest_targeting"])
         self.assertFalse(control["automatic_direction_correction"])
+
+    def test_hybrid_charter_prioritizes_item_use_without_changing_llm_priorities(self) -> None:
+        hybrid_priority = TestCharter(bridge_assist=True).as_dict()["control_policy"][
+            "priority_order"
+        ]
+        llm_priority = TestCharter().as_dict()["control_policy"]["priority_order"]
+
+        self.assertEqual(
+            [
+                "survive",
+                "urgent_item_use",
+                "mission_progress",
+                "collection",
+                "qa_checks",
+            ],
+            hybrid_priority,
+        )
+        self.assertEqual(
+            ["survive", "collect_reachable_chests", "net_heading_progress", "coverage"],
+            llm_priority,
+        )
 
     def test_hybrid_charter_publishes_the_assist_weight(self) -> None:
         navigation = TestCharter(bridge_assist=True, assist_survival_weight=0.9).as_dict()[
@@ -4096,6 +4294,32 @@ class BridgeAssistGuardTests(unittest.TestCase):
             self.assertNotIn(claim, prompt)
         self.assertIn("escape_vector * 0.6 * clamp01(0.35 + danger)", prompt)
         self.assertIn("controller.commanded", prompt)
+
+    def test_llm_prompt_keeps_baseline_action_contract_guidance(self) -> None:
+        prompt = LLMPlanner(
+            "qa", "test-model", TestCharter(), 5.0, api_key="test-key"
+        )._planning_system_prompt()
+
+        self.assertIn(
+            "arguments MUST always be a JSON object matching action_contract.required_arguments.",
+            prompt,
+        )
+        self.assertIn(
+            "During active gameplay use direct_steer. You alone must decide whether to continue "
+            "the requested heading, evade enemies, or approach a specific chest from "
+            "world.visible_chests.",
+            prompt,
+        )
+        self.assertNotIn("argument_contracts contains the selected call", prompt)
+        self.assertNotIn("also permits game.use_item", prompt)
+
+    def test_hybrid_prompt_uses_selected_call_action_contract_guidance(self) -> None:
+        prompt = LLMPlanner(
+            "qa", "test-model", TestCharter(bridge_assist=True), 5.0, api_key="test-key"
+        )._planning_system_prompt()
+
+        self.assertIn("argument_contracts contains the selected call", prompt)
+        self.assertIn("also permits game.use_item", prompt)
 
     def test_deterministic_gate_cli_rejects_a_hybrid_request(self) -> None:
         scenarios = [

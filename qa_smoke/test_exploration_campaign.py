@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -189,6 +190,28 @@ def test_fixed_track_a_schedule_has_exact_24_clean_llm_runs() -> None:
     assert all(item.driver == "llm" and item.model == "gpt-4o-mini" for item in schedule)
     assert all(item.source_tools_enabled is False for item in schedule)
     assert all(item.nested_inspector_enabled is False for item in schedule)
+
+
+def test_poc_track_a_schedule_has_exact_selected_missions_and_seeds() -> None:
+    schedule = exploration.build_track_a_schedule("poc")
+
+    assert len(schedule) == 6
+    assert {item.seed for item in schedule} == {9101, 9102}
+    assert {item.mission_id for item in schedule} == {
+        "core-combat-survival",
+        "core-progression-upgrades",
+        "core-death-restart-isolation",
+    }
+
+
+def test_track_a_profile_changes_campaign_identity(tmp_path: Path) -> None:
+    full = campaign_config(tmp_path)
+    poc = replace(full, profile="poc")
+    build_hash = exploration.hash_path(full.build)
+
+    assert exploration._campaign_hash(full, build_hash) != exploration._campaign_hash(
+        poc, build_hash
+    )
 
 
 def test_track_a_spec_rejects_faults_hybrid_tools_and_nested_inspection() -> None:
@@ -1779,6 +1802,7 @@ def test_cli_parses_explore_options_and_keeps_benchmark_detection_stable(tmp_pat
 
     assert parsed.command == "explore"
     assert parsed.resume is True
+    assert parsed.profile == "full"
     assert parsed.output == tmp_path / "out"
     assert parsed.api_url == "https://example.invalid/v1/chat/completions"
     assert not hasattr(parsed, "model")
@@ -1793,4 +1817,66 @@ def test_cli_parses_explore_options_and_keeps_benchmark_detection_stable(tmp_pat
         ]
     )
     assert benchmark.command == "benchmark-detection"
+    assert benchmark.profile == "full"
     assert not hasattr(benchmark, "resume")
+
+
+def test_cli_parses_poc_profiles_without_requiring_output(tmp_path: Path) -> None:
+    explore = cli_module.parse_cli(
+        ["explore", "--build", str(tmp_path / "game"), "--profile", "poc"]
+    )
+    benchmark = cli_module.parse_cli(
+        [
+            "benchmark-detection",
+            "--build",
+            str(tmp_path / "game"),
+            "--profile",
+            "poc",
+        ]
+    )
+
+    assert explore.output is None
+    assert explore.profile == "poc"
+    assert benchmark.output is None
+    assert benchmark.profile == "poc"
+
+
+def test_explore_resume_requires_explicit_output(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        cli_module.parse_cli(
+            ["explore", "--build", str(tmp_path / "game"), "--resume"]
+        )
+
+
+def test_timestamped_campaign_output_is_collision_safe(tmp_path: Path) -> None:
+    timestamp = datetime(2026, 8, 25, 12, 34, 56, tzinfo=timezone.utc)
+
+    first = cli_module._resolve_campaign_output(
+        project_root=tmp_path,
+        output=None,
+        track="track-a",
+        timestamp=timestamp,
+    )
+    second = cli_module._resolve_campaign_output(
+        project_root=tmp_path,
+        output=None,
+        track="track-a",
+        timestamp=timestamp,
+    )
+
+    assert first == tmp_path / "QAArtifacts/evaluation/track-a/20260825-123456"
+    assert second == tmp_path / "QAArtifacts/evaluation/track-a/20260825-123456-01"
+    assert first.is_dir()
+    assert second.is_dir()
+
+
+def test_campaign_output_preserves_explicit_path(tmp_path: Path) -> None:
+    explicit = Path("relative/custom-output")
+
+    resolved = cli_module._resolve_campaign_output(
+        project_root=tmp_path,
+        output=explicit,
+        track="track-b",
+    )
+
+    assert resolved == explicit

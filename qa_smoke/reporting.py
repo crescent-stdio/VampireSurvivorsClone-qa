@@ -466,7 +466,11 @@ class RunRecorder:
 
     def effective_prompt_version(self) -> str:
         """hybrid branches the system prompt, so the manifest must not claim v4."""
-        return f"{self.prompt_version}-hybrid" if self.policy == "hybrid" else self.prompt_version
+        return (
+            f"{self.prompt_version}-hybrid-smart-v1"
+            if self.policy == "hybrid"
+            else self.prompt_version
+        )
 
     @property
     def uses_llm_planner(self) -> bool:

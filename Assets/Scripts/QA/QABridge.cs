@@ -247,6 +247,12 @@ namespace Vampire.QA
                     case "return_to_menu":
                         ReturnToMenu(command);
                         break;
+                    case "capture_screenshot":
+                        QaBridgeScreenshotService.CapturePendingFrame(
+                            bridgeDirectory,
+                            new UnityQaFailureScreenshotCapture());
+                        Complete(command, true, "Final screenshot captured");
+                        break;
                     case "shutdown":
                         Complete(command, true, "Game shutdown requested");
                         Application.Quit();
@@ -1538,6 +1544,30 @@ namespace Vampire.QA
             if (File.Exists(path))
                 File.Delete(path);
             File.Move(temp, path);
+        }
+    }
+
+    public static class QaBridgeScreenshotService
+    {
+        public const string PendingFilename = "final-frame.pending.png";
+
+        public static string CapturePendingFrame(
+            string bridgeDirectory,
+            IQaFailureScreenshotCapture screenshotCapture)
+        {
+            if (string.IsNullOrWhiteSpace(bridgeDirectory))
+                throw new ArgumentException("Bridge directory is required.", nameof(bridgeDirectory));
+            if (screenshotCapture == null)
+                throw new ArgumentNullException(nameof(screenshotCapture));
+
+            string sessionDirectory = Path.GetDirectoryName(Path.GetFullPath(bridgeDirectory));
+            if (string.IsNullOrWhiteSpace(sessionDirectory))
+                throw new InvalidOperationException("Bridge directory has no session directory.");
+            string pendingPath = Path.Combine(sessionDirectory, PendingFilename);
+            screenshotCapture.Capture(pendingPath);
+            if (!File.Exists(pendingPath))
+                throw new IOException("Screenshot capture returned without publishing the pending frame.");
+            return pendingPath;
         }
     }
 }

@@ -6,11 +6,12 @@ import json
 import re
 import uuid
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol, Sequence
 
+from .adapters import read_final_screenshot_metadata
 from .detection_campaign import (
     CAMPAIGN_MANIFEST_SCHEMA,
     INSPECTION_REPETITIONS,
@@ -56,11 +57,18 @@ from .planners import (
 from .reporting import RunRecorder
 from .run import parse_args as parse_run_args
 from .run import run_session
+from .screenshot_evidence import finalize_evidence_screenshot
 
 
 EXPLORATION_REPORT_SCHEMA = "qa-exploration-report/v1"
 TRACK_A_PRESET = "smoke"
 PLANNED_INSPECTION_CALLS = 189
+POC_TRACK_A_MISSION_IDS = (
+    "core-combat-survival",
+    "core-progression-upgrades",
+    "core-death-restart-isolation",
+)
+POC_TRACK_A_SEEDS = (9101, 9102)
 STEERING_PROMPT_TEMPLATE_VERSION = str(
     RunRecorder.__dataclass_fields__["prompt_version"].default
 )
@@ -165,6 +173,9 @@ class ExplorationEpisodeResult:
     harness_failures: Sequence[dict[str, Any]] = field(default_factory=tuple)
     trace_evidence_refs: Sequence[str] = field(default_factory=tuple)
     error: str = ""
+    screenshot_path: str | None = None
+    screenshot_error: str = ""
+    screenshot_retention_axes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -176,6 +187,9 @@ class ExplorationEpisodeResult:
             "harness_failures": list(self.harness_failures),
             "trace_evidence_refs": list(self.trace_evidence_refs),
             "error": _public_error_type(self.error),
+            "screenshot_path": self.screenshot_path,
+            "screenshot_error": _public_error_type(self.screenshot_error),
+            "screenshot_retention_axes": list(self.screenshot_retention_axes),
         }
 
     @classmethod
@@ -189,6 +203,7 @@ class ExplorationEpisodeResult:
         validations = value.get("invariant_validations") or []
         failures = value.get("harness_failures") or []
         trace_evidence_refs = value.get("trace_evidence_refs") or []
+        screenshot_retention_axes = value.get("screenshot_retention_axes") or []
         if not isinstance(launch_faults, list) or any(
             not isinstance(item, str) for item in launch_faults
         ):
@@ -205,6 +220,12 @@ class ExplorationEpisodeResult:
             not isinstance(item, str) for item in trace_evidence_refs
         ):
             raise CampaignContractError("trace evidence refs must be a list of strings")
+        if not isinstance(screenshot_retention_axes, list) or any(
+            not isinstance(item, str) for item in screenshot_retention_axes
+        ):
+            raise CampaignContractError(
+                "screenshot retention axes must be a list of strings"
+            )
         return cls(
             transitions=transitions,
             execution_status=str(value.get("execution_status") or "schema_error"),
@@ -214,6 +235,11 @@ class ExplorationEpisodeResult:
             harness_failures=tuple(failures),
             trace_evidence_refs=tuple(trace_evidence_refs),
             error=str(value.get("error") or ""),
+            screenshot_path=(
+                str(value["screenshot_path"]) if value.get("screenshot_path") else None
+            ),
+            screenshot_error=str(value.get("screenshot_error") or ""),
+            screenshot_retention_axes=tuple(screenshot_retention_axes),
         )
 
 
@@ -243,6 +269,7 @@ class ExplorationCampaignConfig:
     quiet: bool = False
     api_url: str | None = None
     resume: bool = False
+    profile: Literal["full", "poc"] = "full"
 
 
 @dataclass(frozen=True)
@@ -253,8 +280,21 @@ class ExplorationCampaignResult:
     resumed: bool
 
 
-def build_track_a_schedule() -> tuple[ExplorationEpisodeSpec, ...]:
-    """Build the fixed five-core plus three-long mission schedule."""
+def build_track_a_schedule(
+    profile: Literal["full", "poc"] = "full",
+) -> tuple[ExplorationEpisodeSpec, ...]:
+    """Build the full acceptance schedule or the fixed PoC subset."""
+
+    if profile not in {"full", "poc"}:
+        raise CampaignContractError("Track A profile must be full or poc")
+    missions = (
+        MISSIONS
+        if profile == "full"
+        else tuple(
+            mission for mission in MISSIONS if mission.mission_id in POC_TRACK_A_MISSION_IDS
+        )
+    )
+    seeds = SEEDS if profile == "full" else POC_TRACK_A_SEEDS
 
     schedule = tuple(
         ExplorationEpisodeSpec(
@@ -266,18 +306,30 @@ def build_track_a_schedule() -> tuple[ExplorationEpisodeSpec, ...]:
             max_simulation_seconds=mission.max_simulation_seconds,
             max_steps=mission.max_steps,
         )
-        for mission in MISSIONS
-        for seed in SEEDS
+        for mission in missions
+        for seed in seeds
     )
     planned = sum(
         _max_chunks_for_steps(spec.max_steps) * INSPECTION_REPETITIONS
         for spec in schedule
     )
-    if len(schedule) != 24 or planned != PLANNED_INSPECTION_CALLS:
+    expected_count = 24 if profile == "full" else 6
+    if len(schedule) != expected_count or (
+        profile == "full" and planned != PLANNED_INSPECTION_CALLS
+    ):
         raise CampaignContractError("Track A schedule no longer matches fixed acceptance totals")
     for spec in schedule:
         validate_track_a_spec(spec)
     return schedule
+
+
+def _planned_track_a_inspection_calls(
+    schedule: Sequence[ExplorationEpisodeSpec],
+) -> int:
+    return sum(
+        _max_chunks_for_steps(spec.max_steps) * INSPECTION_REPETITIONS
+        for spec in schedule
+    )
 
 
 def validate_track_a_spec(spec: ExplorationEpisodeSpec) -> None:
@@ -561,6 +613,21 @@ def _runtime_oracle_occurrences(
     return occurrences
 
 
+def _screenshot_retention_axes(
+    record: ExplorationTraceRecord,
+) -> tuple[str, ...]:
+    """Select independent evidence axes without exposing the screenshot to inspectors."""
+
+    axes: list[str] = []
+    if _planner_occurrences(record):
+        axes.append("planner")
+    if _inspector_occurrences(record):
+        axes.append("inspector")
+    if _runtime_oracle_occurrences(record):
+        axes.append("runtime_oracle")
+    return tuple(axes)
+
+
 def _record_failures(record: ExplorationTraceRecord) -> list[dict[str, Any]]:
     common = {
         "trace_id": record.opaque_trace_id,
@@ -774,6 +841,18 @@ def build_exploration_report(
     tier_counter = Counter(candidate["tier"] for candidate in candidates)
     eligible_count = sum(_coverage_eligible(record) for record in records)
     candidate_evidence_count = sum(_candidate_eligible(record) for record in records)
+    screenshots = [
+        {
+            "trace_id": record.opaque_trace_id,
+            "path": record.result.screenshot_path,
+            "retention_axes": list(record.result.screenshot_retention_axes),
+            "capture_error": _public_error_type(record.result.screenshot_error),
+        }
+        for record in records
+        if record.result.screenshot_path
+        or record.result.screenshot_error
+        or record.result.screenshot_retention_axes
+    ]
     return {
         "schema_version": EXPLORATION_REPORT_SCHEMA,
         "metadata": dict(metadata),
@@ -786,6 +865,12 @@ def build_exploration_report(
             ),
             "excluded_harness_traces": len(records) - candidate_evidence_count,
             "candidate_count": len(candidates),
+            "retained_screenshot_count": sum(
+                bool(record.result.screenshot_path) for record in records
+            ),
+            "capture_error_count": sum(
+                bool(record.result.screenshot_error) for record in records
+            ),
         },
         "surface_counts": {
             "planner_only": surface_counter["planner_only"],
@@ -808,6 +893,7 @@ def build_exploration_report(
             priority: priority_counter[priority] for priority in ("P0", "P1", "P2", "P3")
         },
         "candidates": candidates,
+        "screenshots": screenshots,
         "harness_failures": failures,
         "interpretation": {
             "candidate_scope": "관찰 증거에 연결된 후보이며 확정 판정이 아닙니다.",
@@ -890,6 +976,8 @@ def render_exploration_markdown(report: Mapping[str, Any]) -> str:
         f"- coverage 미도달 trace: {summary.get('coverage_not_reached_traces', 0)}",
         f"- harness 제외 trace: {summary.get('excluded_harness_traces', 0)}",
         f"- 후보 합계: {summary.get('candidate_count', 0)}",
+        f"- 보존 스크린샷: {summary.get('retained_screenshot_count', 0)}",
+        f"- 스크린샷 캡처 오류: {summary.get('capture_error_count', 0)}",
         "",
         "## LLM 탐지 표면",
         "",
@@ -960,6 +1048,24 @@ def render_exploration_markdown(report: Mapping[str, Any]) -> str:
             omitted = len(evidence) - MAX_MARKDOWN_EVIDENCE_ROWS_PER_CANDIDATE
             if omitted > 0:
                 lines.append(f"  - 추가 증거 {omitted}건은 JSON 보고서에 보존됨")
+    lines.extend(["", "## 증거 스크린샷", ""])
+    screenshots = report.get("screenshots") or []
+    if not screenshots:
+        lines.append("보존된 증거 스크린샷이 없습니다.")
+    else:
+        lines.extend(
+            [
+                "| Trace | 상대 경로 | 보존 축 | 캡처 오류 |",
+                "|---|---|---|---|",
+            ]
+        )
+        for screenshot in screenshots:
+            axes = ", ".join(screenshot.get("retention_axes") or []) or "-"
+            lines.append(
+                f"| `{screenshot.get('trace_id', '-')}` | "
+                f"`{screenshot.get('path') or '-'}` | `{axes}` | "
+                f"`{screenshot.get('capture_error') or '-'}` |"
+            )
     lines.extend(["", "## Harness 및 coverage 실패", ""])
     if not failures:
         lines.append("별도 harness 또는 coverage 실패가 없습니다.")
@@ -987,6 +1093,7 @@ def render_exploration_markdown(report: Mapping[str, Any]) -> str:
 
 
 def _campaign_hash(config: ExplorationCampaignConfig, build_hash: str) -> str:
+    schedule = build_track_a_schedule(config.profile)
     return _sha256(
         {
             "build_hash": build_hash,
@@ -995,6 +1102,7 @@ def _campaign_hash(config: ExplorationCampaignConfig, build_hash: str) -> str:
             "effective_api_endpoint": _sha256(resolve_llm_api_url(config.api_url)),
             "headless": config.headless,
             "quiet": config.quiet,
+            "profile": config.profile,
             "steering_model": STEERING_MODEL,
             "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
             "steering_prompt": _steering_prompt_digest(),
@@ -1010,6 +1118,7 @@ def _campaign_hash(config: ExplorationCampaignConfig, build_hash: str) -> str:
             ),
             "missions": [asdict(mission) for mission in MISSIONS],
             "seeds": SEEDS,
+            "selected_schedule": [asdict(spec) for spec in schedule],
             "inspection_repetitions": INSPECTION_REPETITIONS,
             "logical_call_cap": LOGICAL_INSPECTION_CALL_CAP,
             "faults": [],
@@ -1019,6 +1128,19 @@ def _campaign_hash(config: ExplorationCampaignConfig, build_hash: str) -> str:
 
 def _episode_hash(campaign_hash: str, spec: ExplorationEpisodeSpec) -> str:
     return _sha256({"campaign_hash": campaign_hash, "spec": asdict(spec)})
+
+
+def _exploration_episode_artifacts(
+    output: Path,
+    episode_path: Path,
+    launch_path: Path,
+) -> list[Path]:
+    artifacts = [episode_path, launch_path]
+    if episode_path.is_file():
+        screenshot_path = _read_json_object(episode_path).get("screenshot_path")
+        if isinstance(screenshot_path, str) and screenshot_path.startswith("screenshots/"):
+            artifacts.append(output / screenshot_path)
+    return artifacts
 
 
 def _run_episode(
@@ -1034,7 +1156,8 @@ def _run_episode(
     path = directory / "episode-result.json"
     launch_path = directory / "launch-manifest.json"
     input_hash = _episode_hash(campaign_hash, spec)
-    if checkpoint.reusable(spec.unit_id, input_hash, [path, launch_path]):
+    artifacts = _exploration_episode_artifacts(output, path, launch_path)
+    if checkpoint.reusable(spec.unit_id, input_hash, artifacts):
         return ExplorationEpisodeResult.from_dict(_read_json_object(path)), True
     checkpoint.mark_started(spec.unit_id, input_hash)
     _atomic_write_json(
@@ -1080,6 +1203,42 @@ def _run_episode(
             result.error or result.coverage_status or result.execution_status,
         )
     return result, False
+
+
+def _finalize_exploration_screenshot(
+    *,
+    record: ExplorationTraceRecord,
+    output: Path,
+    checkpoint: CheckpointStore,
+    campaign_hash: str,
+) -> ExplorationTraceRecord:
+    directory = output / "traces" / record.spec.mission_id / str(record.spec.seed)
+    episode_path = directory / "episode-result.json"
+    launch_path = directory / "launch-manifest.json"
+    finalized = finalize_evidence_screenshot(
+        campaign_root=output,
+        trace_output_dir=directory,
+        opaque_trace_id=record.opaque_trace_id,
+        screenshot_path=record.result.screenshot_path,
+        screenshot_error=record.result.screenshot_error,
+        retention_axes=_screenshot_retention_axes(record),
+    )
+    result = replace(
+        record.result,
+        screenshot_path=finalized.path,
+        screenshot_error=finalized.error,
+        screenshot_retention_axes=finalized.retention_axes,
+    )
+    _atomic_write_json(episode_path, result.to_dict())
+    artifacts = [episode_path, launch_path]
+    if finalized.path:
+        artifacts.append(output / finalized.path)
+    checkpoint.mark_complete(
+        record.spec.unit_id,
+        _episode_hash(campaign_hash, record.spec),
+        artifacts,
+    )
+    return replace(record, result=result)
 
 
 def _validate_required_episode_result(
@@ -1161,6 +1320,7 @@ def _write_running_manifest(
             "campaign_hash": campaign_hash,
             "status": "running",
             "track": "A",
+            "profile": config.profile,
             "hashes": {
                 "build": build_hash,
                 "config": campaign_hash,
@@ -1238,6 +1398,7 @@ def _write_incomplete_manifest(
             "campaign_hash": campaign_hash,
             "status": "incomplete",
             "track": "A",
+            "profile": config.profile,
             "hashes": {
                 "build": build_hash,
                 "config": campaign_hash,
@@ -1312,6 +1473,8 @@ def run_exploration_campaign(
 
     build_hash = hash_path(config.build)
     campaign_hash = _campaign_hash(config, build_hash)
+    schedule = build_track_a_schedule(config.profile)
+    planned_inspection_calls = _planned_track_a_inspection_calls(schedule)
     output = config.output.resolve()
     if output.exists() and any(output.iterdir()) and not config.resume:
         raise CampaignContractError("non-empty exploration output requires --resume")
@@ -1331,7 +1494,7 @@ def run_exploration_campaign(
         _archive_published_results(output)
         _write_running_manifest(output, campaign_hash, build_hash, config)
         publication_phase = "campaign"
-        for spec in build_track_a_schedule():
+        for spec in schedule:
             result, episode_resumed = _run_episode(
                 spec=spec,
                 output=output,
@@ -1370,6 +1533,12 @@ def run_exploration_campaign(
                 inspection_passes=tuple(passes),
                 resumed=episode_resumed,
             )
+            record = _finalize_exploration_screenshot(
+                record=record,
+                output=output,
+                checkpoint=checkpoint,
+                campaign_hash=campaign_hash,
+            )
             records.append(record)
             trace_manifest.append(
                 {
@@ -1386,6 +1555,13 @@ def run_exploration_campaign(
                     "execution_status": result.execution_status,
                     "coverage_status": result.coverage_status,
                     "valid_inspection_passes": sum(item is not None for item in passes),
+                    "screenshot_path": record.result.screenshot_path,
+                    "screenshot_error": _public_error_type(
+                        record.result.screenshot_error
+                    ),
+                    "screenshot_retention_axes": list(
+                        record.result.screenshot_retention_axes
+                    ),
                     "resumed": episode_resumed,
                 }
             )
@@ -1394,6 +1570,7 @@ def run_exploration_campaign(
             metadata={
                 "campaign_id": campaign_hash[:16],
                 "track": "A",
+                "profile": config.profile,
                 "build_hash": build_hash,
                 "steering_model": STEERING_MODEL,
                 "inspection_model": INSPECTOR_MODEL,
@@ -1412,6 +1589,7 @@ def run_exploration_campaign(
                 "campaign_hash": campaign_hash,
                 "status": "complete",
                 "track": "A",
+                "profile": config.profile,
                 "hashes": {
                     "build": build_hash,
                     "config": campaign_hash,
@@ -1439,7 +1617,7 @@ def run_exploration_campaign(
                 },
                 "limits": {
                     "inspection_repetitions": INSPECTION_REPETITIONS,
-                    "planned_inspection_calls": PLANNED_INSPECTION_CALLS,
+                    "planned_inspection_calls": planned_inspection_calls,
                     "logical_inspection_call_cap": LOGICAL_INSPECTION_CALL_CAP,
                 },
                 "counts": {
@@ -1454,6 +1632,12 @@ def run_exploration_campaign(
                         "coverage_not_reached_traces"
                     ],
                     "candidate_count": report["summary"]["candidate_count"],
+                    "retained_screenshot_count": report["summary"][
+                        "retained_screenshot_count"
+                    ],
+                    "capture_error_count": report["summary"][
+                        "capture_error_count"
+                    ],
                     "logical_inspection_calls": checkpoint.logical_calls,
                     "http_attempts": checkpoint.http_attempts,
                 },
@@ -1730,6 +1914,7 @@ class BridgeExplorationBackend:
             str(STEERING_PLAN_HORIZON_SECONDS),
             "--inspector-model",
             "",
+            "--capture-final-screenshot",
         ]
         if self.config.api_url:
             arguments.extend(["--api-url", self.config.api_url])
@@ -1748,6 +1933,7 @@ class BridgeExplorationBackend:
         spec: ExplorationEpisodeSpec,
         output_dir: Path,
     ) -> ExplorationEpisodeResult:
+        final_screenshot = read_final_screenshot_metadata(output_dir, required=True)
         try:
             report = _read_json_object(output_dir / "report.json")
         except (CampaignContractError, OSError, json.JSONDecodeError, ValueError) as error:
@@ -1756,6 +1942,8 @@ class BridgeExplorationBackend:
                 execution_status="schema_error",
                 coverage_status="error",
                 error=_sanitize_error_type(type(error).__name__) or "Exception",
+                screenshot_path=final_screenshot.path,
+                screenshot_error=final_screenshot.error,
             )
         fatal_error = str(report.get("fatal_error") or "").strip()
         if fatal_error:
@@ -1766,6 +1954,8 @@ class BridgeExplorationBackend:
                 execution_status=_fatal_execution_status(error_type, fatal_error),
                 coverage_status="error",
                 error=error_type,
+                screenshot_path=final_screenshot.path,
+                screenshot_error=final_screenshot.error,
             )
         try:
             transitions = [
@@ -1783,6 +1973,8 @@ class BridgeExplorationBackend:
                 execution_status="schema_error",
                 coverage_status="error",
                 error=_sanitize_error_type(type(error).__name__) or "Exception",
+                screenshot_path=final_screenshot.path,
+                screenshot_error=final_screenshot.error,
             )
         arguments = run.get("arguments") or {}
         launch_fault = str(arguments.get("fault") or "").strip()
@@ -1800,6 +1992,8 @@ class BridgeExplorationBackend:
             harness_failures=tuple(harness),
             trace_evidence_refs=tuple(trace_evidence_refs),
             error="",
+            screenshot_path=final_screenshot.path,
+            screenshot_error=final_screenshot.error,
         )
 
 

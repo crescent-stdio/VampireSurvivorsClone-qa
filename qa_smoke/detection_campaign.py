@@ -15,11 +15,17 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
-from .adapters import VampireSurvivorsAdapter
+from .adapters import (
+    FinalScreenshotCapture,
+    VampireSurvivorsAdapter,
+    read_final_screenshot_metadata,
+    write_final_screenshot_metadata,
+)
 from .charter import TestCharter
 from .detection_benchmark import (
     FAULT_IDS,
     PairScore,
+    TraceScore,
     TraceEvaluation,
     benchmark_report_json,
     build_benchmark_report,
@@ -51,6 +57,7 @@ from .planners import (
 from .reporting import RunRecorder
 from .run import execute_game_action, parse_args as parse_run_args, run_session
 from .scenarios import load_scenarios, load_v4_ground_truth, load_v4_scenarios
+from .screenshot_evidence import finalize_evidence_screenshot
 
 
 ACTION_REPLAY_SCHEMA = "qa-action-replay/v1"
@@ -87,6 +94,13 @@ NEUTRAL_REACHABILITY_GOAL = (
     "Reach ordinary gameplay state needed for generic QA observation, while surviving when possible."
 )
 TRACK_A_MAX_STEP_BUDGETS = (20, 40, 80, 80, 80, 80, 80, 80)
+POC_TRACK_A_MAX_STEP_BUDGETS = (40, 80, 80)
+POC_TRACK_A_SEEDS = (9101, 9102)
+POC_TRACK_B_FAULT_IDS = (
+    "health_bar_desync",
+    "item_effect_not_applied",
+    "experience_display_drift",
+)
 
 
 class CampaignContractError(RuntimeError):
@@ -223,6 +237,9 @@ class EpisodeResult:
     oracle_override: str | None = None
     divergence_evidence: dict[str, Any] | None = None
     error: str = ""
+    screenshot_path: str | None = None
+    screenshot_error: str = ""
+    screenshot_retention_axes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -234,6 +251,9 @@ class EpisodeResult:
             "oracle_override": self.oracle_override,
             "divergence_evidence": self.divergence_evidence,
             "error": _public_error_type(self.error),
+            "screenshot_path": self.screenshot_path,
+            "screenshot_error": _public_error_type(self.screenshot_error),
+            "screenshot_retention_axes": list(self.screenshot_retention_axes),
         }
 
     @classmethod
@@ -243,8 +263,15 @@ class EpisodeResult:
             raise CampaignContractError("episode result transitions must be a list of objects")
         divergence = value.get("replay_divergence_index")
         divergence_stage = value.get("replay_divergence_stage")
+        screenshot_retention_axes = value.get("screenshot_retention_axes") or []
         if divergence_stage not in (None, "before_command", "after_command"):
             raise CampaignContractError("episode replay divergence stage is invalid")
+        if not isinstance(screenshot_retention_axes, list) or any(
+            not isinstance(item, str) for item in screenshot_retention_axes
+        ):
+            raise CampaignContractError(
+                "screenshot retention axes must be a list of strings"
+            )
         return cls(
             transitions=transitions,
             execution_status=str(value.get("execution_status") or "error"),
@@ -260,6 +287,11 @@ class EpisodeResult:
                 else None
             ),
             error=str(value.get("error") or ""),
+            screenshot_path=(
+                str(value["screenshot_path"]) if value.get("screenshot_path") else None
+            ),
+            screenshot_error=str(value.get("screenshot_error") or ""),
+            screenshot_retention_axes=tuple(screenshot_retention_axes),
         )
 
 
@@ -299,6 +331,7 @@ class BenchmarkCampaignConfig:
     headless: bool = False
     quiet: bool = False
     api_url: str | None = None
+    profile: Literal["full", "poc"] = "full"
 
 
 @dataclass(frozen=True)
@@ -505,16 +538,34 @@ def _episode_spec(
     return EpisodeSpec(**values)
 
 
-def build_track_b_schedule(bindings: Sequence[FaultBinding]) -> TrackBSchedule:
-    """Return the fixed 33-pilot, 66-replay, and 22-autonomous schedule."""
+def build_track_b_schedule(
+    bindings: Sequence[FaultBinding],
+    profile: Literal["full", "poc"] = "full",
+) -> TrackBSchedule:
+    """Return the full acceptance schedule or the fixed PoC subset."""
 
-    if tuple(binding.fault_id for binding in bindings) != tuple(FAULT_IDS):
-        raise CampaignContractError("Track B bindings must follow the complete fixed fault order")
+    if profile not in {"full", "poc"}:
+        raise CampaignContractError("Track B profile must be full or poc")
+    binding_ids = tuple(binding.fault_id for binding in bindings)
+    if profile == "full":
+        if binding_ids != tuple(FAULT_IDS):
+            raise CampaignContractError(
+                "Track B bindings must follow the complete fixed fault order"
+            )
+        selected_bindings = tuple(bindings)
+        official_seeds = SEEDS
+    else:
+        by_fault = {binding.fault_id: binding for binding in bindings}
+        missing = [fault_id for fault_id in POC_TRACK_B_FAULT_IDS if fault_id not in by_fault]
+        if missing:
+            raise CampaignContractError(f"Track B PoC bindings are missing: {missing}")
+        selected_bindings = tuple(by_fault[fault_id] for fault_id in POC_TRACK_B_FAULT_IDS)
+        official_seeds = (AUTONOMOUS_SEED,)
     pilots: list[EpisodeSpec] = []
     official: list[EpisodePair] = []
     autonomous: list[EpisodePair] = []
-    for binding in bindings:
-        for seed in SEEDS:
+    for binding in selected_bindings:
+        for seed in official_seeds:
             pair_id = f"official/{binding.fault_id}/{seed}"
             pilots.append(
                 EpisodeSpec(
@@ -570,10 +621,23 @@ def _max_chunks_for_steps(max_steps: int) -> int:
     )
 
 
-def _planned_inspection_call_counts(schedule: TrackBSchedule) -> dict[str, int]:
+def _planned_inspection_call_counts(
+    schedule: TrackBSchedule,
+    profile: Literal["full", "poc"] = "full",
+) -> dict[str, int]:
+    if profile not in {"full", "poc"}:
+        raise CampaignContractError("campaign profile must be full or poc")
+    track_a_step_budgets = (
+        TRACK_A_MAX_STEP_BUDGETS
+        if profile == "full"
+        else POC_TRACK_A_MAX_STEP_BUDGETS
+    )
+    track_a_seeds = SEEDS if profile == "full" else POC_TRACK_A_SEEDS
     track_a = sum(
-        _max_chunks_for_steps(max_steps) * INSPECTION_REPETITIONS * len(SEEDS)
-        for max_steps in TRACK_A_MAX_STEP_BUDGETS
+        _max_chunks_for_steps(max_steps)
+        * INSPECTION_REPETITIONS
+        * len(track_a_seeds)
+        for max_steps in track_a_step_budgets
     )
     track_b = sum(
         _max_chunks_for_steps(spec.max_steps) * INSPECTION_REPETITIONS
@@ -581,7 +645,7 @@ def _planned_inspection_call_counts(schedule: TrackBSchedule) -> dict[str, int]:
         for spec in (pair.clean, pair.fault)
     )
     cross_track = track_a + track_b
-    if cross_track != EXPECTED_CROSS_TRACK_INSPECTION_CALLS:
+    if profile == "full" and cross_track != EXPECTED_CROSS_TRACK_INSPECTION_CALLS:
         raise CampaignContractError(
             "fixed campaign schedule no longer matches the 693-call acceptance budget"
         )
@@ -1207,6 +1271,7 @@ def _atomic_write_text(path: Path, value: str) -> None:
 def _campaign_hash(config: BenchmarkCampaignConfig, build_hash: str) -> str:
     root = config.project_root.resolve()
     effective_api_url = resolve_llm_api_url(config.api_url)
+    schedule = build_track_b_schedule(load_fault_bindings(root), config.profile)
     return _sha256(
         {
             "build_hash": build_hash,
@@ -1215,6 +1280,7 @@ def _campaign_hash(config: BenchmarkCampaignConfig, build_hash: str) -> str:
             "api_url_hash": _sha256(effective_api_url),
             "headless": config.headless,
             "quiet": config.quiet,
+            "profile": config.profile,
             "steering_model": STEERING_MODEL,
             "steering_prompt_version": STEERING_PROMPT_TEMPLATE_VERSION,
             "steering_prompt": _steering_prompt_digest(),
@@ -1232,6 +1298,7 @@ def _campaign_hash(config: BenchmarkCampaignConfig, build_hash: str) -> str:
             "v4_ground_truth_hash": _file_hash(root / "config" / "qa-ground-truth-v4.json"),
             "seeds": SEEDS,
             "autonomous_seed": AUTONOMOUS_SEED,
+            "selected_schedule": asdict(schedule),
             "inspection_repetitions": INSPECTION_REPETITIONS,
             "logical_call_cap": LOGICAL_INSPECTION_CALL_CAP,
         }
@@ -1346,8 +1413,14 @@ def _run_episode_unit(
     input_hash: str,
     path: Path,
     execute: Callable[[], EpisodeResult],
+    artifact_root: Path | None = None,
 ) -> tuple[EpisodeResult, bool]:
-    if checkpoint.reusable(unit_id, input_hash, [path]):
+    artifacts = [path]
+    if artifact_root is not None and path.is_file():
+        screenshot_path = _read_json_object(path).get("screenshot_path")
+        if isinstance(screenshot_path, str) and screenshot_path.startswith("screenshots/"):
+            artifacts.append(artifact_root / screenshot_path)
+    if checkpoint.reusable(unit_id, input_hash, artifacts):
         return EpisodeResult.from_dict(_read_json_object(path)), True
     checkpoint.mark_started(unit_id, input_hash)
     try:
@@ -1462,6 +1535,57 @@ def _inspect_episode(
     return passes
 
 
+def _screenshot_retention_axes(
+    oracle_verdict: str,
+    score: TraceScore,
+) -> tuple[str, ...]:
+    """Retain either independent anomaly axis, including incidental findings."""
+
+    axes: list[str] = []
+    if oracle_verdict == "fail":
+        axes.append("oracle")
+    if score.target_findings or score.incidental_candidates:
+        axes.append("inspector")
+    return tuple(axes)
+
+
+def _finalize_detection_screenshot(
+    *,
+    spec: EpisodeSpec,
+    result: EpisodeResult,
+    score: TraceScore,
+    oracle_verdict: str,
+    output: Path,
+    checkpoint: CheckpointStore,
+    input_hash: str,
+) -> EpisodeResult:
+    trace_dir = output / "traces" / spec.unit_id
+    episode_path = trace_dir / "episode-result.json"
+    finalized = finalize_evidence_screenshot(
+        campaign_root=output,
+        trace_output_dir=trace_dir,
+        opaque_trace_id=score.trace_id,
+        screenshot_path=result.screenshot_path,
+        screenshot_error=result.screenshot_error,
+        retention_axes=_screenshot_retention_axes(oracle_verdict, score),
+    )
+    result = replace(
+        result,
+        screenshot_path=finalized.path,
+        screenshot_error=finalized.error,
+        screenshot_retention_axes=finalized.retention_axes,
+    )
+    score.screenshot_path = finalized.path
+    score.screenshot_error = finalized.error
+    score.screenshot_retention_axes = list(finalized.retention_axes)
+    _atomic_write_json(episode_path, result.to_dict())
+    artifacts = [episode_path]
+    if finalized.path:
+        artifacts.append(output / finalized.path)
+    checkpoint.mark_complete(spec.unit_id, input_hash, artifacts)
+    return result
+
+
 def _score_episode_pair(
     *,
     pair: EpisodePair,
@@ -1473,6 +1597,7 @@ def _score_episode_pair(
     checkpoint: CheckpointStore,
     budget: InspectionCallBudget,
     campaign_hash: str,
+    episode_input_hashes: Sequence[str] | None = None,
 ) -> PairScore:
     evaluations: list[TraceEvaluation] = []
     for spec, result in ((pair.clean, clean_result), (pair.fault, fault_result)):
@@ -1503,7 +1628,28 @@ def _score_episode_pair(
                 inspection_passes=inspections,
             )
         )
-    return score_pair(pair.pair_id, evaluations[0], evaluations[1])
+    pair_score = score_pair(pair.pair_id, evaluations[0], evaluations[1])
+    if episode_input_hashes is not None:
+        if len(episode_input_hashes) != 2:
+            raise CampaignContractError("paired episode input hashes must contain two values")
+        for spec, result, evaluation, score, input_hash in zip(
+            (pair.clean, pair.fault),
+            (clean_result, fault_result),
+            evaluations,
+            (pair_score.clean, pair_score.fault),
+            episode_input_hashes,
+            strict=True,
+        ):
+            _finalize_detection_screenshot(
+                spec=spec,
+                result=result,
+                score=score,
+                oracle_verdict=evaluation.oracle_verdict,
+                output=config.output,
+                checkpoint=checkpoint,
+                input_hash=input_hash,
+            )
+    return pair_score
 
 
 def _write_reports(
@@ -1590,6 +1736,7 @@ def _write_incomplete_manifest(
     checkpoint: CheckpointStore,
     error: Exception,
     api_url: str | None,
+    profile: Literal["full", "poc"],
     failure_status: str = "failed",
 ) -> None:
     _atomic_write_json(
@@ -1599,6 +1746,7 @@ def _write_incomplete_manifest(
             "campaign_hash": campaign_hash,
             "status": "incomplete",
             "track": "B",
+            "profile": profile,
             "hashes": {
                 "build": build_hash,
                 "config": campaign_hash,
@@ -1676,6 +1824,7 @@ def _write_running_manifest(
     build_hash: str,
     project_root: Path,
     api_url: str | None,
+    profile: Literal["full", "poc"],
 ) -> None:
     _atomic_write_json(
         output / "campaign-manifest.json",
@@ -1684,6 +1833,7 @@ def _write_running_manifest(
             "campaign_hash": campaign_hash,
             "status": "running",
             "track": "B",
+            "profile": profile,
             "hashes": {
                 "build": build_hash,
                 "config": campaign_hash,
@@ -1718,6 +1868,7 @@ def record_detection_initialization_failure(
                 build_hash=build_hash,
                 project_root=config.project_root,
                 api_url=config.api_url,
+                profile=config.profile,
             )
         _supersede_published_results(output)
     except OSError as publication_error:
@@ -1730,6 +1881,7 @@ def record_detection_initialization_failure(
             checkpoint=checkpoint,
             error=publication_error,
             api_url=config.api_url,
+            profile=config.profile,
             failure_status="publication_cleanup_failure",
         )
         raise
@@ -1741,6 +1893,7 @@ def record_detection_initialization_failure(
         checkpoint=checkpoint,
         error=error,
         api_url=config.api_url,
+        profile=config.profile,
         failure_status="model_failure",
     )
     return output / "campaign-manifest.json"
@@ -1768,6 +1921,7 @@ def run_detection_campaign(
                 build_hash=build_hash,
                 project_root=config.project_root,
                 api_url=config.api_url,
+                profile=config.profile,
             )
         _supersede_published_results(output)
         _write_running_manifest(
@@ -1776,6 +1930,7 @@ def run_detection_campaign(
             build_hash=build_hash,
             project_root=config.project_root,
             api_url=config.api_url,
+            profile=config.profile,
         )
         publication_phase = "campaign"
         return _run_detection_campaign_impl(
@@ -1806,6 +1961,7 @@ def run_detection_campaign(
             checkpoint=latest_checkpoint,
             error=(OSError(cleanup_error) if cleanup_error else manifest_error),
             api_url=config.api_url,
+            profile=config.profile,
             failure_status=(
                 "publication_cleanup_failure" if publication_failure else "failed"
             ),
@@ -1835,8 +1991,8 @@ def _run_detection_campaign_impl(
     )
     bindings = load_fault_bindings(config.project_root)
     by_fault = _binding_by_fault(bindings)
-    schedule = build_track_b_schedule(bindings)
-    planned_calls = _planned_inspection_call_counts(schedule)
+    schedule = build_track_b_schedule(bindings, config.profile)
+    planned_calls = _planned_inspection_call_counts(schedule, config.profile)
     manifest_path = output / "campaign-manifest.json"
     resumed = bool(checkpoint.units)
     if manifest_path.exists():
@@ -1873,6 +2029,7 @@ def _run_detection_campaign_impl(
             }
         )
         results: list[EpisodeResult] = []
+        episode_input_hashes: list[str] = []
         for spec in (pair.clean, pair.fault):
             trace_dir = output / "traces" / spec.unit_id
             path = trace_dir / "episode-result.json"
@@ -1881,6 +2038,7 @@ def _run_detection_campaign_impl(
                 spec=spec,
                 replay_digest=str(replay["replay_digest"]),
             )
+            episode_input_hashes.append(unit_hash)
             result, was_resumed = _run_episode_unit(
                 checkpoint=checkpoint,
                 unit_id=spec.unit_id,
@@ -1889,6 +2047,7 @@ def _run_detection_campaign_impl(
                 execute=lambda spec=spec, trace_dir=trace_dir: backend.run_replay(
                     spec, replay, trace_dir
                 ),
+                artifact_root=output,
             )
             opaque_trace_id = _opaque_trace_id(campaign_hash, spec.unit_id)
             if not was_resumed:
@@ -1923,18 +2082,21 @@ def _run_detection_campaign_impl(
                 checkpoint=checkpoint,
                 budget=budget,
                 campaign_hash=campaign_hash,
+                episode_input_hashes=episode_input_hashes,
             )
         )
 
     for pair in schedule.autonomous_pairs:
         binding = by_fault[pair.clean.fault_id]
         results = []
+        episode_input_hashes = []
         for base_spec in (pair.clean, pair.fault):
             if not isinstance(base_spec, AutonomousEpisodeSpec):
                 raise CampaignContractError("autonomous schedule must use AutonomousEpisodeSpec")
             trace_dir = output / "traces" / base_spec.unit_id
             path = trace_dir / "episode-result.json"
             unit_hash = _unit_hash(campaign_hash=campaign_hash, spec=base_spec)
+            episode_input_hashes.append(unit_hash)
             result, was_resumed = _run_episode_unit(
                 checkpoint=checkpoint,
                 unit_id=base_spec.unit_id,
@@ -1943,6 +2105,7 @@ def _run_detection_campaign_impl(
                 execute=lambda spec=base_spec, trace_dir=trace_dir: backend.run_autonomous(
                     spec, trace_dir
                 ),
+                artifact_root=output,
             )
             opaque_trace_id = _opaque_trace_id(campaign_hash, base_spec.unit_id)
             if not was_resumed:
@@ -1976,15 +2139,36 @@ def _run_detection_campaign_impl(
                 checkpoint=checkpoint,
                 budget=budget,
                 campaign_hash=campaign_hash,
+                episode_input_hashes=episode_input_hashes,
             )
         )
 
+    all_scores = [*official_scores, *autonomous_scores]
+    trace_scores = {
+        score.trace_id: score
+        for pair_score in all_scores
+        for score in (pair_score.clean, pair_score.fault)
+    }
+    for metadata in trace_metadata:
+        score = trace_scores.get(str(metadata["opaque_trace_id"]))
+        if score is None:
+            continue
+        metadata.update(
+            {
+                "screenshot_path": score.screenshot_path,
+                "screenshot_error": _public_error_type(score.screenshot_error),
+                "screenshot_retention_axes": list(
+                    score.screenshot_retention_axes
+                ),
+            }
+        )
     _write_reports(output, official_scores, autonomous_scores, campaign_hash)
     manifest = {
         "schema_version": CAMPAIGN_MANIFEST_SCHEMA,
         "campaign_hash": campaign_hash,
         "status": "complete",
         "track": "B",
+        "profile": config.profile,
         "hashes": {
             "build": build_hash,
             "config": campaign_hash,
@@ -2036,6 +2220,14 @@ def _run_detection_campaign_impl(
             "logical_inspection_calls": checkpoint.logical_calls,
             "http_attempts": checkpoint.http_attempts,
         },
+        "screenshot_summary": {
+            "retained_count": sum(
+                bool(score.screenshot_path) for score in trace_scores.values()
+            ),
+            "capture_error_count": sum(
+                bool(score.screenshot_error) for score in trace_scores.values()
+            ),
+        },
         "pilot_replays": replay_metadata,
         "traces": trace_metadata,
         "reports": {
@@ -2053,7 +2245,7 @@ def _run_detection_campaign_impl(
         raise ReportPublicationError(error) from error
     return CampaignResult(
         manifest_path=manifest_path,
-        pairs=tuple([*official_scores, *autonomous_scores]),
+        pairs=tuple(all_scores),
         resumed=resumed,
     )
 
@@ -2161,13 +2353,14 @@ class BridgeCampaignBackend:
                 str(spec.max_simulation_seconds),
                 "--max-steps",
                 str(spec.max_steps),
+                "--capture-final-screenshot",
             ]
         )
         if spec.variant == "fault":
             arguments.extend(["--fault", spec.fault_id])
         args = self.parse_run_arguments(arguments)
         self.run_session_fn(args)
-        return self._load_session_result(output_dir)
+        return self._load_session_result(output_dir, require_final_screenshot=True)
 
     def run_replay(
         self,
@@ -2192,6 +2385,7 @@ class BridgeCampaignBackend:
         divergence_stage: Literal["before_command", "after_command"] | None = None
         execution_status = "completed"
         error = ""
+        final_screenshot = FinalScreenshotCapture()
         try:
             adapter.start(
                 seed=spec.seed,
@@ -2260,7 +2454,21 @@ class BridgeCampaignBackend:
             execution_status = "infrastructure_error"
             error = _public_error_type(type(caught).__name__)
         finally:
-            episode_exit = adapter.stop()
+            try:
+                try:
+                    final_screenshot = adapter.capture_final_screenshot()
+                except Exception as caught:
+                    final_screenshot = FinalScreenshotCapture(
+                        error=_public_error_type(type(caught).__name__)
+                    )
+                try:
+                    write_final_screenshot_metadata(output_dir, final_screenshot)
+                except OSError as caught:
+                    final_screenshot = FinalScreenshotCapture(
+                        error=_public_error_type(type(caught).__name__)
+                    )
+            finally:
+                episode_exit = adapter.stop()
             if getattr(episode_exit, "kind", "normal") != "normal":
                 execution_status = "infrastructure_error"
                 error = _public_error_type(
@@ -2277,6 +2485,8 @@ class BridgeCampaignBackend:
             replay_divergence_index=divergence_index,
             replay_divergence_stage=divergence_stage,
             error=error,
+            screenshot_path=final_screenshot.path,
+            screenshot_error=final_screenshot.error,
         )
 
     def _common_run_arguments(self, spec: EpisodeSpec, output_dir: Path) -> list[str]:
@@ -2305,9 +2515,17 @@ class BridgeCampaignBackend:
         return arguments
 
     @staticmethod
-    def _load_session_result(output_dir: Path) -> EpisodeResult:
+    def _load_session_result(
+        output_dir: Path,
+        *,
+        require_final_screenshot: bool = False,
+    ) -> EpisodeResult:
         steps_path = output_dir / "steps.jsonl"
         verdict_path = output_dir / "verdict.json"
+        final_screenshot = read_final_screenshot_metadata(
+            output_dir,
+            required=require_final_screenshot,
+        )
         try:
             transitions = [
                 json.loads(line)
@@ -2320,14 +2538,20 @@ class BridgeCampaignBackend:
                 transitions=[],
                 execution_status="infrastructure_error",
                 error=_public_error_type(type(error).__name__),
+                screenshot_path=final_screenshot.path,
+                screenshot_error=final_screenshot.error,
             )
         if any(not isinstance(item, dict) for item in transitions):
             return EpisodeResult(
                 transitions=[],
                 execution_status="contract_error",
                 error="CampaignContractError",
+                screenshot_path=final_screenshot.path,
+                screenshot_error=final_screenshot.error,
             )
         return EpisodeResult(
             transitions=transitions,
             execution_status=str(verdict.get("execution_status") or "infrastructure_error"),
+            screenshot_path=final_screenshot.path,
+            screenshot_error=final_screenshot.error,
         )

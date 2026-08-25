@@ -10,7 +10,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Sequence
 
-from .adapters import VampireSurvivorsAdapter
+from .adapters import (
+    FinalScreenshotCapture,
+    VampireSurvivorsAdapter,
+    write_final_screenshot_metadata,
+)
 from .charter import DEFAULT_OBJECTIVE, TestCharter
 from .detection import DetectionResult, score_agent_detection
 from .inspector import build_inspection_payload, inspect_trace
@@ -195,6 +199,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--headless", action="store_true", help="Suppress the game window. Visible window is the default.")
     parser.add_argument("--quiet", action="store_true", help="Suppress live plan/action console output.")
+    parser.add_argument(
+        "--capture-final-screenshot",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return resolve_run_arguments(parser.parse_args(argv))
 
 
@@ -286,6 +295,7 @@ def normalize_decision(
     restarts_used: int = 0,
     llm_direct_control: bool = False,
     continue_during_planning: bool = True,
+    observation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     tool = str(decision.get("tool", "game")).lower()
     action = str(decision.get("action", "observe"))
@@ -293,6 +303,10 @@ def normalize_decision(
     arguments = decision.get("arguments")
     if not isinstance(arguments, dict):
         arguments = {}
+    requested_duration = arguments.get("duration")
+    effective_action_seconds = action_seconds
+    danger_score: float | None = None
+    danger_horizon_cap_applied = False
     if mode == "player" and tool != "game":
         tool, action, arguments = "game", "observe", {}
     if tool == "game":
@@ -312,12 +326,24 @@ def normalize_decision(
                 }
             )
             action = "direct_steer"
+        if action == "direct_steer" and charter.bridge_assist:
+            try:
+                observed_danger = float(((observation or {}).get("world") or {}).get("danger_score"))
+            except (TypeError, ValueError):
+                observed_danger = float("nan")
+            if math.isfinite(observed_danger) and observed_danger >= charter.interrupt_danger_score:
+                danger_score = observed_danger
+                effective_action_seconds = min(action_seconds, 1.0)
+                danger_horizon_cap_applied = effective_action_seconds < action_seconds
         try:
             if action == "direct_steer":
                 arguments = {
                     "x": float(arguments.get("x", 0.0)),
                     "y": float(arguments.get("y", 0.0)),
-                    "duration": min(max(float(arguments.get("duration", 1.0)), 0.25), action_seconds),
+                    "duration": min(
+                        max(float(arguments.get("duration", 1.0)), 0.25),
+                        effective_action_seconds,
+                    ),
                     "intent": str(arguments.get("intent", "unspecified"))[:80],
                     "target_id": int(arguments.get("target_id", 0)),
                     "threat_radius": charter.threat_radius,
@@ -387,7 +413,7 @@ def normalize_decision(
                 arguments = {}
         except (TypeError, ValueError):
             action, arguments = "observe", {}
-    return {
+    normalized = {
         "plan": str(decision.get("plan", "")),
         "hypothesis": str(decision.get("hypothesis", "")),
         "qa_observation": str(decision.get("qa_observation", "")),
@@ -407,6 +433,23 @@ def normalize_decision(
         "constraint_enforcements": enforcements,
         "syntax_normalizations": list(decision.get("_syntax_normalizations") or []),
     }
+    if action == "direct_steer" and danger_horizon_cap_applied and danger_score is not None:
+        try:
+            requested_duration_number = float(requested_duration)
+        except (TypeError, ValueError):
+            requested_duration_number = normalized["arguments"]["duration"]
+        executed_duration = normalized["arguments"]["duration"]
+        if requested_duration_number > executed_duration:
+            normalized["policy_adjustments"] = [
+                {
+                    "kind": "hybrid_danger_horizon_cap",
+                    "danger_score": danger_score,
+                    "threshold": charter.interrupt_danger_score,
+                    "requested_duration": requested_duration_number,
+                    "executed_duration": executed_duration,
+                }
+            ]
+    return normalized
 
 
 def attach_navigation_evaluation_context(
@@ -713,6 +756,7 @@ def run_session(args: argparse.Namespace) -> int:
     restarts_used = 0
     stalled_steps = 0
     planning_window_started: float | None = None
+    final_screenshot = FinalScreenshotCapture()
 
     try:
         if not args.quiet:
@@ -895,6 +939,7 @@ def run_session(args: argparse.Namespace) -> int:
                 restarts_used,
                 args.uses_llm_planner,
                 not args.pause_during_planning,
+                observation=last_observation,
             )
             decision = attach_decision_identity(decision, run_id, step)
             if hypothesis_state is not None:
@@ -1010,7 +1055,20 @@ def run_session(args: argparse.Namespace) -> int:
     except Exception as error:
         fatal_error = _public_exception_summary(error)
     finally:
-        episode_exit = client.stop()
+        try:
+            if getattr(args, "capture_final_screenshot", False):
+                try:
+                    final_screenshot = client.capture_final_screenshot()
+                except Exception as error:
+                    error_type = sanitize_error_type(type(error).__name__) or "Exception"
+                    final_screenshot = FinalScreenshotCapture(error=error_type)
+                try:
+                    write_final_screenshot_metadata(output_dir, final_screenshot)
+                except OSError as error:
+                    error_type = sanitize_error_type(type(error).__name__) or "Exception"
+                    final_screenshot = FinalScreenshotCapture(error=error_type)
+        finally:
+            episode_exit = client.stop()
         if episode_exit.kind != "normal":
             recorder.anomalies.append(
                 {

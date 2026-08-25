@@ -5,6 +5,7 @@ import json
 import sys
 import uuid
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -40,7 +41,8 @@ def parse_cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     detection_parser.add_argument("--build", type=Path, required=True)
     detection_parser.add_argument("--project-root", type=Path, default=Path.cwd())
-    detection_parser.add_argument("--output", type=Path, required=True)
+    detection_parser.add_argument("--output", type=Path, default=None)
+    detection_parser.add_argument("--profile", choices=("full", "poc"), default="full")
     detection_parser.add_argument("--api-url", default=None)
     detection_parser.add_argument("--headless", action="store_true")
     detection_parser.add_argument("--quiet", action="store_true")
@@ -51,7 +53,8 @@ def parse_cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     exploration_parser.add_argument("--build", type=Path, required=True)
     exploration_parser.add_argument("--project-root", type=Path, default=Path.cwd())
-    exploration_parser.add_argument("--output", type=Path, required=True)
+    exploration_parser.add_argument("--output", type=Path, default=None)
+    exploration_parser.add_argument("--profile", choices=("full", "poc"), default="full")
     exploration_parser.add_argument("--api-url", default=None)
     exploration_parser.add_argument("--headless", action="store_true")
     exploration_parser.add_argument("--quiet", action="store_true")
@@ -66,7 +69,10 @@ def parse_cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
     set_parser = baseline_subparsers.add_parser("set", help="Approve a run directory as baseline.")
     set_parser.add_argument("run_dir", type=Path)
     set_parser.add_argument("--path", type=Path, default=Path("QAArtifacts/regression/baseline.json"))
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.command == "explore" and args.resume and args.output is None:
+        parser.error("explore --resume requires an explicit --output")
+    return args
 
 
 def _add_run_options(parser: argparse.ArgumentParser) -> None:
@@ -84,6 +90,42 @@ def _output_root(args: argparse.Namespace) -> Path:
     if args.output is not None:
         return args.output.resolve()
     return (Path("QAArtifacts") / "runs" / uuid.uuid4().hex).resolve()
+
+
+def _resolve_campaign_output(
+    *,
+    project_root: Path,
+    output: Path | None,
+    track: str,
+    timestamp: datetime | None = None,
+) -> Path:
+    """Reserve a timestamped campaign directory when no output is provided."""
+
+    if output is not None:
+        return output
+    if track not in {"track-a", "track-b"}:
+        raise ValueError("campaign track must be track-a or track-b")
+    current = timestamp or datetime.now().astimezone()
+    base = (
+        project_root.resolve()
+        / "QAArtifacts"
+        / "evaluation"
+        / track
+        / current.strftime("%Y%m%d-%H%M%S")
+    )
+    base.parent.mkdir(parents=True, exist_ok=True)
+    for collision_index in range(1000):
+        candidate = (
+            base
+            if collision_index == 0
+            else base.with_name(f"{base.name}-{collision_index:02d}")
+        )
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        return candidate
+    raise RuntimeError("unable to reserve timestamped campaign output")
 
 
 def _suite_results_root(root: Path, suite: str, variant: str | None = None) -> Path:
@@ -752,13 +794,19 @@ def _benchmark_detection(args: argparse.Namespace) -> int:
         record_detection_initialization_failure,
         run_detection_campaign,
     )
+    output = _resolve_campaign_output(
+        project_root=args.project_root,
+        output=args.output,
+        track="track-b",
+    )
     config = BenchmarkCampaignConfig(
         build=args.build,
         project_root=args.project_root,
-        output=args.output,
+        output=output,
         headless=args.headless,
         quiet=args.quiet,
         api_url=args.api_url,
+        profile=args.profile,
     )
     try:
         backend = BridgeCampaignBackend(config)
@@ -816,14 +864,20 @@ def _explore(args: argparse.Namespace) -> int:
         run_exploration_campaign,
     )
     from .detection_campaign import LLMInspectorAdapter
+    output = _resolve_campaign_output(
+        project_root=args.project_root,
+        output=args.output,
+        track="track-a",
+    )
     config = ExplorationCampaignConfig(
         build=args.build,
         project_root=args.project_root,
-        output=args.output,
+        output=output,
         headless=args.headless,
         quiet=args.quiet,
         api_url=args.api_url,
         resume=args.resume,
+        profile=args.profile,
     )
     try:
         inspector = LLMInspectorAdapter(api_url=args.api_url)

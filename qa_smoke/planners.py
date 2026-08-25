@@ -242,6 +242,7 @@ def build_action_contract(
     reason: str
     required_arguments: dict[str, Any]
     allowed_indices: list[int] = []
+    argument_contracts: dict[str, dict[str, Any]] | None = None
     if phase == "character_select":
         allowed_calls = ["game.start_game"]
         character_count = int(((observation.get("menu") or {}).get("character_count") or 0))
@@ -278,10 +279,46 @@ def build_action_contract(
             "intent": "short string",
             "target_id": "integer chest ID, or 0 when not targeting a chest",
         }
-        reason = (
-            "The game is already started. Supply the next movement vector; do not call start_game, "
-            "wait, observe, or pause merely because the bridge sampled at a paused decision boundary."
-        )
+        if charter is not None and charter.bridge_assist and "use_item" in actions:
+            for slot in (observation.get("inventory") or {}).get("slots") or []:
+                if not isinstance(slot, dict) or slot.get("index") is None:
+                    continue
+                try:
+                    if float(slot.get("count") or 0) > 0:
+                        allowed_indices.append(int(slot["index"]))
+                except (TypeError, ValueError):
+                    continue
+            if allowed_indices:
+                allowed_calls.append("game.use_item")
+                argument_contracts = {
+                    "game.direct_steer": required_arguments,
+                    "game.use_item": {
+                        "index": f"integer chosen from ready_item_indices={allowed_indices}"
+                    },
+                }
+        if "game.use_item" in allowed_calls:
+            if any(
+                call in allowed_calls
+                for call in ("game.direct_steer", "game.move", "game.steer")
+            ):
+                reason = (
+                    "The game is already started. Choose the next allowed gameplay action: game.use_item "
+                    "is available for a ready inventory slot, or choose a permitted movement action. Do not "
+                    "call start_game, wait, observe, or pause merely because the bridge sampled at a paused "
+                    "decision boundary."
+                )
+            else:
+                reason = (
+                    "The game is already started. Choose game.use_item for a ready inventory slot. Do not "
+                    "call start_game, wait, observe, or pause merely because the bridge sampled at a paused "
+                    "decision boundary."
+                )
+        else:
+            reason = (
+                "The game is already started. Choose the next permitted movement action; do not call "
+                "start_game, wait, observe, or pause merely because the bridge sampled at a paused "
+                "decision boundary."
+            )
     else:
         useful = [action for action in actions if action not in ("pause", "shutdown")]
         allowed_calls = [f"game.{action}" for action in useful] or ["game.observe"]
@@ -296,7 +333,7 @@ def build_action_contract(
     )
     if source_allowed:
         allowed_calls.extend(("source_search", "source_read"))
-    return {
+    contract = {
         "phase": phase,
         "allowed_calls": allowed_calls,
         "source_steps_remaining": source_steps_remaining,
@@ -310,6 +347,9 @@ def build_action_contract(
         ),
         "reason": reason,
     }
+    if argument_contracts is not None:
+        contract["argument_contracts"] = argument_contracts
+    return contract
 
 
 def build_reflection_contract(
@@ -1016,16 +1056,43 @@ class LLMPlanner:
         # drift both costs cache hits and makes token metrics incomparable across runs.
         if self.charter.bridge_assist:
             executor_note = "The executor blends a bounded survival term into your vector every frame."
+            action_contract_note = (
+                "The response MUST use one of action_contract.allowed_calls and arguments MUST always be a JSON object. "
+                "When action_contract.argument_contracts contains the selected call, use that selected-call contract; "
+                "otherwise use action_contract.required_arguments. For actions without arguments, return an empty object {}. "
+                "Prefer progress and coverage, react immediately to upgrade dialogs, and never invent an unavailable game action."
+            )
+            active_gameplay_note = (
+                "During active gameplay use direct_steer unless action_contract.allowed_calls also permits game.use_item; "
+                "use game.use_item only when it is allowed and its selected-call contract identifies a ready inventory slot. "
+                "You alone must decide whether to continue the requested heading, evade enemies, approach a specific chest "
+                "from world.visible_chests, or consume an urgent item. For direct_steer, set target_id to that chest ID when "
+                "collecting; otherwise use 0. Set intent to a short value such as explore, evade, collect_chest, reposition, or hold."
+            )
             control_note = (
                 "Unity does NOT choose a chest, attract toward a chest, or enforce the requested heading. "
                 "It DOES add rule-based avoidance to your vector every frame: "
                 f"executed = normalize(your_vector + escape_vector * {self.charter.assist_survival_weight} * clamp01(0.35 + danger)). "
                 "controller.commanded is what you asked for and controller.steering is what executed; a difference "
                 "between them is the assist, not a game defect. The assist is bounded and does not path-plan, so you "
-                "must still steer away from danger yourself."
+                "must still steer away from danger yourself. Priority order: survival, urgent item use, mission "
+                "progress, collection, then QA checks. When action_contract.argument_contracts is present, match "
+                "arguments to the selected call. Health and RedPotion heal; Bomb damages visible enemies; Magnet "
+                "collects experience and coins. Only choose use_item for a slot whose count is greater than zero. "
+                "You decide whether and when to consume it; the bridge never consumes an item automatically."
             )
         else:
             executor_note = "The executor never silently corrects your vector."
+            action_contract_note = (
+                "The response MUST use one of action_contract.allowed_calls and arguments MUST always be a JSON object "
+                "matching action_contract.required_arguments. For actions without arguments, return an empty object {}. "
+                "Prefer progress and coverage, react immediately to upgrade dialogs, and never invent an unavailable game action."
+            )
+            active_gameplay_note = (
+                "During active gameplay use direct_steer. You alone must decide whether to continue the requested heading, "
+                "evade enemies, or approach a specific chest from world.visible_chests. Set target_id to that chest ID when "
+                "collecting; otherwise use 0. Set intent to a short value such as explore, evade, collect_chest, reposition, or hold."
+            )
             control_note = (
                 "Unity does NOT automatically avoid enemies, choose a chest, attract toward a chest, enforce the "
                 "requested heading, or alter your direction. It only holds your chosen vector every frame and detects events."
@@ -1036,9 +1103,9 @@ The bridge_clock is a synchronization state, not a menu command. paused_at_obser
 During normal direct control, Unity may keep holding your previous vector while this API call is pending. Choose exactly one bounded next tool call promptly.
 Game actions: observe, start_game(index), direct_steer(x,y,duration,intent,target_id), wait(duration), select_upgrade(index), use_item(index), restart, return_to_menu.
 QA-only tools: source_search(query), source_read(path,line_start,line_count).
-The response MUST use one of action_contract.allowed_calls and arguments MUST always be a JSON object matching action_contract.required_arguments. For actions without arguments, return an empty object {{}}. Prefer progress and coverage, react immediately to upgrade dialogs, and never invent an unavailable game action.
+{action_contract_note}
 Follow the supplied test charter. A named heading is a long-term NET-PROGRESS goal, not a per-action axis lock. Lateral detours and temporary backtracking are allowed for survival and chest collection. {executor_note}
-During active gameplay use direct_steer. You alone must decide whether to continue the requested heading, evade enemies, or approach a specific chest from world.visible_chests. Set target_id to that chest ID when collecting; otherwise use 0. Set intent to a short value such as explore, evade, collect_chest, reposition, or hold.
+{active_gameplay_note}
 {control_note} Use world.threat_entities, danger_score, escape_vector, and chest relative vectors to choose x/y yourself.
 When intent=collect_chest, aim x/y toward that target's relative_x/relative_y (normally the normalized target vector); do not claim collection while moving away from it. When danger is high, an evade vector should materially align with escape_vector. Choose full 2D movement, not only a cardinal axis.
 The horizon can end early on a chest entering close-control range, chest collection, low health, danger spikes, stuck detection, level-up, death, or another event. Re-plan from event_state and controller state.

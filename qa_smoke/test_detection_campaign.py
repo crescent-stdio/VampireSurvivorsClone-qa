@@ -227,6 +227,41 @@ def test_fixed_track_b_schedule_has_symmetric_official_and_autonomous_pairs(tmp_
     }
 
 
+def test_poc_track_b_schedule_has_exact_faults_and_fifteen_launches(tmp_path: Path) -> None:
+    settings = config(tmp_path)
+    bindings = campaign.load_fault_bindings(settings.project_root)
+    schedule = campaign.build_track_b_schedule(bindings, "poc")
+    selected_faults = {
+        "health_bar_desync",
+        "item_effect_not_applied",
+        "experience_display_drift",
+    }
+
+    assert len(schedule.pilots) == 3
+    assert len(schedule.official_pairs) == 3
+    assert len(schedule.autonomous_pairs) == 3
+    assert (
+        len(schedule.pilots)
+        + len(schedule.official_pairs) * 2
+        + len(schedule.autonomous_pairs) * 2
+        == 15
+    )
+    assert {spec.fault_id for spec in schedule.pilots} == selected_faults
+    assert {spec.seed for spec in schedule.pilots} == {9101}
+    assert {pair.clean.fault_id for pair in schedule.official_pairs} == selected_faults
+    assert {pair.clean.fault_id for pair in schedule.autonomous_pairs} == selected_faults
+
+
+def test_track_b_profile_changes_campaign_identity(tmp_path: Path) -> None:
+    full = config(tmp_path)
+    poc = replace(full, profile="poc")
+    build_hash = campaign.hash_path(full.build)
+
+    assert campaign._campaign_hash(full, build_hash) != campaign._campaign_hash(
+        poc, build_hash
+    )
+
+
 def test_campaign_runs_full_schedule_blindly_and_excludes_pilots_from_scores(
     tmp_path: Path,
 ) -> None:

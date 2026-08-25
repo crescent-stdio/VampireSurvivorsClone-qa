@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol
@@ -10,6 +11,8 @@ from .memory import sanitize_error_type
 
 
 ExitKind = Literal["normal", "crash", "timeout", "error"]
+FINAL_SCREENSHOT_FILENAME = "final-frame.pending.png"
+FINAL_SCREENSHOT_METADATA_FILENAME = "final-frame.json"
 
 
 @dataclass(frozen=True)
@@ -17,6 +20,49 @@ class EpisodeExit:
     kind: ExitKind
     return_code: int | None = None
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class FinalScreenshotCapture:
+    path: str | None = None
+    error: str = ""
+
+
+def write_final_screenshot_metadata(
+    output_dir: Path,
+    capture: FinalScreenshotCapture,
+) -> None:
+    (output_dir / FINAL_SCREENSHOT_METADATA_FILENAME).write_text(
+        json.dumps(
+            {"path": capture.path, "screenshot_error": capture.error},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def read_final_screenshot_metadata(
+    output_dir: Path,
+    *,
+    required: bool = False,
+) -> FinalScreenshotCapture:
+    metadata_path = output_dir / FINAL_SCREENSHOT_METADATA_FILENAME
+    if not metadata_path.exists():
+        return FinalScreenshotCapture(error="FileNotFoundError" if required else "")
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("final screenshot metadata must be an object")
+        path = payload.get("path")
+        if path not in (None, FINAL_SCREENSHOT_FILENAME):
+            raise ValueError("final screenshot metadata path is invalid")
+        raw_error = str(payload.get("screenshot_error") or "")
+        error = sanitize_error_type(raw_error) if raw_error else ""
+        return FinalScreenshotCapture(path=path, error=error or ("Exception" if raw_error else ""))
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        error_type = sanitize_error_type(type(error).__name__) or "Exception"
+        return FinalScreenshotCapture(error=error_type)
 
 
 class GameAdapter(Protocol):
@@ -105,6 +151,23 @@ class VampireSurvivorsAdapter:
     def command(self, action: str, **parameters: Any) -> dict[str, Any]:
         payload = {"action": action, **parameters}
         return self.send_input(payload)
+
+    def capture_final_screenshot(self) -> FinalScreenshotCapture:
+        """Capture the fixed pending frame without exposing a path to the bridge."""
+
+        if self._bridge is None:
+            return FinalScreenshotCapture(error="RuntimeError")
+        try:
+            response = self._bridge.command("capture_screenshot")
+            if response.get("ok") is not True:
+                raise RuntimeError("bridge rejected final screenshot capture")
+            screenshot = self.session_dir / FINAL_SCREENSHOT_FILENAME
+            if not screenshot.is_file() or screenshot.stat().st_size <= 0:
+                raise FileNotFoundError("bridge did not publish the final screenshot")
+            return FinalScreenshotCapture(path=FINAL_SCREENSHOT_FILENAME)
+        except Exception as error:
+            error_type = sanitize_error_type(type(error).__name__) or "Exception"
+            return FinalScreenshotCapture(error=error_type)
 
     def stop(self) -> EpisodeExit:
         if self._bridge is None:

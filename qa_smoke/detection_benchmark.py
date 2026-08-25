@@ -134,6 +134,9 @@ class TraceScore:
     target_relations: list[dict[str, Any]] = field(default_factory=list)
     target_findings: list[dict[str, Any]] = field(default_factory=list)
     incidental_candidates: list[dict[str, Any]] = field(default_factory=list)
+    screenshot_path: str | None = None
+    screenshot_error: str = ""
+    screenshot_retention_axes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -797,10 +800,32 @@ def build_benchmark_report(
     pairs: Sequence[PairScore], *, metadata: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
     aggregate = aggregate_benchmark(pairs)
+    trace_scores = [
+        score for pair in pairs for score in (pair.clean, pair.fault)
+    ]
+    screenshots = [
+        {
+            "trace_id": score.trace_id,
+            "path": score.screenshot_path,
+            "retention_axes": list(score.screenshot_retention_axes),
+            "capture_error": score.screenshot_error,
+        }
+        for score in trace_scores
+        if score.screenshot_path
+        or score.screenshot_error
+        or score.screenshot_retention_axes
+    ]
     return {
         "schema_version": BENCHMARK_SCHEMA,
         "metadata": dict(metadata or {}),
         **aggregate,
+        "screenshot_summary": {
+            "retained_count": sum(bool(score.screenshot_path) for score in trace_scores),
+            "capture_error_count": sum(
+                bool(score.screenshot_error) for score in trace_scores
+            ),
+        },
+        "screenshots": screenshots,
         "pairs": [pair.to_dict() for pair in pairs],
     }
 
@@ -845,6 +870,7 @@ def render_benchmark_markdown(report: Mapping[str, Any]) -> str:
     invalid = counts["invalid_traces"]
     metrics = report["metrics"]
     metadata = report.get("metadata") or {}
+    screenshot_summary = report.get("screenshot_summary") or {}
     lines = [
         "# 주입 결함 탐지 벤치마크",
         "",
@@ -908,4 +934,31 @@ def render_benchmark_markdown(report: Mapping[str, Any]) -> str:
         ]
     )
     lines.extend(f"| {status} | {invalid[status]} |" for status in INVALID_STATUSES)
+    lines.extend(
+        [
+            "",
+            "## 증거 스크린샷",
+            "",
+            f"- 보존: {screenshot_summary.get('retained_count', 0)}",
+            f"- 캡처 오류: {screenshot_summary.get('capture_error_count', 0)}",
+            "",
+        ]
+    )
+    screenshots = report.get("screenshots") or []
+    if not screenshots:
+        lines.append("보존된 증거 스크린샷이 없습니다.")
+    else:
+        lines.extend(
+            [
+                "| Trace | 상대 경로 | 보존 축 | 캡처 오류 |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for screenshot in screenshots:
+            axes = ", ".join(screenshot.get("retention_axes") or []) or "-"
+            lines.append(
+                f"| `{screenshot.get('trace_id', '-')}` | "
+                f"`{screenshot.get('path') or '-'}` | `{axes}` | "
+                f"`{screenshot.get('capture_error') or '-'}` |"
+            )
     return "\n".join(lines) + "\n"

@@ -123,6 +123,13 @@ class TestCharter:
                 "bridge_role": "hold_the_llm_vector_and_detect_events_only",
                 "priority_order": priority_order,
             }
+        priority_order = [
+            "survive",
+            "urgent_item_use",
+            "mission_progress",
+            "collection",
+            "qa_checks",
+        ]
         return {
             "planner_authority": "llm_chooses_the_base_vector_for_every_horizon",
             "automatic_enemy_avoidance": True,
