@@ -1014,7 +1014,7 @@ class ReportingTests(unittest.TestCase):
             model="gpt-4o-mini",
         )
 
-        self.assertEqual("qa-planning/v6", recorder.prompt_version)
+        self.assertEqual("qa-planning/v7", recorder.prompt_version)
 
     def test_llm_contract_failure_is_not_classified_as_infrastructure_error(self) -> None:
         recorder = RunRecorder(
@@ -4011,16 +4011,41 @@ class BridgeAssistGuardTests(unittest.TestCase):
         )
         self.assertIsNone(validate_decision_against_contract(item_decision, contract))
 
-    def test_llm_active_gameplay_contract_remains_movement_only(self) -> None:
+    def test_llm_active_gameplay_exposes_ready_inventory_items(self) -> None:
+        """Track A and Track B autonomous episodes run --policy llm.
+
+        Gating use_item on bridge_assist made item faults unreachable there, so the
+        item surface must not depend on the assist.
+        """
         observation = {
             "player": {"present": True, "alive": True},
             "menu": {},
             "available_actions": ["direct_steer", "use_item"],
             "inventory": {
                 "slots": [
-                    {"index": 0, "type": "Health", "count": 1, "pending_count": 0}
+                    {"index": 0, "type": "Health", "count": 1, "pending_count": 0},
+                    {"index": 1, "type": "Bomb", "count": 0, "pending_count": 2},
                 ]
             },
+        }
+
+        contract = build_action_contract(observation, "qa", TestCharter(), 0)
+
+        self.assertEqual(
+            ["game.direct_steer", "game.use_item"], contract["allowed_calls"]
+        )
+        self.assertEqual([0], contract["allowed_indices"])
+        self.assertEqual(
+            {"index": "integer chosen from ready_item_indices=[0]"},
+            contract["argument_contracts"]["game.use_item"],
+        )
+
+    def test_llm_active_gameplay_without_ready_items_stays_movement_only(self) -> None:
+        observation = {
+            "player": {"present": True, "alive": True},
+            "menu": {},
+            "available_actions": ["direct_steer", "use_item"],
+            "inventory": {"slots": [{"index": 0, "type": "Bomb", "count": 0}]},
         }
 
         contract = build_action_contract(observation, "qa", TestCharter(), 0)
@@ -4238,8 +4263,8 @@ class BridgeAssistGuardTests(unittest.TestCase):
         base = RunRecorder(output_dir=TEST_TEMP_ROOT / "pv-llm", seed=1, mode="qa", policy="llm")
         hybrid = RunRecorder(output_dir=TEST_TEMP_ROOT / "pv-hybrid", seed=1, mode="qa", policy="hybrid")
 
-        self.assertEqual("qa-planning/v6", base.effective_prompt_version())
-        self.assertEqual("qa-planning/v6-hybrid-smart-v1", hybrid.effective_prompt_version())
+        self.assertEqual("qa-planning/v7", base.effective_prompt_version())
+        self.assertEqual("qa-planning/v7-hybrid-smart-v1", hybrid.effective_prompt_version())
 
     def test_hybrid_charter_declares_the_automatic_avoidance(self) -> None:
         control = TestCharter(bridge_assist=True).as_dict()["control_policy"]
@@ -4295,23 +4320,21 @@ class BridgeAssistGuardTests(unittest.TestCase):
         self.assertIn("escape_vector * 0.6 * clamp01(0.35 + danger)", prompt)
         self.assertIn("controller.commanded", prompt)
 
-    def test_llm_prompt_keeps_baseline_action_contract_guidance(self) -> None:
+    def test_llm_prompt_carries_the_selected_call_action_contract_guidance(self) -> None:
+        """The contract now offers use_item under --policy llm, so the prompt must say so.
+
+        A prompt that still claimed direct_steer only would make the agent treat its own
+        allowed call as unavailable.
+        """
         prompt = LLMPlanner(
             "qa", "test-model", TestCharter(), 5.0, api_key="test-key"
         )._planning_system_prompt()
 
-        self.assertIn(
-            "arguments MUST always be a JSON object matching action_contract.required_arguments.",
-            prompt,
-        )
-        self.assertIn(
-            "During active gameplay use direct_steer. You alone must decide whether to continue "
-            "the requested heading, evade enemies, or approach a specific chest from "
-            "world.visible_chests.",
-            prompt,
-        )
-        self.assertNotIn("argument_contracts contains the selected call", prompt)
-        self.assertNotIn("also permits game.use_item", prompt)
+        self.assertIn("argument_contracts contains the selected call", prompt)
+        self.assertIn("also permits game.use_item", prompt)
+        self.assertIn("Only choose use_item for a slot whose count is greater than zero.", prompt)
+        for claim in NO_ASSIST_PROMPT_CLAIMS:
+            self.assertIn(claim, prompt)
 
     def test_hybrid_prompt_uses_selected_call_action_contract_guidance(self) -> None:
         prompt = LLMPlanner(

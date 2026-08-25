@@ -279,7 +279,7 @@ def build_action_contract(
             "intent": "short string",
             "target_id": "integer chest ID, or 0 when not targeting a chest",
         }
-        if charter is not None and charter.bridge_assist and "use_item" in actions:
+        if "use_item" in actions:
             for slot in (observation.get("inventory") or {}).get("slots") or []:
                 if not isinstance(slot, dict) or slot.get("index") is None:
                     continue
@@ -1054,21 +1054,27 @@ class LLMPlanner:
         )
         # Keep the no-assist wording byte-identical: it is the cached prompt prefix, and
         # drift both costs cache hits and makes token metrics incomparable across runs.
+        action_contract_note = (
+            "The response MUST use one of action_contract.allowed_calls and arguments MUST always be a JSON object. "
+            "When action_contract.argument_contracts contains the selected call, use that selected-call contract; "
+            "otherwise use action_contract.required_arguments. For actions without arguments, return an empty object {}. "
+            "Prefer progress and coverage, react immediately to upgrade dialogs, and never invent an unavailable game action."
+        )
+        active_gameplay_note = (
+            "During active gameplay use direct_steer unless action_contract.allowed_calls also permits game.use_item; "
+            "use game.use_item only when it is allowed and its selected-call contract identifies a ready inventory slot. "
+            "You alone must decide whether to continue the requested heading, evade enemies, approach a specific chest "
+            "from world.visible_chests, or consume an urgent item. For direct_steer, set target_id to that chest ID when "
+            "collecting; otherwise use 0. Set intent to a short value such as explore, evade, collect_chest, reposition, or hold."
+        )
+        # The bridge never consumes an item, so this holds under every policy.
+        item_note = (
+            "Health and RedPotion heal; Bomb damages visible enemies; Magnet collects experience and coins. "
+            "Only choose use_item for a slot whose count is greater than zero. You decide whether and when to "
+            "consume it; the bridge never consumes an item automatically."
+        )
         if self.charter.bridge_assist:
             executor_note = "The executor blends a bounded survival term into your vector every frame."
-            action_contract_note = (
-                "The response MUST use one of action_contract.allowed_calls and arguments MUST always be a JSON object. "
-                "When action_contract.argument_contracts contains the selected call, use that selected-call contract; "
-                "otherwise use action_contract.required_arguments. For actions without arguments, return an empty object {}. "
-                "Prefer progress and coverage, react immediately to upgrade dialogs, and never invent an unavailable game action."
-            )
-            active_gameplay_note = (
-                "During active gameplay use direct_steer unless action_contract.allowed_calls also permits game.use_item; "
-                "use game.use_item only when it is allowed and its selected-call contract identifies a ready inventory slot. "
-                "You alone must decide whether to continue the requested heading, evade enemies, approach a specific chest "
-                "from world.visible_chests, or consume an urgent item. For direct_steer, set target_id to that chest ID when "
-                "collecting; otherwise use 0. Set intent to a short value such as explore, evade, collect_chest, reposition, or hold."
-            )
             control_note = (
                 "Unity does NOT choose a chest, attract toward a chest, or enforce the requested heading. "
                 "It DOES add rule-based avoidance to your vector every frame: "
@@ -1077,22 +1083,10 @@ class LLMPlanner:
                 "between them is the assist, not a game defect. The assist is bounded and does not path-plan, so you "
                 "must still steer away from danger yourself. Priority order: survival, urgent item use, mission "
                 "progress, collection, then QA checks. When action_contract.argument_contracts is present, match "
-                "arguments to the selected call. Health and RedPotion heal; Bomb damages visible enemies; Magnet "
-                "collects experience and coins. Only choose use_item for a slot whose count is greater than zero. "
-                "You decide whether and when to consume it; the bridge never consumes an item automatically."
+                "arguments to the selected call."
             )
         else:
             executor_note = "The executor never silently corrects your vector."
-            action_contract_note = (
-                "The response MUST use one of action_contract.allowed_calls and arguments MUST always be a JSON object "
-                "matching action_contract.required_arguments. For actions without arguments, return an empty object {}. "
-                "Prefer progress and coverage, react immediately to upgrade dialogs, and never invent an unavailable game action."
-            )
-            active_gameplay_note = (
-                "During active gameplay use direct_steer. You alone must decide whether to continue the requested heading, "
-                "evade enemies, or approach a specific chest from world.visible_chests. Set target_id to that chest ID when "
-                "collecting; otherwise use 0. Set intent to a short value such as explore, evade, collect_chest, reposition, or hold."
-            )
             control_note = (
                 "Unity does NOT automatically avoid enemies, choose a chest, attract toward a chest, enforce the "
                 "requested heading, or alter your direction. It only holds your chosen vector every frame and detects events."
@@ -1106,7 +1100,7 @@ QA-only tools: source_search(query), source_read(path,line_start,line_count).
 {action_contract_note}
 Follow the supplied test charter. A named heading is a long-term NET-PROGRESS goal, not a per-action axis lock. Lateral detours and temporary backtracking are allowed for survival and chest collection. {executor_note}
 {active_gameplay_note}
-{control_note} Use world.threat_entities, danger_score, escape_vector, and chest relative vectors to choose x/y yourself.
+{control_note} {item_note} Use world.threat_entities, danger_score, escape_vector, and chest relative vectors to choose x/y yourself.
 When intent=collect_chest, aim x/y toward that target's relative_x/relative_y (normally the normalized target vector); do not claim collection while moving away from it. When danger is high, an evade vector should materially align with escape_vector. Choose full 2D movement, not only a cardinal axis.
 The horizon can end early on a chest entering close-control range, chest collection, low health, danger spikes, stuck detection, level-up, death, or another event. Re-plan from event_state and controller state.
 Act as a QA engineer while you play. Before every state-changing game action, state a concrete expected_effect. On the next planning step, compare the compact prior outcome with that expectation in reflection. Use action_contract.has_previous_transition, not the numeric step, to decide reflection.status. When it is false, use not_applicable with empty evidence_refs and candidate_id. When it is true, never use not_applicable. Return evidence_refs as an empty array; the runner deterministically inserts the latest allowed transition IDs before validation. uncertain may describe an unresolved risk and may leave candidate_id empty. unexpected always requires a stable non-empty candidate_id.
