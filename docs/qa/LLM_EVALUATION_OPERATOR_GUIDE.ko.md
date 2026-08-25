@@ -249,10 +249,40 @@ uv run --locked python -m qa_smoke.cli benchmark-detection \
 
 처음 이 평가를 돌린다면 다음 순서를 따른다. 앞 단계가 깨진 상태에서 뒤 단계 수치를 해석하지 않는다.
 
-1. `run --suite all` — LLM 없이 빌드와 하네스가 정상인지 확인한다.
-2. `explore --profile poc` — 창 모드로 실행해 플레이어가 실제로 게임을 굴리는지 눈으로 확인한다.
-3. `benchmark-detection --profile poc` — 대조 파이프라인이 끝까지 도는지 확인한다.
-4. 위 세 단계가 모두 통과하면 `--profile full`을 `--headless`로 실행한다.
+1. **플레이어 재빌드** — 평가할 커밋으로 브리지 플레이어를 새로 빌드한다.
+
+```sh
+scripts/qa/build-bridge-player.sh
+```
+
+오래된 빌드는 브리지의 `capture_screenshot` 명령을 모른다. 구버전 브리지는 `Unknown action`으로 즉시 거절하므로 캠페인이 죽지는 않지만, 모든 트레이스가 `screenshot_error`로 끝나고 보존 스크린샷은 0장이 된다.
+
+빌드 여부는 `.app`의 타임스탬프로 판정하지 않는다. macOS 번들은 Unity가 내용을 다시 써도 최상위 디렉터리 mtime이 그대로일 수 있다. 빌드된 어셈블리에서 문자열을 직접 찾는다. 문자열 리터럴은 `#US` 힙에 UTF-16으로 저장되므로 macOS `strings`로는 보이지 않는다.
+
+```sh
+uv run --locked python -c "from pathlib import Path; b=Path('QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app/Contents/Resources/Data/Managed/Vampire.Runtime.dll').read_bytes(); print('capture_screenshot' .encode('utf-16-le') in b)"
+```
+
+2. **모델 응답 확인** — 조종 모델과 검사 모델이 실제로 응답하는지 3스텝짜리 에피소드 1회로 확인한다.
+
+```sh
+uv run --locked python -m qa_smoke.run \
+  --game-exe QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app \
+  --project-root . \
+  --output QAArtifacts/preflight/model-check \
+  --mode qa --policy llm --model gpt-4o-mini \
+  --inspector-model gpt-5.6-luna \
+  --seed 9101 --max-steps 3 --max-simulation-seconds 60
+```
+
+단일 에피소드 실행기는 `qa_smoke.run`이며 `--game-exe`를 받는다. `qa_smoke.cli run`은 시나리오 스위트 실행기라 `--build`와 `--suite`만 받는다는 점에 주의한다. 비용을 묶는 것은 `--max-steps`이므로, 시뮬레이션 시간은 등록된 최단 시나리오와 같은 60초로 두어 게임 진입 전에 끝나지 않게 한다.
+
+종료 코드만 믿지 말고 산출물을 읽는다. `report.json`의 `fatal_error`가 없고, `metrics.api_usage.calls`가 0이 아니며, `llm_assessment`가 존재해야 한다. 검사 모델이 응답하지 않으면 캠페인 전체가 `INSPECTION_ERROR`로 끝나므로 여기서 멈추고 원인을 먼저 해결한다.
+
+3. `run --suite all` — LLM 없이 빌드와 하네스가 정상인지 확인한다.
+4. `explore --profile poc` — 창 모드로 실행해 플레이어가 실제로 게임을 굴리는지 눈으로 확인한다.
+5. `benchmark-detection --profile poc` — 대조 파이프라인이 끝까지 도는지 확인한다.
+6. 위 단계가 모두 통과하면 `--profile full`을 `--headless`로 실행한다.
 
 ### 소요 시간 감각
 
