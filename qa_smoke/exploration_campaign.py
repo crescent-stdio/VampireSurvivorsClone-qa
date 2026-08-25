@@ -8,6 +8,7 @@ import uuid
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, replace
 from functools import lru_cache
+from types import CodeType
 from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol, Sequence
 
@@ -908,16 +909,32 @@ def exploration_report_json(report: Mapping[str, Any]) -> str:
     return json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
+def _code_digest_payload(code: CodeType) -> dict[str, Any]:
+    """Describe one code object without anything that varies between processes.
+
+    repr() of a nested code object carries its address and repr() of a set
+    literal follows hash randomisation, so a comprehension or an `in {...}` test
+    inside a hashed function made the campaign hash differ from run to resume.
+    """
+
+    constants: list[Any] = []
+    for value in code.co_consts:
+        if isinstance(value, CodeType):
+            constants.append(_code_digest_payload(value))
+        elif isinstance(value, (set, frozenset)):
+            constants.append(sorted(repr(item) for item in value))
+        else:
+            constants.append(repr(value))
+    return {
+        "bytecode": code.co_code.hex(),
+        "constants": constants,
+        "names": list(code.co_names),
+        "variables": list(code.co_varnames),
+    }
+
+
 def _callable_code_digest(function: Any) -> str:
-    code = function.__code__
-    return _sha256(
-        {
-            "bytecode": code.co_code.hex(),
-            "constants": [repr(value) for value in code.co_consts],
-            "names": list(code.co_names),
-            "variables": list(code.co_varnames),
-        }
-    )
+    return _sha256(_code_digest_payload(function.__code__))
 
 
 @lru_cache(maxsize=1)

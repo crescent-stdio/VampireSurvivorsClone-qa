@@ -677,6 +677,42 @@ def test_dirty_or_required_execution_failure_makes_campaign_incomplete(
     assert not (settings.output / "exploration-report.ko.md").exists()
 
 
+def test_callable_digest_survives_a_comprehension() -> None:
+    """repr() of a nested code object embeds its address, which changes per process.
+
+    A comprehension inside a hashed planner function put such a repr into the
+    digest, so the campaign hash differed between the run and its --resume and
+    every resume was rejected as a contract error.
+    """
+
+    def with_comprehension(values: list[int]) -> list[int]:
+        return [value for value in values if value in {1, 2, 3}]
+
+    payload = json.dumps(
+        exploration._code_digest_payload(with_comprehension.__code__), sort_keys=True
+    )
+
+    assert "0x" not in payload
+    assert "<code object" not in payload
+    assert exploration._callable_code_digest(
+        with_comprehension
+    ) == exploration._callable_code_digest(with_comprehension)
+
+
+def test_callable_digest_still_separates_different_code() -> None:
+    """Stability must not collapse distinct implementations onto one digest."""
+
+    def first(values: list[int]) -> list[int]:
+        return [value * 2 for value in values]
+
+    def second(values: list[int]) -> list[int]:
+        return [value * 3 for value in values]
+
+    assert exploration._callable_code_digest(first) != exploration._callable_code_digest(
+        second
+    )
+
+
 def test_contract_failure_completes_the_campaign_and_excludes_the_trace(
     tmp_path: Path,
 ) -> None:
