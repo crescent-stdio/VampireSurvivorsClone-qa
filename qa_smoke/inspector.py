@@ -66,7 +66,31 @@ class InspectionArtifactV2(StrictInspectionModel):
     findings: list[InspectionFinding]
 
 
-FINDINGS_SCHEMA = InspectionArtifactV2.model_json_schema()
+def _structured_outputs_schema(node: Any) -> Any:
+    """Rewrite a Pydantic schema into the subset Structured Outputs accepts.
+
+    Pydantic serialises the discriminated finding union as `oneOf` plus a
+    `discriminator`. The endpoint supports `anyOf` and rejects both of those with
+    HTTP 400, which the planner surfaces only as a transport error, so a contract
+    break reads like an outage. The variants stay ordered and `kind` stays a
+    Literal on each model, so the union remains unambiguous without them.
+    """
+
+    if isinstance(node, dict):
+        rewritten = {
+            key: _structured_outputs_schema(value)
+            for key, value in node.items()
+            if key != "discriminator"
+        }
+        if "oneOf" in rewritten:
+            rewritten["anyOf"] = rewritten.pop("oneOf")
+        return rewritten
+    if isinstance(node, list):
+        return [_structured_outputs_schema(item) for item in node]
+    return node
+
+
+FINDINGS_SCHEMA = _structured_outputs_schema(InspectionArtifactV2.model_json_schema())
 
 
 def validate_inspection_artifact_v2(response: Any) -> dict[str, Any]:

@@ -3823,6 +3823,84 @@ class ReevaluateTests(unittest.TestCase):
         self.assertEqual(before, (run_dir / "verdict.json").read_text(encoding="utf-8"))
 
 
+class InspectionWireSchemaTests(unittest.TestCase):
+    """The inspector schema travels to Structured Outputs, which rejects oneOf.
+
+    Pydantic serialises the discriminated finding union as oneOf plus a
+    discriminator, and the endpoint answers HTTP 400 for both. Every inspection
+    call then fails as a transport error, which reads like an outage rather
+    than a contract break, so the wire schema is pinned here.
+    """
+
+    def _walk(self, node, path=()):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                yield path + (str(key),), key, value
+                yield from self._walk(value, path + (str(key),))
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                yield from self._walk(value, path + (str(index),))
+
+    def test_findings_schema_uses_no_keyword_structured_outputs_rejects(self) -> None:
+        from qa_smoke.inspector import FINDINGS_SCHEMA
+
+        rejected = {
+            path: key
+            for path, key, _ in self._walk(FINDINGS_SCHEMA)
+            if key in ("oneOf", "discriminator")
+        }
+
+        self.assertEqual({}, rejected)
+
+    def test_findings_schema_keeps_both_finding_variants(self) -> None:
+        from qa_smoke.inspector import FINDINGS_SCHEMA
+
+        items = FINDINGS_SCHEMA["properties"]["findings"]["items"]
+
+        self.assertEqual(
+            [{"$ref": "#/$defs/NumericFinding"}, {"$ref": "#/$defs/BehaviorFinding"}],
+            items["anyOf"],
+        )
+
+    def test_findings_schema_root_is_an_object_not_a_union(self) -> None:
+        """Structured Outputs rejects a root that evaluates to anyOf."""
+        from qa_smoke.inspector import FINDINGS_SCHEMA
+
+        self.assertEqual("object", FINDINGS_SCHEMA["type"])
+        self.assertNotIn("anyOf", FINDINGS_SCHEMA)
+
+    def test_both_finding_variants_still_validate(self) -> None:
+        """The wire schema change must not loosen server-side validation."""
+        from qa_smoke.inspector import validate_inspection_artifact_v2
+
+        artifact = validate_inspection_artifact_v2(
+            {
+                "schema_version": "qa-inspection/v2",
+                "findings": [
+                    {
+                        "kind": "numeric",
+                        "field": "player.health",
+                        "comparison": "==",
+                        "expected_value": 100.0,
+                        "observed_value": 80.0,
+                        "statement": "health disagreed with the bar",
+                        "evidence_refs": ["obs-1"],
+                    },
+                    {
+                        "kind": "behavior",
+                        "rule": "restart clears inventory",
+                        "expected_value": "empty",
+                        "observed_value": "one potion",
+                        "statement": "inventory survived a restart",
+                        "evidence_refs": ["obs-2"],
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(["numeric", "behavior"], [f["kind"] for f in artifact["findings"]])
+
+
 class BridgeAssistGuardTests(unittest.TestCase):
     def test_default_charter_control_policy_is_unchanged(self) -> None:
         """The pure-llm charter must keep advertising zero bridge intervention."""
