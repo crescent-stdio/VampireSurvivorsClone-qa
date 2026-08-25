@@ -127,7 +127,7 @@ namespace Vampire
             else
                 StopWalkAnimation();
             if (alive)
-                rb.velocity += moveDirection * characterBlueprint.acceleration * Time.deltaTime;
+                rb.velocity += QaFaultInjection.MovementDirection(moveDirection) * characterBlueprint.acceleration * Time.deltaTime;
         }
 
         public void GainExp(float exp)

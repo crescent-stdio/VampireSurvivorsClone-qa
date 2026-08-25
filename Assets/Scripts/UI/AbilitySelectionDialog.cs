@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using Vampire.QA;
 
 namespace Vampire
 {
@@ -89,6 +90,10 @@ namespace Vampire
         {
             if (!menuOpen) return;
 
+            QaFaultTelemetry.RecordUpgradeCloseAttempt();
+            if (QaFaultInjection.KeepUpgradeDialogOpen)
+                return;
+
             List<Ability> abilitiesToReturn = displayedAbilities;
             menuOpen = false;
             displayedAbilities = null;
@@ -101,6 +106,7 @@ namespace Vampire
             }
             particles.SetActive(false);
             base.Close();
+            QaFaultTelemetry.RecordUpgradeCloseCompletion();
         }
 
         public bool TrySelectOption(int optionIndex)

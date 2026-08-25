@@ -1,6 +1,7 @@
 using System.Collections;
 using UnityEngine;
 using UnityEngine.Events;
+using Vampire.QA;
 
 namespace Vampire
 {
@@ -83,6 +84,8 @@ namespace Vampire
         protected virtual void HitDamageable(IDamageable damageable)
         {
             damageable.TakeDamage(damage, knockback * direction);
+            if (damageable is Monster)
+                QaFaultTelemetry.RecordProjectileEnemyHit(GetInstanceID());
             OnHitDamageable.Invoke(damage);
             DestroyProjectile();
         }
@@ -94,6 +97,7 @@ namespace Vampire
 
         protected virtual void DestroyProjectile()
         {
+            QaFaultTelemetry.RecordProjectileConsumedAfterEnemyCollision(GetInstanceID());
             StartCoroutine(DestroyProjectileAnimation());
         }
 
@@ -110,6 +114,13 @@ namespace Vampire
         {
             if ((targetLayer & (1 << collider.gameObject.layer)) != 0)
             {
+                Monster monster = collider.gameObject.GetComponentInParent<Monster>();
+                if (monster != null)
+                {
+                    QaFaultTelemetry.RecordProjectileEnemyCollision(GetInstanceID());
+                    if (QaFaultInjection.AllowProjectilesThroughEnemies)
+                        return;
+                }
                 col.enabled = false;
                 StopCoroutine(moveCoroutine);
                 if (collider.transform.parent.TryGetComponent<IDamageable>(out IDamageable damageable))
