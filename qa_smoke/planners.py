@@ -1018,11 +1018,20 @@ class LLMPlanner:
         schema = build_decision_response_schema(contract)
         correction_content = json.dumps(
             {
+                # The previous wording said to preserve tool, action and arguments. When the
+                # phase is what rejects the action - game_over accepts only restart and
+                # return_to_menu - that instruction guarantees the retry repeats the
+                # violation and the episode fails closed, so the allowed calls travel with
+                # the correction and replacing the action is explicit.
                 "instruction": (
                     "Correct the previous response once. Return only a valid JSON decision. "
-                    "Preserve valid gameplay tool, action, and arguments; correct only the fields "
-                    "named by contract_error. Do not invent evidence IDs or candidate IDs."
+                    "Choose a call from allowed_calls: when the previous action is not in that "
+                    "list, replace it and supply that call's arguments instead of preserving "
+                    "the rejected one. Otherwise keep the valid gameplay tool, action and "
+                    "arguments and correct only the fields named by contract_error. "
+                    "Do not invent evidence IDs or candidate IDs."
                 ),
+                "allowed_calls": list(payload["action_contract"].get("allowed_calls") or []),
                 "contract_error": contract_error,
             },
             ensure_ascii=False,

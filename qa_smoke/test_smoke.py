@@ -662,6 +662,50 @@ class LLMPlannerTests(unittest.TestCase):
             request.call_args.kwargs["messages"][-1]["content"],
         )
 
+    def test_repair_prompt_replaces_an_action_the_phase_forbids(self) -> None:
+        """A game-over episode died twice because the correction told the model to keep its action.
+
+        At game_over the action itself is what the contract rejects, so an
+        instruction to preserve tool, action and arguments guarantees the second
+        response repeats the violation and the episode fails closed. The
+        correction must name the allowed calls and require replacing the action.
+        """
+        planner = LLMPlanner("qa", "test-model", TestCharter(), 5.0, api_key="test-key")
+        invalid_decision = {
+            "tool": "game",
+            "action": "direct_steer",
+            "arguments": {"x": 1.0, "y": 0.0, "duration": 5.0},
+        }
+        game_over = {
+            "paused": True,
+            "player": {"present": True, "alive": False},
+            "menu": {},
+            "available_actions": ["observe", "restart", "return_to_menu"],
+        }
+
+        with patch.object(planner, "_request", return_value=invalid_decision) as request:
+            planner.plan(game_over, 3, [{"observation_id": "obs-3", "event_state": {}}])
+            planner.repair_plan(
+                game_over,
+                3,
+                [{"observation_id": "obs-3", "event_state": {}}],
+                invalid_decision,
+                "game.direct_steer is invalid in phase game_over; "
+                "allowed: ['game.restart', 'game.return_to_menu']",
+            )
+
+        correction = json.loads(request.call_args.kwargs["messages"][-1]["content"])
+
+        self.assertIn("allowed_calls", correction)
+        self.assertEqual(
+            ["game.restart", "game.return_to_menu"], correction["allowed_calls"]
+        )
+        self.assertIn("replace", correction["instruction"].lower())
+        self.assertNotIn(
+            "Preserve valid gameplay tool, action, and arguments;",
+            correction["instruction"],
+        )
+
     def test_active_gameplay_contract_rejects_unpause_loop_without_choosing_vector(self) -> None:
         observation = {
             "paused": True,
