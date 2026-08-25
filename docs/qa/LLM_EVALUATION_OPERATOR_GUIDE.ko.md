@@ -100,7 +100,15 @@ uv run --locked python -m qa_smoke.cli benchmark-detection \
 
 화면 표시 여부는 캠페인 해시에 포함된다. `--headless`로 일부 실행한 Track A를 창 모드로 `--resume`하거나 그 반대로 재개하지 말고, 모드를 바꿀 때는 새 출력 폴더를 사용한다. 화면 표시 모드에서도 API 키, 고정 모델, 실행 일정과 판정 규칙은 동일하다.
 
-증거 스크린샷(4장 참고)은 창 모드에서만 신뢰할 수 있다. `--headless`는 `-nographics`를 함께 넘기므로 그래픽 디바이스가 없고, 최종 프레임 캡처가 실패하거나 빈 프레임이 될 수 있다. 캡처 실패는 캠페인을 중단시키지 않고 `screenshot_error`로만 기록된다. 기존 스모크 레인(`scripts/qa/smoke.sh`)이 `-batchmode`만 쓰고 `-nographics`를 쓰지 않는 이유도 같다. 스크린샷 증거가 목적이라면 `--headless` 없이 실행한다.
+증거 스크린샷(4장 참고)은 창 모드에서만 쓸 수 있다. 같은 에피소드를 두 모드로 캡처해 비교한 실측 결과는 다음과 같다.
+
+| | `--headless` (`-batchmode -nographics`) | 창 모드 |
+|---|---|---|
+| `screenshot_error` | 없음 | 없음 |
+| PNG 생성 | 됨 (13.5 KB) | 됨 (1.17 MB) |
+| 내용 | **회색 단색** | 실제 게임 화면 |
+
+즉 헤드리스 캡처는 실패하지 않는다. **오류 없이 성공으로 기록되고, 회색 단색 이미지가 저장된다.** `screenshot_error`는 비어 있고 `retained_screenshot_count`도 정상적으로 올라가므로, 보고서 수치만 봐서는 이 상태를 감지할 수 없다. 기존 스모크 레인(`scripts/qa/smoke.sh`)이 `-batchmode`만 쓰고 `-nographics`를 쓰지 않는 이유도 같다. 사람이 볼 증거가 필요하면 반드시 `--headless` 없이 실행한다.
 
 ## 2. Track A: 정상 빌드 자율 탐색
 
@@ -214,7 +222,7 @@ uv run --locked python -m qa_smoke.cli benchmark-detection \
 
 캡처 실패는 캠페인을 실패시키지 않는다. 종료 코드와 판정은 그대로이고, 실패 사실만 `screenshot_error`로 남는다. 반대로 보존된 스크린샷은 체크포인트 아티팩트에 포함되므로, 재개 시 파일이 없거나 해시가 다르면 해당 트레이스는 무효화되어 다시 실행된다. 결과 폴더에서 `screenshots/`만 따로 지우지 않는다.
 
-스크린샷 품질에 대한 주의는 1장의 창 모드 안내와 같다. `--headless`(`-batchmode -nographics`)에서는 그래픽 디바이스가 없어 캡처가 실패하거나 빈 프레임이 될 수 있으므로, 사람이 볼 증거가 필요하면 `--headless` 없이 실행한다.
+스크린샷 품질에 대한 주의는 1장의 창 모드 안내와 같다. `--headless`(`-batchmode -nographics`)에서는 그래픽 디바이스가 없어 회색 단색 이미지가 저장되며, 이것은 캡처 오류로 기록되지 않는다. 사람이 볼 증거가 필요하면 반드시 `--headless` 없이 실행한다.
 
 ## 5. 종료 코드와 재개 안전성
 
@@ -304,7 +312,7 @@ uv run --locked python -m qa_smoke.run \
 | Track A `candidate_count=0` | 정상이다. "이번 고정 일정에서 근거 연결된 후보가 없음"이지 게임에 버그가 없다는 뜻이 아니다 | 그대로 기록한다 |
 | Track A 후보 0 + `coverage_not_reached_traces`가 대부분 | 플레이어가 미션 표면(업그레이드·재시작·아이템)에 도달하지 못함. 탐지 성능 문제가 아니다 | 창 모드로 `poc`를 다시 돌려 플레이를 직접 본다 |
 | Track A `excluded_harness_traces`가 큼 | 하네스·아티팩트 실패 | `harness_failures` 목록과 Unity 로그를 본다 |
-| Track A `capture_error_count`가 트레이스 수와 같음 | `--headless`의 `-nographics` | 스크린샷이 필요하면 `--headless` 없이 실행한다 |
+| 보존된 스크린샷이 전부 회색 단색 | `--headless`의 `-nographics`. `capture_error_count`는 0이고 `retained_screenshot_count`는 정상이라 수치로는 안 잡힌다 | 이미지를 직접 열어 확인한다. 증거가 필요하면 `--headless` 없이 다시 실행한다 |
 | Track B 페어 성공률이 낮고 `NOT_REACHED`·`FAULT_NOT_ACTIVATED`가 다수 | 도달 능력 문제. 이때의 탐지율은 표본이 너무 작아 의미가 없다 | 탐지율 대신 페어 성공률을 먼저 보고한다 |
 | Track B 공식은 TP가 나오는데 자율만 전부 무효 | 검사 능력이 아니라 플레이어의 도달·조작 능력 | 두 표면을 분리해 보고한다 |
 | Track B `BASELINE_CONFLICT`가 여러 결함에 걸쳐 발생 | 주입 결함이 아니라 정상 빌드 자체 또는 replay 재현성 문제 | 7장의 `validate-faults`로 결정적 확인을 먼저 한다 |
