@@ -33,6 +33,39 @@ uv run --locked python -m qa_smoke.cli run \
 
 정상판 빌드는 결함 목록 없이 실행되는 하나의 깨끗한 플레이어여야 한다. Track B는 실행 시점에 평가용 결함 하나를 켜므로 결함별 Unity 빌드를 따로 만들지 않는다.
 
+### 화면을 보면서 실행하기
+
+`--headless`는 선택 옵션이다. 게임 창과 Unity 로그를 직접 확인하려면 명령에서 `--headless`를 빼고 실행한다. macOS 로그인 세션처럼 화면을 표시할 수 있는 환경에서 실행해야 하며, SSH 세션이나 GUI가 없는 CI에서는 사용할 수 없다.
+
+예를 들어 결정적 하네스는 다음처럼 실행한다.
+
+```sh
+uv run --locked python -m qa_smoke.cli run \
+  --build QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app \
+  --suite all \
+  --output QAArtifacts/acceptance/clean-harness-visible
+```
+
+Track A 자율 탐색도 같은 방식으로 실행한다.
+
+```sh
+uv run --locked python -m qa_smoke.cli explore \
+  --build QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app \
+  --project-root . \
+  --output QAArtifacts/evaluation/track-a-visible
+```
+
+Track B 대조 실행은 다음과 같다.
+
+```sh
+uv run --locked python -m qa_smoke.cli benchmark-detection \
+  --build QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app \
+  --project-root . \
+  --output QAArtifacts/evaluation/track-b-visible
+```
+
+화면 표시 여부는 캠페인 실행 옵션에 포함된다. `--headless`로 일부 실행한 Track A를 창 모드로 `--resume`하거나 그 반대로 재개하지 말고, 모드를 바꿀 때는 새 출력 폴더를 사용한다. 화면 표시 모드에서도 API 키, 고정 모델, 실행 일정과 판정 규칙은 동일하다.
+
 ## 2. Track A: 정상 빌드 자율 탐색
 
 빈 결과 폴더에서 다음을 실행한다.
