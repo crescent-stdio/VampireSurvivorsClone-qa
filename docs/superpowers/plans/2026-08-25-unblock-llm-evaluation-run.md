@@ -71,15 +71,30 @@ scripts/qa/build-bridge-player.sh
 
 Expected: the script prints the `.app` path and exits `0`. The build log is `QAArtifacts/logs/bridge-player-build-macos.log`.
 
-- [ ] **Step 4: Verify the binary is newer than the bridge source**
+- [ ] **Step 4: Verify the built assembly carries the new command**
+
+A macOS `.app` is a directory whose top-level mtime does not always move when Unity
+rewrites the bundle, so a timestamp comparison reports a fresh build as stale. Search
+the built assembly instead. String literals live in the `#US` heap as UTF-16, and the
+macOS `strings` binary reads ASCII only and rejects `-e`, so use Python.
 
 ```sh
-stat -f "%Sm %N" -t "%Y-%m-%d %H:%M" \
-  QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app \
-  Assets/Scripts/QA/QABridge.cs
+uv run --locked python - <<'CHECK'
+from pathlib import Path
+
+dll = Path(
+    "QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app"
+    "/Contents/Resources/Data/Managed/Vampire.Runtime.dll"
+)
+blob = dll.read_bytes()
+for needle in ("capture_screenshot", "final-frame.pending.png", "QaBridgeScreenshotService"):
+    print(needle, "utf16=", needle.encode("utf-16-le") in blob, "ascii=", needle.encode() in blob)
+CHECK
 ```
 
-Expected: the `.app` timestamp is later than `QABridge.cs`. A stale timestamp means the build silently reused a cached player — do not continue.
+Expected: `capture_screenshot` and `final-frame.pending.png` report `utf16= True`, and
+`QaBridgeScreenshotService` reports `ascii= True` because type names are ASCII metadata.
+Any `False` means the build did not pick up `QABridge.cs` — do not continue.
 
 - [ ] **Step 5: Prove the command works against the real bridge**
 
