@@ -288,10 +288,11 @@ uv run --locked python -m qa_smoke.run \
 종료 코드만 믿지 말고 산출물을 읽는다.
 
 ```sh
-uv run --locked python -c "import json; r=json.load(open('QAArtifacts/preflight/model-check/report.json')); print('fatal:', r.get('fatal_error') or 'none'); print('calls:', (r.get('metrics') or {}).get('api_usage', {}).get('calls')); print('inspection:', 'PRESENT' if r.get('inspection') else 'ABSENT')"
+uv run --locked python -c "import json; r=json.load(open('QAArtifacts/preflight/model-check/report.json')); print('fatal:', r.get('fatal_error') or 'none'); print('calls:', (r.get('metrics') or {}).get('api_usage', {}).get('calls'))"
+ls QAArtifacts/preflight/model-check/inspector-response.jsonl
 ```
 
-`fatal_error`가 없고 `metrics.api_usage.calls`가 0이 아니면 **조종 모델**이 동작한 것이다. **검사 모델은 `inspection` 키로만 판정한다.** `llm_assessment`는 조종 모델이 쓴 최종 총평이므로 검사 모델이 한 번도 응답하지 못한 실행에서도 채워진다. 이 둘을 혼동하면 검사 경로가 100% 실패하는 빌드를 정상으로 판정하게 된다.
+`fatal_error`가 없고 `metrics.api_usage.calls`가 0이 아니면 **조종 모델**이 동작한 것이다. **검사 모델은 `inspector-response.jsonl`의 존재로 판정한다.** 검사 호출이 거절되면 `inspector-request.jsonl`만 남고 응답 파일은 생기지 않는다. `report.json`에는 검사 결과 필드가 없으므로 보고서만 봐서는 판정할 수 없고, `llm_assessment`는 조종 모델이 쓴 최종 총평이라 검사 모델이 한 번도 응답하지 못한 실행에서도 채워진다. 이 둘을 혼동하면 검사 경로가 100% 실패하는 빌드를 정상으로 판정하게 된다.
 
 `inspection`이 `ABSENT`면 캠페인 전체가 `INSPECTION_ERROR`로 끝나므로 여기서 멈추고 원인을 먼저 해결한다. 감사 로그(`inspections/<trace>/pass-*/`)의 `cause_type`이 `LLMTransportError`라고 해서 네트워크 문제로 단정하지 않는다. 플래너는 응답 본문을 재작하므로 계약 위반(HTTP 400)도 같은 이름으로 보인다.
 
