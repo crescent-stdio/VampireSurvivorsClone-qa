@@ -285,7 +285,15 @@ uv run --locked python -m qa_smoke.run \
 
 단일 에피소드 실행기는 `qa_smoke.run`이며 `--game-exe`를 받는다. `qa_smoke.cli run`은 시나리오 스위트 실행기라 `--build`와 `--suite`만 받는다는 점에 주의한다. 비용을 묶는 것은 `--max-steps`이므로, 시뮬레이션 시간은 등록된 최단 시나리오와 같은 60초로 두어 게임 진입 전에 끝나지 않게 한다.
 
-종료 코드만 믿지 말고 산출물을 읽는다. `report.json`의 `fatal_error`가 없고, `metrics.api_usage.calls`가 0이 아니며, `llm_assessment`가 존재해야 한다. 검사 모델이 응답하지 않으면 캠페인 전체가 `INSPECTION_ERROR`로 끝나므로 여기서 멈추고 원인을 먼저 해결한다.
+종료 코드만 믿지 말고 산출물을 읽는다.
+
+```sh
+uv run --locked python -c "import json; r=json.load(open('QAArtifacts/preflight/model-check/report.json')); print('fatal:', r.get('fatal_error') or 'none'); print('calls:', (r.get('metrics') or {}).get('api_usage', {}).get('calls')); print('inspection:', 'PRESENT' if r.get('inspection') else 'ABSENT')"
+```
+
+`fatal_error`가 없고 `metrics.api_usage.calls`가 0이 아니면 **조종 모델**이 동작한 것이다. **검사 모델은 `inspection` 키로만 판정한다.** `llm_assessment`는 조종 모델이 쓴 최종 총평이므로 검사 모델이 한 번도 응답하지 못한 실행에서도 채워진다. 이 둘을 혼동하면 검사 경로가 100% 실패하는 빌드를 정상으로 판정하게 된다.
+
+`inspection`이 `ABSENT`면 캠페인 전체가 `INSPECTION_ERROR`로 끝나므로 여기서 멈추고 원인을 먼저 해결한다. 감사 로그(`inspections/<trace>/pass-*/`)의 `cause_type`이 `LLMTransportError`라고 해서 네트워크 문제로 단정하지 않는다. 플래너는 응답 본문을 재작하므로 계약 위반(HTTP 400)도 같은 이름으로 보인다.
 
 3. `run --suite all` — LLM 없이 빌드와 하네스가 정상인지 확인한다.
 4. `explore --profile poc` — 창 모드로 실행해 플레이어가 실제로 게임을 굴리는지 눈으로 확인한다.
@@ -316,7 +324,7 @@ uv run --locked python -m qa_smoke.run \
 | Track B 페어 성공률이 낮고 `NOT_REACHED`·`FAULT_NOT_ACTIVATED`가 다수 | 도달 능력 문제. 이때의 탐지율은 표본이 너무 작아 의미가 없다 | 탐지율 대신 페어 성공률을 먼저 보고한다 |
 | Track B 공식은 TP가 나오는데 자율만 전부 무효 | 검사 능력이 아니라 플레이어의 도달·조작 능력 | 두 표면을 분리해 보고한다 |
 | Track B `BASELINE_CONFLICT`가 여러 결함에 걸쳐 발생 | 주입 결함이 아니라 정상 빌드 자체 또는 replay 재현성 문제 | 7장의 `validate-faults`로 결정적 확인을 먼저 한다 |
-| Track B `INSPECTION_ERROR`가 다수 | 검사 모델 응답이 계약 스키마를 못 맞춤 | `inspections/` 감사 로그의 실패 pass를 확인한다 |
+| `INSPECTION_ERROR`가 다수, 또는 캠페인이 첫 트레이스에서 `CampaignExecutionError`로 중단 | 검사 요청이 엔드포인트에 거절됐을 수 있다. `cause_type`이 `LLMTransportError`여도 네트워크 문제로 단정하지 않는다 — 플래너가 응답 본문을 재작하므로 HTTP 400 계약 위반도 같은 이름으로 보인다 | `inspections/<trace>/pass-*/`의 `latency_ms`를 본다. 수백 ms에 `raw_response`가 `null`이면 타임아웃이 아니라 즉시 거절이다. 같은 요청 본문을 직접 보내 실제 HTTP 상태와 오류 메시지를 확인한다 |
 | 어느 쪽이든 종료 코드 `2` | 캠페인 수준 실패. manifest는 `incomplete` | `error_type`을 확인하고, 그 폴더의 보고서는 결과로 쓰지 않는다 |
 
 두 트랙 모두 결정적 회귀 게이트가 아니다. Track A 후보 수와 Track B 탐지율로 릴리스 판정을 하지 않는다.
