@@ -97,6 +97,120 @@
       "limits": {"max_simulation_seconds": 240.0, "max_steps": 80}
     },
     {
+      "id": "medium-upgrade-dialog-close",
+      "difficulty": "medium",
+      "bug_type": "logic_error",
+      "preset": "smoke",
+      "legacy_scenario_id": "medium-upgrade-effect",
+      "goal": {
+        "description": "Select an upgrade and observe whether the blocking dialog closes.",
+        "reached_when": "upgrade_close_attempted",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "upgrade_dialog_closes", "kind": "transition"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": ["Assets/Scripts/UI/AbilitySelectionDialog.cs"],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 120.0, "max_steps": 40}
+    },
+    {
+      "id": "easy-movement-input",
+      "difficulty": "easy",
+      "bug_type": "logic_error",
+      "preset": "smoke",
+      "legacy_scenario_id": "easy-relative-position",
+      "goal": {
+        "description": "Apply a sustained movement command and compare it with player motion.",
+        "reached_when": "movement_sample_observed",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "movement_matches_input", "kind": "transition"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": ["Assets/Scripts/Character/Character.cs"],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 60.0, "max_steps": 20}
+    },
+    {
+      "id": "hard-monster-spawn-continuity",
+      "difficulty": "hard",
+      "bug_type": "logic_error",
+      "preset": "smoke",
+      "legacy_scenario_id": "control-long-progression",
+      "goal": {
+        "description": "Survive past 75 seconds and verify regular monster spawning continues.",
+        "reached_when": "level_time >= 75",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "regular_monster_spawning_continues", "kind": "trajectory"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": ["Assets/Scripts/Gameplay/LevelManager.cs"],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 120.0, "max_steps": 40}
+    },
+    {
+      "id": "easy-weapon-cooldown",
+      "difficulty": "easy",
+      "bug_type": "logic_error",
+      "preset": "smoke",
+      "legacy_scenario_id": "easy-health-ratio",
+      "goal": {
+        "description": "Observe the starting weapon across multiple cooldown periods.",
+        "reached_when": "weapon_attack_window_observed",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "weapon_cooldown_repeats", "kind": "trajectory"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": ["Assets/Scripts/Character/Abilities/MeleeAbility.cs"],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 60.0, "max_steps": 20}
+    },
+    {
+      "id": "medium-contact-cooldown",
+      "difficulty": "medium",
+      "bug_type": "logic_error",
+      "preset": "smoke",
+      "legacy_scenario_id": "easy-health-ratio",
+      "goal": {
+        "description": "Observe repeated contact damage from the same melee attacker.",
+        "reached_when": "repeated_contact_damage_observed",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "contact_damage_respects_cooldown", "kind": "transition"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": ["Assets/Scripts/Monsters/MeleeMonster.cs"],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 60.0, "max_steps": 20}
+    },
+    {
+      "id": "medium-projectile-collision",
+      "difficulty": "medium",
+      "bug_type": "logic_error",
+      "preset": "smoke",
+      "legacy_scenario_id": "medium-upgrade-effect",
+      "goal": {
+        "description": "Acquire a projectile-producing weapon and observe a projectile-enemy collision.",
+        "reached_when": "projectile_enemy_collision_observed",
+        "verified_path": "scripted:seed=9101"
+      },
+      "oracle": {"id": "projectile_enemy_collision_applies", "kind": "transition"},
+      "abort": ["player_death", "phase_stuck>30s"],
+      "mode": "qa",
+      "context_refs": ["Assets/Scripts/Projectiles/Projectile.cs"],
+      "driver": "scripted",
+      "seeds": [9101, 9102, 9103],
+      "limits": {"max_simulation_seconds": 120.0, "max_steps": 40}
+    },
+    {
       "id": "control-easy-observation",
       "difficulty": "easy",
       "bug_type": "control",

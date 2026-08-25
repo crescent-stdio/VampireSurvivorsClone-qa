@@ -473,7 +473,12 @@ def _public_api_endpoint_hash(api_url: str | None) -> str:
 
 
 def load_fault_bindings(project_root: Path) -> tuple[FaultBinding, ...]:
-    """Join the legacy and v4 private registries into the 11 fixed fault bindings."""
+    """Select the 11 fixed benchmark bindings from the larger fault registries.
+
+    Additional opt-in gameplay faults remain available to deterministic v4
+    validation without silently changing Track B's accepted schedule, private
+    scoring relations, or API-call budget.
+    """
 
     legacy = {
         scenario.ground_truth.fault_id: FaultBinding(
@@ -504,10 +509,9 @@ def load_fault_bindings(project_root: Path) -> tuple[FaultBinding, ...]:
     }
     joined = {**legacy, **v4}
     missing = [fault_id for fault_id in FAULT_IDS if fault_id not in joined]
-    extras = sorted(set(joined) - set(FAULT_IDS))
-    if missing or extras:
+    if missing:
         raise CampaignContractError(
-            f"fault binding registry mismatch: missing={missing}, extras={extras}"
+            f"fault binding registry mismatch: missing={missing}"
         )
     return tuple(joined[fault_id] for fault_id in FAULT_IDS)
 

@@ -31,6 +31,42 @@
       "validity": "valid",
       "expected_behavior": "Raw experience and displayed experience remain consistent."
     },
+    "medium-upgrade-dialog-close": {
+      "bug_id": "GAMEPLAY-BUG-1",
+      "fault_id": "upgrade_dialog_stuck_open",
+      "validity": "valid",
+      "expected_behavior": "A successful upgrade selection closes the blocking dialog."
+    },
+    "easy-movement-input": {
+      "bug_id": "GAMEPLAY-BUG-2",
+      "fault_id": "movement_input_inverted",
+      "validity": "valid",
+      "expected_behavior": "Player movement follows the requested input direction."
+    },
+    "hard-monster-spawn-continuity": {
+      "bug_id": "GAMEPLAY-BUG-3",
+      "fault_id": "monster_spawning_stops",
+      "validity": "valid",
+      "expected_behavior": "Regular monster spawning continues until the level schedule ends."
+    },
+    "easy-weapon-cooldown": {
+      "bug_id": "GAMEPLAY-BUG-4",
+      "fault_id": "weapon_cooldown_stuck_after_first_attack",
+      "validity": "valid",
+      "expected_behavior": "An active weapon attacks again after each cooldown period."
+    },
+    "medium-contact-cooldown": {
+      "bug_id": "GAMEPLAY-BUG-5",
+      "fault_id": "contact_damage_cooldown_not_reset",
+      "validity": "valid",
+      "expected_behavior": "A melee monster respects its configured interval between contact hits."
+    },
+    "medium-projectile-collision": {
+      "bug_id": "GAMEPLAY-BUG-6",
+      "fault_id": "projectile_passes_through_enemies",
+      "validity": "valid",
+      "expected_behavior": "A projectile collision with an enemy applies damage and consumes the projectile."
+    },
     "control-easy-observation": {
       "bug_id": null,
       "fault_id": null,
