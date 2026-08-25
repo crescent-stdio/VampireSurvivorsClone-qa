@@ -1175,7 +1175,7 @@ def test_steering_identity_includes_all_effective_prompt_dependencies(
         "run.py",
         "state_channels.py",
     } <= called_files
-    assert exploration.STEERING_PROMPT_TEMPLATE_VERSION == "qa-planning/v6"
+    assert exploration.STEERING_PROMPT_TEMPLATE_VERSION == "qa-planning/v7"
     cache_clear()
 
 
