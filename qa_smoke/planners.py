@@ -8,6 +8,7 @@ from datetime import datetime
 import urllib.error
 import urllib.request
 import time
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from .charter import TestCharter
@@ -443,6 +444,33 @@ def canonicalize_decision_arguments(decision: dict[str, Any]) -> dict[str, Any]:
     return canonical
 
 
+def _argument_shape(action: str, allowed_indices: Sequence[Any]) -> dict[str, Any]:
+    """Return the closed argument object Structured Outputs accepts for one action."""
+
+    properties: dict[str, Any] = {}
+    if action in ("start_game", "select_upgrade", "use_item"):
+        index_schema: dict[str, Any] = {"type": "integer"}
+        if allowed_indices:
+            index_schema["enum"] = list(allowed_indices)
+        properties = {"index": index_schema}
+    elif action in ("direct_steer", "steer", "move"):
+        properties = {
+            "x": {"type": "number"},
+            "y": {"type": "number"},
+            "duration": {"type": "number"},
+        }
+        if action == "direct_steer":
+            properties.update(
+                {"intent": {"type": "string"}, "target_id": {"type": "integer"}}
+            )
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
 def build_decision_response_schema(contract: dict[str, Any]) -> dict[str, Any] | None:
     """Build a strict schema for any phase whose calls are all game calls.
 
@@ -464,34 +492,19 @@ def build_decision_response_schema(contract: dict[str, Any]) -> dict[str, Any] |
             if contract.get("has_previous_transition")
             else ["not_applicable"]
         )
-    argument_properties: dict[str, Any] = {}
-    required_arguments: list[str] = []
-    if not action:
-        # Several actions share this phase and their argument shapes differ, so the
-        # object stays open here and validate_decision_against_contract checks it.
-        arguments_schema: dict[str, Any] = {"type": "object"}
-    elif action in ("start_game", "select_upgrade", "use_item"):
-        index_schema: dict[str, Any] = {"type": "integer"}
-        allowed_indices = contract.get("allowed_indices") or []
-        if allowed_indices:
-            index_schema["enum"] = list(allowed_indices)
-        argument_properties = {"index": index_schema}
-        required_arguments = ["index"]
-    elif action in ("direct_steer", "steer", "move"):
-        argument_properties = {
-            "x": {"type": "number"},
-            "y": {"type": "number"},
-            "duration": {"type": "number"},
-        }
-        required_arguments = ["x", "y", "duration"]
-        if action == "direct_steer":
-            argument_properties.update(
-                {
-                    "intent": {"type": "string"},
-                    "target_id": {"type": "integer"},
-                }
-            )
-            required_arguments.extend(("intent", "target_id"))
+    argument_shapes = [
+        _argument_shape(candidate, contract.get("allowed_indices") or [])
+        for candidate in actions
+    ]
+    unique_shapes: list[dict[str, Any]] = []
+    for shape in argument_shapes:
+        if shape not in unique_shapes:
+            unique_shapes.append(shape)
+    # Structured Outputs rejects an open object and requires every property to be
+    # required, so differing shapes branch instead of merging into one union.
+    arguments_schema = (
+        unique_shapes[0] if len(unique_shapes) == 1 else {"anyOf": unique_shapes}
+    )
     reflection_schema = {
         "type": "object",
         "properties": {
@@ -522,13 +535,6 @@ def build_decision_response_schema(contract: dict[str, Any]) -> dict[str, Any] |
         "arguments",
         "reflection",
     ]
-    if action:
-        arguments_schema = {
-            "type": "object",
-            "properties": argument_properties,
-            "required": required_arguments,
-            "additionalProperties": False,
-        }
     expected_effect_actions = (
         "direct_steer",
         "steer",

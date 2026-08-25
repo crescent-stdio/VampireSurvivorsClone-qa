@@ -684,6 +684,37 @@ class LLMPlannerTests(unittest.TestCase):
         )
         self.assertIn("qa_observation", schema["required"])
         self.assertIn("reflection", schema["required"])
+        # Structured Outputs rejects an open object: "additionalProperties is
+        # required to be supplied and to be false". Both calls here take no
+        # arguments, so one closed empty shape covers the phase.
+        self.assertEqual(
+            {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            schema["properties"]["arguments"],
+        )
+
+    def test_decision_schema_branches_arguments_when_shapes_differ(self) -> None:
+        """direct_steer and use_item share active_gameplay with different arguments.
+
+        Strict mode also requires every property to be required, so a union of
+        both shapes is invalid; each closed shape becomes an anyOf branch.
+        """
+        contract = {
+            "phase": "active_gameplay",
+            "allowed_calls": ["game.direct_steer", "game.use_item"],
+            "allowed_indices": [0, 2],
+            "has_previous_transition": True,
+            "reflection_contract": {"allowed_statuses": ["matched", "unexpected", "uncertain"]},
+        }
+
+        arguments = build_decision_response_schema(contract)["properties"]["arguments"]
+
+        self.assertEqual(2, len(arguments["anyOf"]))
+        for branch in arguments["anyOf"]:
+            self.assertFalse(branch["additionalProperties"])
+            self.assertEqual(sorted(branch["properties"]), sorted(branch["required"]))
+        self.assertEqual(
+            [0, 2], arguments["anyOf"][1]["properties"]["index"]["enum"]
+        )
 
     def test_decision_schema_keeps_single_call_arguments_strict(self) -> None:
         """Generalising to several calls must not loosen the single-call shape."""
