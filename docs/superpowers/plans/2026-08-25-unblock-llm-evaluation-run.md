@@ -16,6 +16,7 @@
 - Python `3.10.12`, `uv 0.12.x`. Always run through `uv run --locked`.
 - `QA_API_KEY` or `OPENAI_API_KEY` is injected through the shell environment only. Never place a key on the command line, in a repository file, in a result folder, or in a URL.
 - Steering model is fixed to `gpt-4o-mini`; inspector model is fixed to `gpt-5.6-luna` (`qa_smoke/detection_campaign.py:67-72`). Changing either is a contract change that must be committed, not an ad hoc override.
+- `gpt-5.6-luna` is a published OpenAI model: the nano tier of the GPT-5.6 family, 1,050,000 token context, reasoning tokens supported, $0.20 / $0.02 cached / $1.20 per 1M tokens. A transport failure against it is an access or connectivity problem, not evidence that the model does not exist.
 - Campaign results are only valid next to a manifest whose `status` is `complete`.
 - `--profile poc` results are never reported as an official detection rate.
 - Every task ends green: `uv run --locked pytest -q qa_agent_runtime/tests qa_llm_agent/tests qa_smoke` and `scripts/qa/test-contracts.sh`.
@@ -153,12 +154,18 @@ Expected: either the default `https://api.openai.com/v1/chat/completions` or you
 
 - [ ] **Step 3: Run one short episode that exercises both models**
 
+`qa_smoke.cli run` is the scenario suite runner and accepts `--build` and `--suite`
+only. A single episode runs through `qa_smoke.run`, which takes `--game-exe`. The shell
+may resolve a stale `uv 0.9.1`, so prepend the mise shims.
+
 ```sh
-uv run --locked python -m qa_smoke.cli run \
-  --build QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app \
-  --policy llm --model gpt-4o-mini --inspector-model gpt-5.6-luna \
-  --max-steps 3 --max-simulation-seconds 30 \
-  --output QAArtifacts/preflight/model-check
+PATH="$HOME/.local/share/mise/shims:$PATH" uv run --locked python -m qa_smoke.run \
+  --game-exe QAArtifacts/bridge-player/macos/VampireSurvivorsClone.app \
+  --project-root . \
+  --output QAArtifacts/preflight/model-check \
+  --mode qa --policy llm --model gpt-4o-mini \
+  --inspector-model gpt-5.6-luna \
+  --seed 9101 --max-steps 3 --max-simulation-seconds 30
 ```
 
 Expected: exit `0`. This is the cheapest call that touches the steering model, the inspector model, and the bridge.
@@ -190,7 +197,7 @@ Read the `cause_type` in the matching audit JSON and act on it:
 
 | `cause_type` | Meaning | Action |
 |---|---|---|
-| `LLMTransportError` with HTTP 404 / `model_not_found` | The endpoint does not serve `gpt-5.6-luna` | Step 6 |
+| `LLMTransportError` with HTTP 404 / `model_not_found` | The key's project cannot reach `gpt-5.6-luna` | Step 6 |
 | `LLMTransportError` with HTTP 401 / 403 | Key lacks access | Fix the key or its project scope, then repeat Step 3 |
 | `LLMTransportError` with a connection failure | Network or proxy | Fix connectivity, then repeat Step 3 |
 | `LLMSchemaError` | The model answered but broke the findings schema | Not a transport block; continue to Task 3 and expect some `INSPECTION_ERROR` |
