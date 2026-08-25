@@ -22,6 +22,8 @@ class BridgeContractError(BridgeError):
 
 class BridgeClient:
     PROTOCOL_VERSION = "1.5"
+    COMMAND_WRITE_TIMEOUT_SECONDS = 2.0
+    COMMAND_WRITE_RETRY_SECONDS = 0.01
 
     def __init__(
         self,
@@ -274,7 +276,17 @@ class BridgeClient:
     def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, path)
+        deadline = time.monotonic() + BridgeClient.COMMAND_WRITE_TIMEOUT_SECONDS
+        while True:
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError as error:
+                if time.monotonic() >= deadline:
+                    raise BridgeError(
+                        f"timed out publishing bridge command {path}: {error}"
+                    ) from error
+                time.sleep(BridgeClient.COMMAND_WRITE_RETRY_SECONDS)
 
     def __enter__(self) -> "BridgeClient":
         self.launch()
