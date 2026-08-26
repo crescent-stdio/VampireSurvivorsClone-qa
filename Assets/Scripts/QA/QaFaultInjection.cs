@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using UnityEngine;
 
 namespace Vampire.QA
 {
@@ -84,6 +85,17 @@ namespace Vampire.QA
         public const string ItemEffectNotApplied = "item_effect_not_applied";
         public const string ItemHitRangeMismatch = "item_hit_range_mismatch";
         public const string ExperienceDisplayDrift = "experience_display_drift";
+        public const string UpgradeDialogStuckOpen = "upgrade_dialog_stuck_open";
+        public const string MovementInputInverted = "movement_input_inverted";
+        public const string MonsterSpawningStops = "monster_spawning_stops";
+        public const string WeaponCooldownStuckAfterFirstAttack =
+            "weapon_cooldown_stuck_after_first_attack";
+        public const string ContactDamageCooldownNotReset =
+            "contact_damage_cooldown_not_reset";
+        public const string ProjectilePassesThroughEnemies =
+            "projectile_passes_through_enemies";
+
+        public const float MonsterSpawnStopSeconds = 60f;
 
         private static readonly Dictionary<string, string> ScenarioByFault =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -99,6 +111,12 @@ namespace Vampire.QA
                 [ItemEffectNotApplied] = "medium-item-effect",
                 [ItemHitRangeMismatch] = "medium-item-hit-range",
                 [ExperienceDisplayDrift] = "hard-exp-conservation",
+                [UpgradeDialogStuckOpen] = "medium-upgrade-dialog-close",
+                [MovementInputInverted] = "easy-movement-input",
+                [MonsterSpawningStops] = "hard-monster-spawn-continuity",
+                [WeaponCooldownStuckAfterFirstAttack] = "easy-weapon-cooldown",
+                [ContactDamageCooldownNotReset] = "medium-contact-cooldown",
+                [ProjectilePassesThroughEnemies] = "medium-projectile-collision",
             };
 
         private static string activeFaultId = "";
@@ -160,6 +178,7 @@ namespace Vampire.QA
         public static void Activate(string faultId)
         {
             activeFaultId = faultId ?? "";
+            QaFaultTelemetry.Reset();
         }
 
         public static bool IsActive(string faultId)
@@ -175,11 +194,185 @@ namespace Vampire.QA
 
         public static bool RestrictItemRange => IsActive(ItemHitRangeMismatch);
 
+        public static bool KeepUpgradeDialogOpen => IsActive(UpgradeDialogStuckOpen);
+
+        public static bool StopWeaponAfterFirstAttack =>
+            IsActive(WeaponCooldownStuckAfterFirstAttack);
+
+        public static bool SkipContactDamageCooldownReset =>
+            IsActive(ContactDamageCooldownNotReset);
+
+        public static bool AllowProjectilesThroughEnemies =>
+            IsActive(ProjectilePassesThroughEnemies);
+
+        public static Vector2 MovementDirection(Vector2 requestedDirection)
+        {
+            return IsActive(MovementInputInverted)
+                ? -requestedDirection
+                : requestedDirection;
+        }
+
+        public static bool ShouldSpawnRegularMonster(float levelTime)
+        {
+            return !IsActive(MonsterSpawningStops) || levelTime < MonsterSpawnStopSeconds;
+        }
+
         public static float DisplayedExperience(string activeFault, float experience, int level)
         {
             return activeFault == ExperienceDisplayDrift && level >= 3
                 ? experience + 3f
                 : experience;
+        }
+    }
+
+    public static class QaFaultTelemetry
+    {
+        private const float ContactCooldownViolationRatio = 0.5f;
+        private static readonly HashSet<int> PendingProjectileEnemyCollisions =
+            new HashSet<int>();
+        private static int primaryWeaponSourceId;
+
+        public static int UpgradeCloseAttempts { get; private set; }
+        public static int UpgradeCloseCompletions { get; private set; }
+        public static int WeaponAttacks { get; private set; }
+        public static int PrimaryWeaponAttacks { get; private set; }
+        public static float PrimaryWeaponFirstAttackTime { get; private set; }
+        public static float PrimaryWeaponLastAttackTime { get; private set; }
+        public static float PrimaryWeaponExpectedCooldown { get; private set; }
+        public static float PrimaryWeaponMaxIntervalRatio { get; private set; }
+        public static int RegularMonstersSpawned { get; private set; }
+        public static float RegularLastSpawnTime { get; private set; }
+        public static float RegularExpectedSpawnDelay { get; private set; }
+        public static bool RegularSpawnScheduleActive { get; private set; }
+        public static int ContactDamageHits { get; private set; }
+        public static int ContactCooldownResets { get; private set; }
+        public static int ContactCooldownViolations { get; private set; }
+        public static int ContactIntervalSamples { get; private set; }
+        public static float ContactMinimumIntervalRatio { get; private set; }
+        public static int ProjectileEnemyCollisions { get; private set; }
+        public static int ProjectileEnemyHits { get; private set; }
+        public static int ProjectileEnemyConsumptions { get; private set; }
+
+        public static void Reset()
+        {
+            UpgradeCloseAttempts = 0;
+            UpgradeCloseCompletions = 0;
+            WeaponAttacks = 0;
+            primaryWeaponSourceId = int.MinValue;
+            PrimaryWeaponAttacks = 0;
+            PrimaryWeaponFirstAttackTime = -1f;
+            PrimaryWeaponLastAttackTime = -1f;
+            PrimaryWeaponExpectedCooldown = 0f;
+            PrimaryWeaponMaxIntervalRatio = 0f;
+            RegularMonstersSpawned = 0;
+            RegularLastSpawnTime = -1f;
+            RegularExpectedSpawnDelay = 0f;
+            RegularSpawnScheduleActive = false;
+            ContactDamageHits = 0;
+            ContactCooldownResets = 0;
+            ContactCooldownViolations = 0;
+            ContactIntervalSamples = 0;
+            ContactMinimumIntervalRatio = -1f;
+            ProjectileEnemyCollisions = 0;
+            ProjectileEnemyHits = 0;
+            ProjectileEnemyConsumptions = 0;
+            PendingProjectileEnemyCollisions.Clear();
+        }
+
+        public static void RecordUpgradeCloseAttempt()
+        {
+            UpgradeCloseAttempts++;
+        }
+
+        public static void RecordUpgradeCloseCompletion()
+        {
+            UpgradeCloseCompletions++;
+        }
+
+        public static void RecordWeaponAttack(
+            int sourceId,
+            float timestamp,
+            float expectedCooldown)
+        {
+            WeaponAttacks++;
+            if (primaryWeaponSourceId == int.MinValue)
+            {
+                primaryWeaponSourceId = sourceId;
+                PrimaryWeaponFirstAttackTime = timestamp;
+            }
+            if (sourceId != primaryWeaponSourceId)
+                return;
+            if (PrimaryWeaponAttacks > 0 && PrimaryWeaponExpectedCooldown > 0f)
+            {
+                float intervalRatio =
+                    (timestamp - PrimaryWeaponLastAttackTime) / PrimaryWeaponExpectedCooldown;
+                PrimaryWeaponMaxIntervalRatio = Mathf.Max(
+                    PrimaryWeaponMaxIntervalRatio,
+                    intervalRatio);
+            }
+            PrimaryWeaponAttacks++;
+            PrimaryWeaponLastAttackTime = timestamp;
+            PrimaryWeaponExpectedCooldown = expectedCooldown;
+        }
+
+        public static void ObserveRegularMonsterSpawnSchedule(
+            float levelTime,
+            bool active,
+            float expectedDelay)
+        {
+            RegularSpawnScheduleActive = active;
+            RegularExpectedSpawnDelay = active &&
+                !float.IsNaN(expectedDelay) &&
+                !float.IsInfinity(expectedDelay)
+                ? expectedDelay
+                : 0f;
+        }
+
+        public static void RecordRegularMonsterSpawn(float levelTime)
+        {
+            RegularMonstersSpawned++;
+            RegularLastSpawnTime = levelTime;
+        }
+
+        public static void RecordContactDamage(
+            float previousTimestamp,
+            float timestamp,
+            float expectedInterval)
+        {
+            if (previousTimestamp >= 0f &&
+                timestamp >= previousTimestamp && expectedInterval > 0f)
+            {
+                float intervalRatio = (timestamp - previousTimestamp) / expectedInterval;
+                ContactIntervalSamples++;
+                ContactMinimumIntervalRatio = ContactIntervalSamples == 1
+                    ? intervalRatio
+                    : Mathf.Min(ContactMinimumIntervalRatio, intervalRatio);
+                if (intervalRatio < ContactCooldownViolationRatio)
+                    ContactCooldownViolations++;
+            }
+            ContactDamageHits++;
+        }
+
+        public static void RecordContactDamageCooldownReset()
+        {
+            ContactCooldownResets++;
+        }
+
+        public static void RecordProjectileEnemyCollision(int projectileId)
+        {
+            ProjectileEnemyCollisions++;
+            PendingProjectileEnemyCollisions.Add(projectileId);
+        }
+
+        public static void RecordProjectileEnemyHit(int projectileId)
+        {
+            ProjectileEnemyHits++;
+        }
+
+        public static void RecordProjectileConsumedAfterEnemyCollision(int projectileId)
+        {
+            if (PendingProjectileEnemyCollisions.Remove(projectileId))
+                ProjectileEnemyConsumptions++;
         }
     }
 }

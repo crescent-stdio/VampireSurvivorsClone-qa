@@ -264,6 +264,33 @@ namespace Vampire.QA
         public WorldState world;
         public ProgressState progress;
         public InventoryState inventory;
+        public QaTelemetryState telemetry;
+    }
+
+    [Serializable]
+    public class QaTelemetryState
+    {
+        public int upgrade_close_attempts;
+        public int upgrade_close_completions;
+        public float telemetry_time;
+        public int weapon_attacks;
+        public int primary_weapon_attacks;
+        public float primary_weapon_first_attack_time;
+        public float primary_weapon_last_attack_time;
+        public float primary_weapon_expected_cooldown;
+        public float primary_weapon_max_interval_ratio;
+        public int regular_monsters_spawned;
+        public float regular_last_spawn_time;
+        public float regular_expected_spawn_delay;
+        public bool regular_spawn_schedule_active;
+        public int contact_damage_hits;
+        public int contact_cooldown_resets;
+        public int contact_cooldown_violations;
+        public int contact_interval_samples;
+        public float contact_minimum_interval_ratio;
+        public int projectile_enemy_collisions;
+        public int projectile_enemy_hits;
+        public int projectile_enemy_consumptions;
     }
 
     [Serializable]

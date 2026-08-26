@@ -60,6 +60,12 @@ def _event(transition: Transition) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _qa_telemetry(transition: Transition) -> dict[str, Any]:
+    evaluator = _observation(transition).get("evaluator_state") or {}
+    value = evaluator.get("telemetry") or {}
+    return value if isinstance(value, dict) else {}
+
+
 def _event_ref(transition: Transition) -> str:
     return str(_event(transition).get("event_id") or "")
 
@@ -506,6 +512,250 @@ def evaluate_v4_oracle(oracle_id: str, transitions: list[Transition]) -> OracleR
                         detail="item affected every target in range" if passed else "item affected only part of the range",
                     )
         return OracleResult(verdict="not_evaluated", evidence_refs=refs, detail="required transition was not observed")
+
+    if oracle_id == "upgrade_dialog_closes":
+        for index, transition in enumerate(transitions):
+            if str(_decision(transition).get("action") or "") != "select_upgrade":
+                continue
+            before = _observation(transitions[index - 1]) if index > 0 else {}
+            before_menu = before.get("menu") or {}
+            if not before_menu.get("upgrade_open") and before.get("phase") != "upgrade_selection":
+                continue
+            after = _observation(transition)
+            after_menu = after.get("menu") or {}
+            passed = (
+                not after_menu.get("upgrade_open")
+                and after.get("phase") != "upgrade_selection"
+            )
+            return OracleResult(
+                verdict="pass" if passed else "fail",
+                evidence_refs=_refs_for(transitions[index - 1]) + _refs_for(transition)
+                if index > 0 else _refs_for(transition),
+                detail=(
+                    "upgrade selection exited the blocking dialog"
+                    if passed
+                    else "upgrade selection left the blocking dialog active"
+                ),
+            )
+        return OracleResult(
+            verdict="not_evaluated",
+            evidence_refs=refs,
+            detail="no valid upgrade selection transition was observed",
+        )
+
+    if oracle_id == "movement_matches_input":
+        relevant: list[str] = []
+        alignments: list[float] = []
+        for transition in transitions:
+            observation = _observation(transition)
+            controller = observation.get("controller") or {}
+            steering = controller.get("steering") or {}
+            velocity = (observation.get("player") or {}).get("velocity") or {}
+            sx = float(steering.get("x", 0.0) or 0.0)
+            sy = float(steering.get("y", 0.0) or 0.0)
+            vx = float(velocity.get("x", 0.0) or 0.0)
+            vy = float(velocity.get("y", 0.0) or 0.0)
+            if math.hypot(sx, sy) < 0.2 or math.hypot(vx, vy) < 0.1:
+                continue
+            relevant.extend(_refs_for(transition))
+            alignments.append(
+                (sx * vx + sy * vy)
+                / (math.hypot(sx, sy) * math.hypot(vx, vy))
+            )
+        if len(alignments) >= 3:
+            ordered = sorted(alignments)
+            middle = len(ordered) // 2
+            median = (
+                ordered[middle]
+                if len(ordered) % 2
+                else (ordered[middle - 1] + ordered[middle]) / 2.0
+            )
+            positive_ratio = sum(value > 0.25 for value in alignments) / len(alignments)
+            negative_ratio = sum(value < -0.25 for value in alignments) / len(alignments)
+            if median < -0.25 and negative_ratio >= 2.0 / 3.0:
+                return OracleResult(
+                    verdict="fail",
+                    evidence_refs=relevant,
+                    detail=(
+                        "sustained player motion opposed steering "
+                        f"(median alignment {median:.3f}, {negative_ratio:.0%} opposing)"
+                    ),
+                )
+            if median > 0.25 and positive_ratio >= 2.0 / 3.0:
+                return OracleResult(
+                    verdict="pass",
+                    evidence_refs=relevant,
+                    detail=(
+                        "sustained player motion followed steering "
+                        f"(median alignment {median:.3f}, {positive_ratio:.0%} following)"
+                    ),
+                )
+        return OracleResult(
+            verdict="not_evaluated",
+            evidence_refs=refs,
+            detail="fewer than three consistent movement samples were observed",
+        )
+
+    if oracle_id == "regular_monster_spawning_continues":
+        eligible: list[tuple[Transition, float, int]] = []
+        for transition in transitions:
+            observation = _observation(transition)
+            level_time = float(((observation.get("progress") or {}).get("level_time") or 0.0))
+            telemetry = _qa_telemetry(transition)
+            schedule_active = bool(telemetry.get("regular_spawn_schedule_active", False))
+            expected_delay = float(telemetry.get("regular_expected_spawn_delay", 0.0) or 0.0)
+            last_spawn_time = float(telemetry.get("regular_last_spawn_time", -1.0))
+            spawned = int(telemetry.get("regular_monsters_spawned", 0) or 0)
+            if not schedule_active or expected_delay <= 0.0 or last_spawn_time < 0.0 or spawned < 2:
+                continue
+            eligible.append((transition, level_time, spawned))
+            allowed_gap = max(2.0, expected_delay * 4.0)
+            if level_time - last_spawn_time > allowed_gap:
+                return OracleResult(
+                    verdict="fail",
+                    evidence_refs=_refs_for(transition),
+                    detail=(
+                        f"spawn schedule remained active but no regular monster appeared for "
+                        f"{level_time - last_spawn_time:.2f}s (allowed {allowed_gap:.2f}s)"
+                    ),
+                )
+        if len(eligible) < 2:
+            return OracleResult(
+                verdict="not_evaluated",
+                evidence_refs=refs,
+                detail="an active spawn schedule was not observed across multiple samples",
+            )
+        first_transition, first_time, first_count = eligible[0]
+        last_transition, last_time, last_count = eligible[-1]
+        passed = last_count > first_count
+        return OracleResult(
+            verdict="pass" if passed else "fail",
+            evidence_refs=_refs_for(first_transition) + _refs_for(last_transition),
+            detail=(
+                f"regular monster spawn count increased from {first_count} to {last_count} "
+                f"while the schedule was active ({first_time:.2f}s to {last_time:.2f}s)"
+                if passed
+                else "regular monster spawn count did not increase while its schedule was active"
+            ),
+        )
+
+    if oracle_id == "weapon_cooldown_repeats":
+        eligible: list[tuple[Transition, int, float, float, float]] = []
+        for transition in transitions:
+            telemetry = _qa_telemetry(transition)
+            attacks = int(telemetry.get("primary_weapon_attacks", 0) or 0)
+            first_attack = float(telemetry.get("primary_weapon_first_attack_time", -1.0))
+            last_attack = float(telemetry.get("primary_weapon_last_attack_time", -1.0))
+            cooldown = float(telemetry.get("primary_weapon_expected_cooldown", 0.0) or 0.0)
+            now = float(telemetry.get("telemetry_time", 0.0) or 0.0)
+            if attacks < 1 or first_attack < 0.0 or last_attack < 0.0 or cooldown <= 0.0:
+                continue
+            eligible.append((transition, attacks, first_attack, last_attack, cooldown))
+            max_interval_ratio = float(
+                telemetry.get("primary_weapon_max_interval_ratio", 0.0) or 0.0
+            )
+            overdue_ratio = (now - last_attack) / cooldown
+            if max_interval_ratio > 1.5 or overdue_ratio > 1.5:
+                return OracleResult(
+                    verdict="fail",
+                    evidence_refs=_refs_for(transition),
+                    detail=(
+                        "primary weapon exceeded its configured cooldown "
+                        f"(overdue ratio {overdue_ratio:.2f}, max interval ratio {max_interval_ratio:.2f})"
+                    ),
+                )
+        if eligible:
+            transition, attacks, first_attack, _, cooldown = eligible[-1]
+            now = float(_qa_telemetry(transition).get("telemetry_time", 0.0) or 0.0)
+            if attacks >= 2 and now - first_attack >= cooldown * 2.0:
+                return OracleResult(
+                    verdict="pass",
+                    evidence_refs=_refs_for(transition),
+                    detail=(
+                        f"primary weapon repeated within its configured cooldown "
+                        f"({attacks} attacks, cooldown {cooldown:.3f}s)"
+                    ),
+                )
+        return OracleResult(
+            verdict="not_evaluated",
+            evidence_refs=refs,
+            detail="two configured cooldown periods were not fully observed",
+        )
+
+    if oracle_id == "contact_damage_respects_cooldown":
+        telemetry = _qa_telemetry(transitions[-1])
+        hits = int(telemetry.get("contact_damage_hits", 0) or 0)
+        resets = int(telemetry.get("contact_cooldown_resets", 0) or 0)
+        samples = int(telemetry.get("contact_interval_samples", 0) or 0)
+        minimum_ratio = float(telemetry.get("contact_minimum_interval_ratio", -1.0))
+        if hits < 2:
+            return OracleResult(
+                verdict="not_evaluated",
+                evidence_refs=refs,
+                detail="fewer than two melee contact hits were observed",
+            )
+        passed = resets == hits
+        interval_detail = (
+            f"; minimum observed interval ratio {minimum_ratio:.3f} across {samples} samples"
+            if samples > 0 and minimum_ratio >= 0.0
+            else ""
+        )
+        return OracleResult(
+            verdict="pass" if passed else "fail",
+            evidence_refs=refs,
+            detail=(
+                f"all {hits} contact hits restarted their attacker cooldowns{interval_detail}"
+                if passed
+                else f"only {resets} of {hits} contact hits restarted their attacker cooldowns"
+            ),
+        )
+
+    if oracle_id == "projectile_enemy_collision_applies":
+        telemetry = _qa_telemetry(transitions[-1])
+        collisions = int(telemetry.get("projectile_enemy_collisions", 0) or 0)
+        hits = int(telemetry.get("projectile_enemy_hits", 0) or 0)
+        consumptions = int(telemetry.get("projectile_enemy_consumptions", 0) or 0)
+        if collisions == 0:
+            return OracleResult(
+                verdict="not_evaluated",
+                evidence_refs=refs,
+                detail="no projectile-enemy collision was observed",
+            )
+        passed = hits == collisions and consumptions == collisions
+        return OracleResult(
+            verdict="pass" if passed else "fail",
+            evidence_refs=refs,
+            detail=(
+                f"all {collisions} projectile-enemy collisions applied damage and consumed projectiles"
+                if passed
+                else f"{collisions} collision(s) produced {hits} hit(s) and {consumptions} consumption(s)"
+            ),
+        )
+
+    if oracle_id in {
+        "valid_observation",
+        "normal_state_transitions",
+        "stable_long_progression",
+    }:
+        if oracle_id == "normal_state_transitions" and not _normal_transitions(transitions):
+            return OracleResult(
+                verdict="not_evaluated",
+                evidence_refs=refs,
+                detail="normal upgrade and chest transitions were not both observed",
+            )
+        if oracle_id == "stable_long_progression" and not _long_progression(transitions):
+            return OracleResult(
+                verdict="not_evaluated",
+                evidence_refs=refs,
+                detail="the long-progression horizon was not reached",
+            )
+        evaluator = ORACLE_REGISTRY[oracle_id]
+        passed, evidence_refs, detail = evaluator(transitions)
+        return OracleResult(
+            verdict="pass" if passed else "fail",
+            evidence_refs=evidence_refs,
+            detail=detail,
+        )
 
     raise EvaluationContractError(f"unregistered v4 oracle: {oracle_id}")
 

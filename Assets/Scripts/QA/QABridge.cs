@@ -1012,7 +1012,8 @@ namespace Vampire.QA
                 player = observation.player,
                 world = observation.world,
                 progress = observation.progress,
-                inventory = observation.inventory
+                inventory = observation.inventory,
+                telemetry = CaptureQaTelemetry()
             };
             observation.agent_state = new AgentState
             {
@@ -1031,6 +1032,34 @@ namespace Vampire.QA
                 escape_vector = observation.world != null ? observation.world.escape_vector : new VectorState()
             };
             return observation;
+        }
+
+        private QaTelemetryState CaptureQaTelemetry()
+        {
+            return new QaTelemetryState
+            {
+                upgrade_close_attempts = QaFaultTelemetry.UpgradeCloseAttempts,
+                upgrade_close_completions = QaFaultTelemetry.UpgradeCloseCompletions,
+                telemetry_time = Time.time,
+                weapon_attacks = QaFaultTelemetry.WeaponAttacks,
+                primary_weapon_attacks = QaFaultTelemetry.PrimaryWeaponAttacks,
+                primary_weapon_first_attack_time = QaFaultTelemetry.PrimaryWeaponFirstAttackTime,
+                primary_weapon_last_attack_time = QaFaultTelemetry.PrimaryWeaponLastAttackTime,
+                primary_weapon_expected_cooldown = QaFaultTelemetry.PrimaryWeaponExpectedCooldown,
+                primary_weapon_max_interval_ratio = QaFaultTelemetry.PrimaryWeaponMaxIntervalRatio,
+                regular_monsters_spawned = QaFaultTelemetry.RegularMonstersSpawned,
+                regular_last_spawn_time = QaFaultTelemetry.RegularLastSpawnTime,
+                regular_expected_spawn_delay = QaFaultTelemetry.RegularExpectedSpawnDelay,
+                regular_spawn_schedule_active = QaFaultTelemetry.RegularSpawnScheduleActive,
+                contact_damage_hits = QaFaultTelemetry.ContactDamageHits,
+                contact_cooldown_resets = QaFaultTelemetry.ContactCooldownResets,
+                contact_cooldown_violations = QaFaultTelemetry.ContactCooldownViolations,
+                contact_interval_samples = QaFaultTelemetry.ContactIntervalSamples,
+                contact_minimum_interval_ratio = QaFaultTelemetry.ContactMinimumIntervalRatio,
+                projectile_enemy_collisions = QaFaultTelemetry.ProjectileEnemyCollisions,
+                projectile_enemy_hits = QaFaultTelemetry.ProjectileEnemyHits,
+                projectile_enemy_consumptions = QaFaultTelemetry.ProjectileEnemyConsumptions
+            };
         }
 
         private string ObservationPhase(

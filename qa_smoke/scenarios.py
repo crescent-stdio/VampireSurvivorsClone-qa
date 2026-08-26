@@ -57,6 +57,12 @@ REGISTERED_V4_GOALS = frozenset(
         "player_present",
         "upgrade_seen AND chest_collected",
         "level >= 3 OR level_time >= 120",
+        "upgrade_close_attempted",
+        "movement_sample_observed",
+        "level_time >= 75",
+        "weapon_attack_window_observed",
+        "repeated_contact_damage_observed",
+        "projectile_enemy_collision_observed",
     }
 )
 
@@ -70,6 +76,12 @@ REGISTERED_V4_ORACLES = frozenset(
         "valid_observation",
         "normal_state_transitions",
         "stable_long_progression",
+        "upgrade_dialog_closes",
+        "movement_matches_input",
+        "regular_monster_spawning_continues",
+        "weapon_cooldown_repeats",
+        "contact_damage_respects_cooldown",
+        "projectile_enemy_collision_applies",
     }
 )
 

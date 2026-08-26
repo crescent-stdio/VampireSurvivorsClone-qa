@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using Vampire.QA;
 
 namespace Vampire
 {
@@ -68,17 +69,25 @@ namespace Vampire
             levelTime += Time.deltaTime;
             gameTimer.SetTime(levelTime);
             // Monster spawning timer
-            if (levelTime < levelBlueprint.levelTime)
+            bool regularSpawnScheduleActive = levelTime < levelBlueprint.levelTime;
+            float spawnRate = regularSpawnScheduleActive
+                ? levelBlueprint.monsterSpawnTable.GetSpawnRate(levelTime/levelBlueprint.levelTime)
+                : 0f;
+            float monsterSpawnDelay = spawnRate > 0 ? 1.0f/spawnRate : float.PositiveInfinity;
+            QaFaultTelemetry.ObserveRegularMonsterSpawnSchedule(
+                levelTime,
+                regularSpawnScheduleActive && spawnRate > 0,
+                monsterSpawnDelay);
+            if (regularSpawnScheduleActive && QaFaultInjection.ShouldSpawnRegularMonster(levelTime))
             {
                 timeSinceLastMonsterSpawned += Time.deltaTime;
-                float spawnRate = levelBlueprint.monsterSpawnTable.GetSpawnRate(levelTime/levelBlueprint.levelTime);
-                float monsterSpawnDelay = spawnRate > 0 ? 1.0f/spawnRate : float.PositiveInfinity;
                 if (timeSinceLastMonsterSpawned >= monsterSpawnDelay)
                 {
                     (int monsterIndex, float hpMultiplier) = levelBlueprint.monsterSpawnTable.SelectMonsterWithHPMultiplier(levelTime/levelBlueprint.levelTime);
                     (int poolIndex, int blueprintIndex) = levelBlueprint.MonsterIndexMap[monsterIndex];
                     MonsterBlueprint monsterBlueprint = levelBlueprint.monsters[poolIndex].monsterBlueprints[blueprintIndex];
                     entityManager.SpawnMonsterRandomPosition(poolIndex, monsterBlueprint, monsterBlueprint.hp * hpMultiplier);
+                    QaFaultTelemetry.RecordRegularMonsterSpawn(levelTime);
                     timeSinceLastMonsterSpawned = Mathf.Repeat(timeSinceLastMonsterSpawned, monsterSpawnDelay);
                 }
             }

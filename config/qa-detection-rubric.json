@@ -253,6 +253,48 @@
         "differ",
         "differed"
       ]
+    },
+    "upgrade_dialog_stuck_open": {
+      "bug_id": "GAMEPLAY-BUG-1",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": ["upgrade dialog", "upgrade menu", "ability selection"],
+      "symptom_terms": ["stuck", "did not close", "didnt close", "remained open", "still open"]
+    },
+    "movement_input_inverted": {
+      "bug_id": "GAMEPLAY-BUG-2",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": ["movement", "steering command", "player motion", "direction"],
+      "symptom_terms": ["mirrored", "opposite", "reversed", "moved backward", "wrong direction"]
+    },
+    "monster_spawning_stops": {
+      "bug_id": "GAMEPLAY-BUG-3",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": ["monster spawning", "enemy spawning", "enemy count", "spawn rate"],
+      "symptom_terms": ["stopped", "no new enemies", "empty", "not spawning", "spawn count stalled"]
+    },
+    "weapon_cooldown_stuck_after_first_attack": {
+      "bug_id": "GAMEPLAY-BUG-4",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": ["weapon cooldown", "weapon attack", "sword", "attack rate"],
+      "symptom_terms": ["stopped attacking", "only attacked once", "did not attack again", "stuck", "never repeated"]
+    },
+    "contact_damage_cooldown_not_reset": {
+      "bug_id": "GAMEPLAY-BUG-5",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": ["contact damage", "melee attack", "attack cooldown", "damage rate"],
+      "symptom_terms": ["too fast", "every frame", "rapid damage", "cooldown ignored", "timer failed to restart"]
+    },
+    "projectile_passes_through_enemies": {
+      "bug_id": "GAMEPLAY-BUG-6",
+      "observable_in_agent_channel": true,
+      "unobservable_reason": "",
+      "topic_terms": ["projectile", "enemy collision", "projectile hit", "bullet"],
+      "symptom_terms": ["passed through", "no hit", "no damage", "ignored collision", "did not collide"]
     }
   }
 }

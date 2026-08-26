@@ -1,4 +1,5 @@
 using UnityEngine;
+using Vampire.QA;
 
 namespace Vampire
 {
@@ -11,6 +12,7 @@ namespace Vampire
         [SerializeField] protected UpgradeableWeaponCooldown cooldown;
         [SerializeField] protected SpriteRenderer weaponSpriteRenderer;
         protected float timeSinceLastAttack;
+        private bool hasAttacked;
 
         protected override void Use()
         {
@@ -24,7 +26,14 @@ namespace Vampire
             timeSinceLastAttack += Time.deltaTime;
             if (timeSinceLastAttack >= cooldown.Value)
             {
+                if (QaFaultInjection.StopWeaponAfterFirstAttack && hasAttacked)
+                    return;
                 timeSinceLastAttack = Mathf.Repeat(timeSinceLastAttack, cooldown.Value);
+                hasAttacked = true;
+                QaFaultTelemetry.RecordWeaponAttack(
+                    GetInstanceID(),
+                    Time.time,
+                    cooldown.Value);
                 Attack();
             }
         }

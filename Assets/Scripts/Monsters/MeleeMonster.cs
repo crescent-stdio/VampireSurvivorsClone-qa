@@ -1,5 +1,6 @@
 using System.Collections;
 using UnityEngine;
+using Vampire.QA;
 
 namespace Vampire
 {
@@ -7,11 +8,13 @@ namespace Vampire
     {
         protected new MeleeMonsterBlueprint monsterBlueprint;
         protected float timeSinceLastAttack;
+        private float lastRecordedContactDamageTime = -1f;
 
         public override void Setup(int monsterIndex, Vector2 position, MonsterBlueprint monsterBlueprint, float hpBuff = 0)
         {
             base.Setup(monsterIndex, position, monsterBlueprint, hpBuff);
             this.monsterBlueprint = (MeleeMonsterBlueprint) monsterBlueprint;
+            lastRecordedContactDamageTime = -1f;
         }
 
         protected override void Update()
@@ -50,10 +53,20 @@ namespace Vampire
 
         void OnCollisionStay2D(Collision2D col)
         {
-            if (alive && ((monsterBlueprint.meleeLayer & (1 << col.collider.gameObject.layer)) != 0) && timeSinceLastAttack >= 1.0f/monsterBlueprint.atkspeed)
+            float attackInterval = 1.0f / monsterBlueprint.atkspeed;
+            if (alive && ((monsterBlueprint.meleeLayer & (1 << col.collider.gameObject.layer)) != 0) && timeSinceLastAttack >= attackInterval)
             {
+                QaFaultTelemetry.RecordContactDamage(
+                    lastRecordedContactDamageTime,
+                    Time.time,
+                    attackInterval);
+                lastRecordedContactDamageTime = Time.time;
                 playerCharacter.TakeDamage(monsterBlueprint.atk);
-                timeSinceLastAttack = Mathf.Repeat(timeSinceLastAttack, 1.0f/monsterBlueprint.atkspeed);
+                if (!QaFaultInjection.SkipContactDamageCooldownReset)
+                {
+                    timeSinceLastAttack = Mathf.Repeat(timeSinceLastAttack, attackInterval);
+                    QaFaultTelemetry.RecordContactDamageCooldownReset();
+                }
             }
         }
     }
