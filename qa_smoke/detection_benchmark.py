@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Mapping, Sequence
@@ -546,12 +547,30 @@ def _available_evidence_refs(transitions: Sequence[dict[str, Any]]) -> set[str]:
     return references
 
 
+_OBSERVATION_INDEX_PREFIX = re.compile(r"^observations\s*\[[^\]]*\]\s*\.")
+# A violated relation and the invariant it breaks are the same claim.
+_DUAL_COMPARISONS = {"==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
+
+
+def _comparable_field(field_name: Any) -> str:
+    """Strip the chunk-relative observation index the inspector prefixes onto a field."""
+
+    return _OBSERVATION_INDEX_PREFIX.sub("", str(field_name or "").strip(), count=1)
+
+
+def _matches_comparison(reported: Any, expected: str) -> bool:
+    reported_text = str(reported or "")
+    return reported_text == expected or _DUAL_COMPARISONS.get(reported_text) == expected
+
+
 def _matches_target(
     finding: Mapping[str, Any], target: NumericTarget, available_refs: set[str]
 ) -> bool:
     if finding.get("kind") != "numeric":
         return False
-    if finding.get("field") != target.field or finding.get("comparison") != target.comparison:
+    if _comparable_field(finding.get("field")) != _comparable_field(target.field):
+        return False
+    if not _matches_comparison(finding.get("comparison"), target.comparison):
         return False
     if not _numeric_equal(finding.get("expected_value"), target.expected_value, target.integer_values):
         return False

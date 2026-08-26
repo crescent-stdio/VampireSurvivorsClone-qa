@@ -355,13 +355,20 @@ def _normalize_token(value: Any) -> str:
 
 
 def _numeric_rule(comparison: Any) -> str:
+    """Collapse each comparison onto its dual so one defect gets one rule.
+
+    A model may state the invariant it expected ("a == b") or the violation it
+    saw ("a != b"). Both describe the same finding, and keeping them apart split
+    the game-over health mismatch across two rules.
+    """
+
     names = {
-        "==": "numeric-equal",
-        "!=": "numeric-not-equal",
-        "<": "numeric-less-than",
-        "<=": "numeric-less-or-equal",
-        ">": "numeric-greater-than",
-        ">=": "numeric-greater-or-equal",
+        "==": "numeric-equality",
+        "!=": "numeric-equality",
+        "<": "numeric-below-bound",
+        ">=": "numeric-below-bound",
+        ">": "numeric-above-bound",
+        "<=": "numeric-above-bound",
     }
     return names.get(str(comparison), "numeric-relation")
 
@@ -384,8 +391,19 @@ _PLANNER_NUMERIC_CANDIDATE_PATTERN = re.compile(
 )
 
 
+_OBSERVATION_INDEX_PREFIX = re.compile(r"^observations\s*\[[^\]]*\]\s*\.")
+
+
 def _normalize_field_token(field_name: Any) -> str:
+    """Drop the chunk-relative observation index the model prefixes onto a field.
+
+    The inspector sees a numbered chunk and writes observations[14].player.health
+    for what the contract calls player.health, so the same field arrived under a
+    different key on every trace.
+    """
+
     candidate = str(field_name or "").strip().lower()
+    candidate = _OBSERVATION_INDEX_PREFIX.sub("", candidate, count=1)
     if _PLANNER_FIELD_PATH_PATTERN.fullmatch(candidate):
         return candidate
     return _normalize_token(candidate)
@@ -1865,7 +1883,9 @@ def _anomaly_artifacts(
         emit_candidate = False
         if kind == "view_state_match":
             category = "numeric"
-            rule = "numeric-not-equal"
+            # Share the inspector's rule vocabulary so the oracle can validate its
+            # findings; a hardcoded name silently stopped matching when it changed.
+            rule = _numeric_rule("!=")
             field_name = "player_view.health_ratio"
         else:
             failure_reason = _terminal_reason(

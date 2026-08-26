@@ -293,7 +293,7 @@ def test_numeric_planner_and_inspector_findings_share_only_an_exact_structured_k
         "union": 1,
     }
     assert shared_report["candidates"][0]["category"] == "numeric"
-    assert shared_report["candidates"][0]["rule"] == "numeric-not-equal"
+    assert shared_report["candidates"][0]["rule"] == "numeric-equality"
     assert shared_report["candidates"][0]["field"] == "player.health_ratio"
 
     near_miss_record = make_record(
@@ -675,6 +675,30 @@ def test_dirty_or_required_execution_failure_makes_campaign_incomplete(
     assert manifest["status"] == "incomplete"
     assert not (settings.output / "exploration-report.json").exists()
     assert not (settings.output / "exploration-report.ko.md").exists()
+
+
+def test_field_token_drops_the_positional_observation_prefix() -> None:
+    """The model indexes the chunk it was given, so the same field arrives many ways.
+
+    24 of 27 numeric candidates in the full run carried a distinct
+    observations[N]. prefix, which split one defect into 24 keys and left
+    reproduced at zero.
+    """
+    plain = exploration._normalize_field_token("player_view.health")
+
+    assert exploration._normalize_field_token("observations[14].player_view.health") == plain
+    assert exploration._normalize_field_token("observations[3].player_view.health") == plain
+    assert exploration._normalize_field_token("observations[].player_view.health") == plain
+    assert exploration._normalize_field_token("world.threat_entities[0].distance") != plain
+
+
+def test_dual_comparisons_share_one_rule() -> None:
+    """"a == b should hold" and "a != b" are one violation stated two ways."""
+    assert exploration._numeric_rule("==") == exploration._numeric_rule("!=")
+    assert exploration._numeric_rule("<") == exploration._numeric_rule(">=")
+    assert exploration._numeric_rule(">") == exploration._numeric_rule("<=")
+    assert exploration._numeric_rule("==") != exploration._numeric_rule("<")
+    assert exploration._numeric_rule("<") != exploration._numeric_rule(">")
 
 
 def test_callable_digest_survives_a_comprehension() -> None:

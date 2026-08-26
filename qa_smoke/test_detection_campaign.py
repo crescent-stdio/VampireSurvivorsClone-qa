@@ -1931,3 +1931,60 @@ def test_replay_detects_changed_upgrade_menu_before_target_without_forcing_sync(
     assert result.replay_divergence_stage == "before_command"
     assert classified.coverage_override == "not_reached"
     assert classified.divergence_evidence["classification"] == "pre_target"
+
+
+def test_target_matching_accepts_the_dual_comparison_and_indexed_field() -> None:
+    """The PoC scored 0/3 while the inspector had the defect and the numbers right.
+
+    It wrote the invariant it expected (player_view.health == player.health) for a
+    ground truth stated as the violation (!=), and prefixed the field with the
+    chunk index it was given. Both are the same claim.
+    """
+    from qa_smoke.detection_benchmark import NumericTarget, _matches_target
+
+    target = NumericTarget(
+        field="player_view.health",
+        comparison="!=",
+        expected_value=92.0,
+        observed_value=100.0,
+        evidence_refs=("run-obs-00000007",),
+    )
+    finding = {
+        "kind": "numeric",
+        "field": "observations[8].player_view.health",
+        "comparison": "==",
+        "expected_value": 92.0,
+        "observed_value": 100.0,
+        "evidence_refs": ["run-obs-00000007"],
+    }
+
+    assert _matches_target(finding, target, {"run-obs-00000007"})
+
+
+def test_target_matching_still_rejects_a_different_field_or_value() -> None:
+    """Loosening the comparison must not turn any numeric claim into a hit."""
+    from qa_smoke.detection_benchmark import NumericTarget, _matches_target
+
+    target = NumericTarget(
+        field="player_view.health",
+        comparison="!=",
+        expected_value=92.0,
+        observed_value=100.0,
+        evidence_refs=("run-obs-00000007",),
+    )
+    base = {
+        "kind": "numeric",
+        "comparison": "==",
+        "expected_value": 92.0,
+        "observed_value": 100.0,
+        "evidence_refs": ["run-obs-00000007"],
+    }
+    refs = {"run-obs-00000007"}
+
+    assert not _matches_target({**base, "field": "player_view.exp"}, target, refs)
+    assert not _matches_target(
+        {**base, "field": "player_view.health", "observed_value": 55.0}, target, refs
+    )
+    assert not _matches_target(
+        {**base, "field": "player_view.health", "comparison": "<"}, target, refs
+    )
